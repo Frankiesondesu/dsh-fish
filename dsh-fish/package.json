@@ -1,6 +1,6 @@
 {
   "name": "dsh-fish",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "养一条会自己长大的鱼：不给配置面板，靠事件长人格。状态库在 ~/.dsh-fish，只追加不改写。",
   "type": "module",
   "main": "lib/index.js",
@@ -14,7 +14,9 @@
     "lib",
     "media",
     "cordis.patch.yml",
-    "README.md"
+    "README.md",
+    "AGENTS.md",
+    "CHANGELOG.md"
   ],
   "scripts": {
     "test": "node --test \"test/*.test.mjs\""
