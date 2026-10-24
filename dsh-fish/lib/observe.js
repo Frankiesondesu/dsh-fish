@@ -30,8 +30,7 @@ import { homeStatus } from './home.js'
 import { selfDocStatus } from './selfdoc.js'
 import { personaBudget, BELIEF_SHOWN, shownCount } from './persona.js'
 // 立场清单（2026-10-25，用户设计「纵向·立场」）：四道门走完之后长出来的那张清单。
-import { buildStances, stanceSummary } from './stance.js'
-import { capabilityOf } from './capability.js'
+import { buildStances, gatesDone, stanceSummary } from './stance.js'
 import { looksMojibake } from './guard.js'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -167,10 +166,9 @@ export function registerObserve(ctx, deps = {}) {
         // 只报数量，不报"对错"——疤是她的状态，不是她的过失。
         scarCount: m.scars?.length ?? 0,
         // 立场（纵向）：四道门走完才有；没走完是 0，不是失败。
+        // stanceReady 单独给出去，界面才能分清"还没走到那一步"和"走到了但还没站住过"。
         stanceCount: buildStances(m).length,
-        // 能力（横向）：任务数 / 返工数 / 采纳率。样本不足时 adoption 是 null，
-        // 界面上就说"还没攒够"——五个数算出来的百分比是假精确。
-        capability: capabilityOf(events),
+        stanceReady: gatesDone(m),
         // 刻意不返回 needs 数值：这是内部量，观测台也不给看（防"看数字调性格"的滑坡）
         counts: {
           utterance: events.filter((e) => e.type === 'utterance').length,
