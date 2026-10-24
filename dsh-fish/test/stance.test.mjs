@@ -143,7 +143,7 @@ test('立场三种写法：还没开始 / 走完 0 条 / 已有条数', () => {
     c.includes('要等四个阶段（信任 / 自主 / 主动 / 整合）都走完，立场才开始产生'),
     '没走完门的时候要写明「走完才开始产生」',
   )
-  assert.ok(c.includes('四个阶段都走完了，所以立场已经开始产生'), '走完门但还没站住过，是另一种写法')
+  assert.ok(c.includes("rowTip('立场', '0 条', '完成整合，但暂未形成自己的立场。')"), '走完门但还没站住过，是另一种写法')
   assert.ok(c.includes('立场是在四个阶段都走完之后才开始产生的'), '有立场时也要写清口径')
   assert.ok(!c.includes('回应采纳'), '「回应采纳」这一行已经删掉')
 })
@@ -166,4 +166,13 @@ test('原理页与原理图不再提「能力」这条线', () => {
   const svg = read('media/principle-loop.svg')
   assert.ok(!svg.includes('横向长「能力」'))
   assert.ok(svg.includes('纵向长「立场清单」'), '纵向那行保留')
+})
+
+test('原理页给「立场」单独一张卡，且不再有「从计次到能力」', () => {
+  const c = read('lib/client.js')
+  assert.ok(c.includes("theoryCard('立场：走完门才开始攒'"), '立场够格单独一张卡')
+  assert.ok(c.includes('四个阶段都走完才开始产生'))
+  assert.ok(c.includes('最多 4 条，再多就成口号墙'))
+  assert.ok(c.includes("theoryCard('从计次到复现'"), '能力已删，卡片改名')
+  assert.ok(!c.includes("'从计次到能力'"))
 })
