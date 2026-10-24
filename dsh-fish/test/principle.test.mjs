@@ -24,14 +24,15 @@ const MEMORY = join(ROOT, 'media', 'principle-memory.svg')
 const PKG = join(ROOT, 'package.json')
 
 test('两张原理图在包里，而且是完整的 svg', async () => {
-  for (const [file, must] of [
-    [LOOP, ['认知是怎么长出来的', '五步循环', '表态', '撞上', '落差', '改写', '回顾', '1 信任', '4 整合']],
-    [MEMORY, ['遗忘是怎么发生的', '记得很牢', '折叠 ≠ 删除', 'events.jsonl', 'her_recall']],
+  for (const [file, viewBox, must] of [
+    // 图一 2026-10-25 重做：立场从底部一行字改成独立区块，画布 980 → 1160
+    [LOOP, 'viewBox="0 0 1400 1160"', ['认知是怎么长出来的', '五步循环', '表态', '撞上', '落差', '改写', '回顾', '1 信任', '4 整合', '立场清单']],
+    [MEMORY, 'viewBox="0 0 1400 980"', ['遗忘是怎么发生的', '记得很牢', '折叠 ≠ 删除', 'events.jsonl', 'her_recall']],
   ]) {
     const svg = await readFile(file, 'utf8')
     assert.ok(svg.startsWith('<svg'), `${file} 必须以 <svg 开头`)
     assert.ok(svg.trimEnd().endsWith('</svg>'), `${file} 必须完整闭合`)
-    assert.ok(svg.includes('viewBox="0 0 1400 980"'), `${file} 要有固定 viewBox（大屏小屏都按比例缩）`)
+    assert.ok(svg.includes(viewBox), `${file} 要有固定 viewBox（大屏小屏都按比例缩）`)
     for (const word of must) assert.ok(svg.includes(word), `${file} 里缺少「${word}」`)
     // 裸 & 会把 SVG 变成解析错误（XML 里 & 必须转义）
     assert.ok(!/&(?!amp;|lt;|gt;|quot;|#)/.test(svg), `${file} 里有未转义的 &`)

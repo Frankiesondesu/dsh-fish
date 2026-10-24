@@ -166,7 +166,9 @@ test('原理页与原理图不再提「能力」这条线', () => {
   assert.ok(!read('lib/client.js').includes('横向那条叫能力'))
   const svg = read('media/principle-loop.svg')
   assert.ok(!svg.includes('横向长「能力」'))
-  assert.ok(svg.includes('纵向长「立场清单」'), '纵向那行保留')
+  // 2026-10-25 重做：立场不再是底部一行小字，而是图里独立的一块
+  assert.ok(svg.includes('立场清单'), '立场那一块保留')
+  assert.ok(!svg.includes('纵向长「立场清单」'), '旧的一行字写法已删')
 })
 
 test('原理页给「立场」单独一张卡，且不再有「从计次到能力」', () => {
