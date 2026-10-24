@@ -87,7 +87,7 @@ test('updateConfig 是合并而不是覆盖，且落盘后能被 loadConfig 读�
     const onDisk = JSON.parse(await readFile(join(root, 'config.json'), 'utf8'))
     assert.equal(onDisk.growthDays, 45)
   } finally {
-    await rm(root, { recursive: true, force: true })
+    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
   }
 })
 
@@ -98,7 +98,7 @@ test('配置文件不存在时返回默认值，且不主动写盘', async () =>
     assert.equal(r.fresh, true)
     await assert.rejects(readFile(join(root, 'config.json'), 'utf8'))
   } finally {
-    await rm(root, { recursive: true, force: true })
+    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
   }
 })
 

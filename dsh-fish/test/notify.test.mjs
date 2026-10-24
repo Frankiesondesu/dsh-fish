@@ -22,7 +22,7 @@ import { loadConfig, updateConfig } from '../lib/settings.js'
 
 async function fixture() {
   const root = await mkdtemp(join(tmpdir(), 'fish-notify-'))
-  return { root, done: () => rm(root, { recursive: true, force: true }) }
+  return { root, done: () => rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) }
 }
 
 /** 造一条她今天说过的话。ts 用本地时间，避免时区把它算到昨天。 */

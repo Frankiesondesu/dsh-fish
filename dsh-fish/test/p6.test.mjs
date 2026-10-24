@@ -93,7 +93,7 @@ test('风控：撞一次就冷却，且罚则逐次加长', async () => {
     assert.equal(riskState(root, new Date()).cooling, false)
     assert.equal(riskState(root, new Date()).strikes, 0)
   } finally {
-    await rm(root, { recursive: true, force: true })
+    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
   }
 })
 
@@ -128,7 +128,7 @@ test('冷却期里她照常醒，只是没东西可看——而且会被告知�
     assert.match(r.riskNote, /不太顺/)
     assert.doesNotMatch(r.riskNote, /风控|限流|-352|接口/) // 不把技术词汇丢给她
   } finally {
-    await rm(root, { recursive: true, force: true })
+    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
   }
 })
 
@@ -163,7 +163,7 @@ test('自检：正常环境全绿；缺 cookie 与缺宿主接口要如实报出
     assert.match(byId2['host'].detail, /sessionController/)
     assert.match(byId2['host'].detail, /connection/)
   } finally {
-    await rm(root, { recursive: true, force: true })
+    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
   }
 })
 
@@ -223,7 +223,7 @@ test('自检：手上的工具——以 tools.restrict 的真实结果为准，�
     assert.match(tbad.detail, /scoped context/)
     assert.ok(tbad.fix, '要给下一步，不能只说坏了')
   } finally {
-    await rm(root, { recursive: true, force: true })
+    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
   }
 })
 
@@ -242,7 +242,7 @@ test('自检：状态库写不进去要报出来，而不是等到她什么都�
     assert.equal(st.ok, false)
     assert.ok(st.fix.length > 0)
   } finally {
-    await rm(root, { recursive: true, force: true })
+    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
   }
 })
 

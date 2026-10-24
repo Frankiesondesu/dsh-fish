@@ -114,7 +114,7 @@ test('saveOwner 落盘 0600，且只存白名单里的键', async () => {
     // Windows 上 chmod 只影响只读位，允许 0o600 或 0o666 两种结果，但绝不能是 0o644 之外的"谁都能读"语义
     assert.ok((st.mode & 0o777) === 0o600 || (st.mode & 0o777) === 0o666, `mode=${(st.mode & 0o777).toString(8)}`)
   } finally {
-    await rm(root, { recursive: true, force: true })
+    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
   }
 })
 
@@ -127,7 +127,7 @@ test('saveOwner 传空 cookie 是「清除」，不是「没传」', async () =>
     const ow = await readOwner(root)
     assert.equal(ow.cookie, undefined)
   } finally {
-    await rm(root, { recursive: true, force: true })
+    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
   }
 })
 
@@ -184,7 +184,7 @@ test('/owner 路由：GET 只回「有没有 cookie」+ 引导文案，不回原
     assert.ok(String(r.body.hint).includes('F12'), '要给出怎么拿 cookie')
     assert.equal(JSON.stringify(r.body).includes('s1'), false, 'cookie 原文不许出现在响应里')
   } finally {
-    await rm(root, { recursive: true, force: true })
+    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
   }
 })
 
@@ -200,6 +200,6 @@ test('/owner 路由：POST 能存 uid 与昵称', async () => {
     assert.equal(ow.mid, '777')
     assert.equal(ow.nickname, '主人')
   } finally {
-    await rm(root, { recursive: true, force: true })
+    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
   }
 })

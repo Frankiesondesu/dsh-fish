@@ -94,7 +94,7 @@ test('信箱只挑她的话，不把记账与系统事件算进去', async () =>
     // 默认口径（2026-10-24 用户定）：信箱只放特意留给人的信，平常的话不进列表。
     const lettersOnly = await readInbox(root)
     assert.equal(lettersOnly.total, 0, '默认只放留话')
-  } finally { await rm(root, { recursive: true, force: true }) }
+  } finally { await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) }
 })
 
 test('未读按位置算：第一次全未读，标记后归零', async () => {
@@ -115,7 +115,7 @@ test('未读按位置算：第一次全未读，标记后归零', async () => {
     assert.equal(box.rows[0].text, '第二句。', '最新的在最前')
     assert.equal(box.rows[0].unread, true)
     assert.equal(box.rows[1].unread, false, '旧的仍是已读')
-  } finally { await rm(root, { recursive: true, force: true }) }
+  } finally { await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) }
 })
 
 test('未读不靠时间戳：把 ts 改成乱序也不会错判', async () => {
@@ -132,7 +132,7 @@ test('未读不靠时间戳：把 ts 改成乱序也不会错判', async () => {
     )
     assert.equal(box.unread, 0, '两条都在"读到过的最后一条"之前')
     assert.equal(box.rows[0].id, b.id, '顺序按事件流位置，不按 ts')
-  } finally { await rm(root, { recursive: true, force: true }) }
+  } finally { await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) }
 })
 
 test('inbox.md 落盘：有内容时是纯文本引用块，没内容时给一句起点说明', async () => {
@@ -152,7 +152,7 @@ test('inbox.md 落盘：有内容时是纯文本引用块，没内容时给一�
     assert.match(t2, /> 我看不懂他为什么还在。/)
     assert.match(t2, /未读 1 封/)
     assert.match(t2, /这里只有特意留给你的/)
-  } finally { await rm(root, { recursive: true, force: true }) }
+  } finally { await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) }
 })
 
 test('newHerEventsSince 只认她写的那几类', async () => {
@@ -167,7 +167,7 @@ test('newHerEventsSince 只认她写的那几类', async () => {
     const fresh = newHerEventsSince(after.events, mark)
     assert.equal(fresh.length, 1)
     assert.equal(fresh[0].text, '新的。')
-  } finally { await rm(root, { recursive: true, force: true }) }
+  } finally { await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) }
 })
 
 /**
@@ -219,7 +219,7 @@ test('说一句话：落 seen 标记（唤醒窗外才算他来过），并带�
     assert.notEqual(placed[0].cwd, root)
     // 用的是屋子里那个会话，不是按天新建的游离会话（2026-10-24 改）
     assert.equal(placed[0].sessionId, 's-house')
-  } finally { await rm(root, { recursive: true, force: true }) }
+  } finally { await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) }
 })
 
 test('她正在醒着时你说话，仍然算你来了（say 不看唤醒窗）', async () => {
@@ -241,7 +241,7 @@ test('她正在醒着时你说话，仍然算你来了（say 不看唤醒窗）'
     const { events } = await readEvents(root)
     const seen = events.filter((e) => e.type === 'meta' && String(e.text).startsWith('seen:'))
     assert.equal(seen.length, 1, '人说的话一定算他来过，与唤醒窗无关')
-  } finally { await rm(root, { recursive: true, force: true }) }
+  } finally { await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) }
 })
 
 test('她一言不发也不算失败：ok 但带一句说明', async () => {
@@ -259,7 +259,7 @@ test('她一言不发也不算失败：ok 但带一句说明', async () => {
     // 她没开口，但他说了话——seen 仍然要有（他来过这件事不以她回不回为前提）
     const { events } = await readEvents(root)
     assert.equal(events.filter((e) => String(e.text).startsWith('seen:')).length, 1)
-  } finally { await rm(root, { recursive: true, force: true }) }
+  } finally { await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) }
 })
 
 test('空话与超长话都被挡在门外，不会投进会话', async () => {
@@ -271,7 +271,7 @@ test('空话与超长话都被挡在门外，不会投进会话', async () => {
     const b = await sayToHer(ctx, 'x'.repeat(4001), { root })
     assert.equal(b.ok, false)
     assert.equal(ctx.calls.length, 0, '不该建会话也不该 prompt')
-  } finally { await rm(root, { recursive: true, force: true }) }
+  } finally { await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) }
 })
 
 test('没有 sessionController 时明确说"说不了"，不是静默失败', async () => {
@@ -280,7 +280,7 @@ test('没有 sessionController 时明确说"说不了"，不是静默失败', as
     const r = await sayToHer({}, '在吗', { root })
     assert.equal(r.ok, false)
     assert.match(r.note, /说不了/)
-  } finally { await rm(root, { recursive: true, force: true }) }
+  } finally { await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) }
 })
 
 test('拿不到屋子时不建游离会话——宁可这句递不出去，也不在侧栏堆「未分组」', async () => {
@@ -301,7 +301,7 @@ test('拿不到屋子时不建游离会话——宁可这句递不出去，也�
       '不该建任何会话（尤其是没有 workspaceId 的那种）',
     )
     assert.equal(ctx.calls.filter((c) => c.op === 'prompt').length, 0, '也不该往会话里塞话')
-  } finally { await rm(root, { recursive: true, force: true }) }
+  } finally { await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) }
 })
 
 test('对话不改写日记、不生成报告文件（说话就是说话）', async () => {
@@ -315,5 +315,5 @@ test('对话不改写日记、不生成报告文件（说话就是说话）', as
     assert.equal(await readDaily('diaryDir', dk, root), null, '对话不该顺手写日记')
     const { events } = await readEvents(root)
     assert.equal(events.some((e) => String(e.text).startsWith('wake:')), false, '对话不是唤醒，不记 wake 配额')
-  } finally { await rm(root, { recursive: true, force: true }) }
+  } finally { await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) }
 })

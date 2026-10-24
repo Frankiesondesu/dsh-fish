@@ -69,7 +69,7 @@ test('不在上网时段时，一次 B 站接口都不发', async () => {
     assert.deepEqual(out, { text: '', intro: '', picks: [] })
     assert.deepEqual(calls, [], '时段外不该碰任何接口')
   } finally {
-    await rm(root, { recursive: true, force: true })
+    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
   }
 })
 
@@ -88,7 +88,7 @@ test('在上网时段内会真的去取素材（证明闸门不是永远关着�
     }, () => {})
     assert.ok(calls.length > 0, '时段内应该走进去')
   } finally {
-    await rm(root, { recursive: true, force: true })
+    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
   }
 })
 
@@ -157,7 +157,7 @@ test('/config 白名单收下观测台提交的全部环境键（含 chat 与 me
     assert.equal(payload.config.chat.rotateAfter, 30)
     assert.equal(payload.config.memory.docBudget, 1500)
   } finally {
-    await rm(root, { recursive: true, force: true })
+    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
   }
 })
 
@@ -180,7 +180,7 @@ test('白名单仍然挡得住"指向她本人"的键', async () => {
     await route.handler(req, res)
     assert.equal(status, 400)
   } finally {
-    await rm(root, { recursive: true, force: true })
+    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
   }
 })
 

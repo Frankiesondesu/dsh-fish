@@ -18,7 +18,10 @@ async function withRoot(fn) {
   try {
     return await fn(root)
   } finally {
-    await rm(root, { recursive: true, force: true })
+    // Windows 上插件里的定时器/写盘可能在用例结束的瞬间还没收尾，直接 rm 会
+    // 撞 ENOTEMPTY（CI 的 windows-latest 就是这么红的）。maxRetries 让 Node 在
+    // EBUSY / ENOTEMPTY / EPERM 上线性退避重试，断言本身一条没放松。
+    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
   }
 }
 
