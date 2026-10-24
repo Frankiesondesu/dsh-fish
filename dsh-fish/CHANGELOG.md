@@ -33,6 +33,9 @@
 ### 工程
 
 - 新增 **GitHub Actions**（`.github/workflows/test.yml`）：Linux 上 Node 20 / 22 / 24 三个版本各跑一遍全套测试，另有一个 Windows + Node 22 的作业（路径归一化、chmod 语义、ffmpeg 探测在这边和 Linux 不一样）。push 与 PR 都跑。首次推送需要在 GitHub 上给 token/push 开 `workflow` 权限，否则会被拒。
+- **测试脚本改成 `node --test`（不带参数）。** 原来写的 `node --test "test/*.test.mjs"` 只在 Node 22+ 能用——Node 20 不展开引号里的通配符，直接报 `Could not find '.../test/*.test.mjs'`，CI 的 Node 20 作业就是被这条拖红的。`node --test test/`（目录形式）在 Node 26 + Windows 下又报 `MODULE_NOT_FOUND`，也不能用。不带参数是三种 Node 版本、三个平台都认的唯一写法。
+- CI 暴露并修掉的两个跨平台 bug：`lib/capture.js` 的日记返回值原来把绝对路径（`diary/xxx.md`）带回给她，Windows 上分隔符是 `\` 所以测试侥幸通过、Linux 上直接命中隐私断言——改为只回日期键；`lib/say.js` 的 `waitTurnEnd` 在没有事件总线时把唯一的定时器 `unref` 了，Node 20/22 上事件循环提前收尾、Promise 永远等不到 resolve（含 `test/notify.test.mjs` 用 `Z:/` 造坏路径、在 Linux 上变成相对路径的跨平台问题）。
+- `actions/checkout` / `actions/setup-node` 从 v4 升到 **v5**（v4 会触发 Node 20 弃用告警）。
 - 删掉遗留的 `main-old` 分支（已被 `main` 整条取代，删前把它的顶端打成 `archive-main-old` 标签留着，需要时还能翻回来）。
 - `package.json` 0.2.0 → 0.3.0，`files` 补进 `AGENTS.md` 与 `CHANGELOG.md`；`lib/index.js` 的 `VERSION` 从 0.1.0 一并升到 0.3.0（这个号写进启动日志，排查时第一件事就是看它）。
 

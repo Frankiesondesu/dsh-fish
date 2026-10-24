@@ -191,7 +191,7 @@ test/           557 个测试，node --test 全绿
 ## 跑测试
 
 ```bash
-node --test "test/*.test.mjs"   # 在插件目录里跑
+node --test                     # 在插件目录里跑（不带参数，Node 自己找 test/*.test.mjs）
 ```
 
 不需要装任何依赖：工具注册直接交标准 JSON Schema（`lib/tool.js`），不依赖宿主内部的 `@deepseek-ai/dsh-tools`——那条路只在 `link:` 安装时碰巧走通，npm 安装的插件会因为找到那个包而报 `unsupported JSON schema`，6 个工具全部注册失败。这个 bug 是被一个干净 profile 装出来的，本机用了两个月都没发现。

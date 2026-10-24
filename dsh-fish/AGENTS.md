@@ -60,15 +60,17 @@
 ## 6. 改完必须跑全套测试
 
 ```bash
-node --test "test/*.test.mjs"
+node --test
 ```
 
 当前基线 **557 个，全绿**。任何一条红都不许提交——包括看起来"不是我弄的"那条。
 
 按环境挑跑法：
 
-- **正常环境**：上面这条命令，约 17–18 秒。
-- **沙箱 / 受限环境**：`node --test test/`（目录形式）会 `spawn EPERM`，因为这个命令本身要 spawn 子进程。改用上面的 glob 形式，或 `node --test --test-isolation=none test/*.test.mjs`。
+- **正常环境**：上面这条命令（不带参数，Node 自己递归找 `test/*.test.mjs`），约 17–18 秒。
+- **别写成 `node --test "test/*.test.mjs"`**：Node 20 不展开 glob，会直接报 `Could not find '.../test/*.test.mjs'`；引号里的通配符只有 Node 22+ 认。CI 就是被这条拖红的。
+- **也别写成 `node --test test/`**（目录形式）：Node 26 + Windows 下报 `MODULE_NOT_FOUND`，沙箱里还会 `spawn EPERM`。
+- **沙箱 / 受限环境**：用 `node --test --test-isolation=none`，或逐文件跑。
 - **`--test-isolation=none` 有跨文件假红**：ULID 与 cover 两条会因共享进程互相干扰而报错，单跑对应文件是绿的。判断是不是假红：逐文件独立进程跑一遍，全绿即假红。
 - **`test/media.test.mjs` 的 `detectFfmpeg` 依赖 spawn**，在禁 spawn 的环境里会红（`spawnSync ... EPERM`）。这是环境限制，不是代码问题——但**不许**为了让它变绿而删掉那条断言。
 
@@ -81,6 +83,6 @@ CI 也跑同一套（`.github/workflows/test.yml`，Node 20 / 22 / 24 各跑一�
 - [ ] 三个依赖字段还是 `{}`
 - [ ] 没有新增人格设置入口
 - [ ] 新输入口都过了 `guard.js`
-- [ ] `node --test "test/*.test.mjs"` 557 全绿
+- [ ] `node --test` 557 全绿
 - [ ] 界面文案没有「他」「四道门」「三道门」
 - [ ] 改了 `EVENT_SCHEMA_VERSION` 的话，`CHANGELOG.md` 里写了迁移说明
