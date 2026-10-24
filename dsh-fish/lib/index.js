@@ -31,7 +31,7 @@ import { logBoot, makeLogger } from './log.js'
 export const name = 'dsh-fish'
 
 /** 版本号：只用于日志导出（排查时第一件事是确认跑的是哪一版）。 */
-export const VERSION = '0.1.0'
+export const VERSION = '0.3.0'
 
 // ⚠️ 一个数组写全，不要拆成对象
 export const inject = ['sessionController', 'tools', 'webServer', 'connection']
