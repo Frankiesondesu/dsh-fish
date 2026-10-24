@@ -138,9 +138,12 @@ export function registerCapture(ctx, deps = {}) {
               { day: model.day, stage: model.stage, source: 'system' },
               root,
             )
-            // 注意：返回值只说"写下了"，不说写给谁看、写在哪 —— 她无从得知可见性
+            // 注意：返回值只说"写下了"，不说写给谁看、写在哪 —— 她无从得知可见性。
+            // id 用日期键而不是 `file`：`file` 是绝对路径，会把 diary/ 目录名和
+            // ~/.dsh-fish 一起带回给她。以前只在本机（Windows 用反斜杠）碰巧没露，
+            // Linux 上 `diary/xxx.md` 直接命中测试的泄漏检查。
             await refreshSelfDoc(root).catch(() => {})
-            return { ok: true, id: file, note: '写下了。' }
+            return { ok: true, id: dk, note: '写下了。' }
           }
 
           const ev = await appendEvent(
