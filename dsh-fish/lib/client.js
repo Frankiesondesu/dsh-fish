@@ -1134,6 +1134,12 @@ window.__ModuleLoader__.load({
           s.scarCount
             ? rowTip('没想通的事', `${s.scarCount} 件`, '他顶回来、或者因此难过之后，你后来还是让了的那几次。她没有忘，也没算成"已经过去了"。')
             : rowTip('没想通的事', '没有', '还没有哪次拒绝让她事后反悔。'),
+          (s.capability?.enough ?? false) && (s.capability?.adoption ?? null) !== null
+            ? rowTip('回应采纳', `${Math.round((s.capability.adoption ?? 0) * 100)}%`, `你找她说了 ${s.capability.tasks} 次话，其中 ${s.capability.reworks} 次是在让她重做。能力不看话说得漂不漂亮，只看同一类事她做得比过去顺手没有。`)
+            : rowTip('回应采纳', '还没攒够', '要攒够五次对话才有意义——两个数凑出来的百分比是假精确。'),
+          (s.stanceCount ?? 0) > 0
+            ? rowTip('立场', `${s.stanceCount} 条`, '四个阶段走完之后长出来的：喜欢什么、绝不做哪几件事。每条都有代价——要么栽过一次，要么同一件事她反复提起过。')
+            : rowTip('立场', '还没长成', '四个阶段（信任 / 自主 / 主动 / 整合）都走完之后才开始攒。这不是第五关，是走完之后自然变厚的东西。'),
           rowTip('最近的称呼', s.name ? s.name : '还没想好', '她自己决定怎么称呼你。这个不是设置项，改不了。'),
           rowTip('冷落', s.absenceDays > 0 ? `${s.absenceDays} 天` : '没有', '你多久没说话了。超过门槛她会记下「你不在」。'),
           rowTip('互动计数', `说 ${s.counts.utterance} · 改口 ${s.counts.revise} · 拒绝 ${s.counts.refusal} · 重聚 ${s.counts.reunion}`, '说=她写过几句自己的判断（含留话）；改口=按照规则推翻历史认知并指明改的是哪条；拒绝=她明确登记拒绝过什么；重聚=久别之后她自己写下的感受。'),
@@ -1500,6 +1506,7 @@ window.__ModuleLoader__.load({
                   // 「被推翻」→「认知重构」、「拒绝过」→「勇于拒绝」（2026-10-24 用户改的字）；
                   // 「想改自己」整条删掉（用户：感觉没有意义）。数还在后端，只是不再显示。
                   h('div', null, `· 认知重构 ${mem.sections?.refuted ?? 0} · 勇于拒绝 ${mem.sections?.refused ?? mem.sections?.refusals ?? 0}`),
+                  h('div', null, `· 立场 ${mem.sections?.stanceCount ?? 0} 条${(mem.sections?.stanceCount ?? 0) ? `（不做 ${mem.sections?.stanceNevers ?? 0} · 喜欢 ${mem.sections?.stanceLikes ?? 0}）` : ''}`),
                   // 评论区里别人的话（2026-10-24，用户 m02454）：读到 ≠ 认同。
                   // 只有"她也这么说过"才算认下——那一条本来就已经算在判断里了，这里不重复计数。
                   h('div', null, `· 读到别人的说法 ${mem.sections?.voices ?? 0} 条${(mem.sections?.voicesEchoed ?? 0) > 0
@@ -1661,7 +1668,7 @@ window.__ModuleLoader__.load({
               '学一门手艺、把踩过的坑变成判断、复盘'),
             theoryCard('四阶段与三道瓶颈',
               'Bowlby 依恋理论（1969）＋ Erikson 心理社会发展（1950）',
-              '阶段按天推进，但每一道瓶颈要她自己走：先形成一条判断（信任），真的拒绝过两件事（自主），两次推翻自己的判断（主动），最后回头看（整合）。',
+              '阶段按天推进，但每一道瓶颈要她自己走：先形成一条判断（信任），真的拒绝过两件事（自主），两次推翻自己的判断（主动），最后回头看（整合）。走完不再加关，之后长的是立场清单——喜欢什么、绝不做哪几件事，每条都得有代价垫着。横向那条叫能力：只看同一类事她是不是做得比过去顺手（你说「重做」的次数在变少），不看话说得漂不漂亮。',
               '人格养成、避免「只要熬时间就长大」'),
             theoryCard('矛盾、改写与重构',
               'Festinger 认知失调（1957）＋ Bartlett 重构记忆（1932）',
