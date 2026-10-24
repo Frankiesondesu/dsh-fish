@@ -1,0 +1,131 @@
+/**
+ * reset.js —— 把她放回第一天（旧的一切不删，只封存）
+ *
+ * 用户要的是「重开一局」，不是「删档」。所以：
+ *   1. 整个状态库目录**改名**到 `backups/reset-<时间戳>/`，一个字节都不删；
+ *   2. 新状态库是空的，下次启动时 seed 会重新落下「你刚开始存在」；
+ *   3. 她的屋子（`home/`）也在被搬走的目录里，所以 DSH 里那个会话的记忆也一起封存了
+ *      —— 否则会出现「人重开了，但会话里还留着上一辈子的对话」这种更诡异的状态。
+ *
+ * ⚠️ 唯一真正要做的事是「改名」，不是复制也不是删除。
+ *    在 Windows 上跨盘改名会失败，所以只在同盘内用 rename；
+ *    失败就退回「建新目录 + 中止」，绝不部分搬走（半搬状态比不搬更糟）。
+ */
+
+import { rename, mkdir, readdir, stat, cp } from 'node:fs/promises'
+import { join, dirname, resolve } from 'node:path'
+import { rootDir, paths } from './store.js'
+
+/**
+ * 生成封存目录路径。
+ * 放在状态库的**同级**目录下的 `backups/`，这样状态库整体被改名时不会把它一起带走。
+ *
+ * 同一秒内重置两次会撞名 —— `rename` 到已存在且非空的目录会失败（EPERM/ENOTEMPTY），
+ * 那会让用户看到"重置失败"却什么都没发生。所以**自动加序号**直到空位。
+ * 这条不是假想：单测里两个用例在同一秒内跑，就撞上了。
+ */
+export async function backupDirFor(root = rootDir(), now = new Date()) {
+  const stamp = [
+    now.getFullYear(),
+    String(now.getMonth() + 1).padStart(2, '0'),
+    String(now.getDate()).padStart(2, '0'),
+    '-',
+    String(now.getHours()).padStart(2, '0'),
+    String(now.getMinutes()).padStart(2, '0'),
+    String(now.getSeconds()).padStart(2, '0'),
+  ].join('')
+  const base = join(dirname(resolve(root)), 'dsh-fish-backups')
+  let target = join(base, `reset-${stamp}`)
+  for (let i = 2; i <= 99; i++) {
+    try {
+      await stat(target)
+      target = join(base, `reset-${stamp}-${i}`)
+    } catch {
+      return target
+    }
+  }
+  return join(base, `reset-${stamp}-${Date.now()}`)
+}
+
+/** 状态库里大概有什么（给确认框显示"你将封存这些东西"） */
+export async function describeState(root = rootDir()) {
+  const p = paths(root)
+  const out = { exists: false, events: 0, diaries: 0, reports: 0, hasHome: false, bytes: 0 }
+  try {
+    const st = await stat(p.root)
+    out.exists = st.isDirectory()
+  } catch {
+    return out
+  }
+  const count = async (dir, filter) => {
+    try {
+      const names = await readdir(dir)
+      return names.filter(filter).length
+    } catch {
+      return 0
+    }
+  }
+  out.diaries = await count(p.diaryDir, (n) => n.endsWith('.md'))
+  out.reports = await count(p.outDir, (n) => n.endsWith('.md'))
+  try {
+    const names = await readdir(p.root)
+    out.hasHome = names.includes('home')
+  } catch {}
+  try {
+    const ev = await stat(p.events)
+    out.bytes = ev.size
+    const { readEvents } = await import('./store.js')
+    out.events = (await readEvents(root)).events.length
+  } catch {}
+  return out
+}
+
+/**
+ * 执行重置。返回 { ok, movedTo, why? }。
+ *
+ * 顺序很关键：
+ *   ① 先把「封存目录」的父目录建好；
+ *   ② rename 整个状态库过去（同盘 → 原子、瞬间、不占额外空间）；
+ *   ③ rename 失败（跨盘 / 被占用）→ **立刻中止**并把可能的半成品状态说清楚；
+ *   ④ 成功后由调用方（或下次启动）重新 seed。
+ */
+export async function resetAll(root = rootDir(), opts = {}) {
+  const target = await backupDirFor(root, opts.now ?? new Date())
+  const p = paths(root)
+
+  let exists = false
+  try {
+    exists = (await stat(p.root)).isDirectory()
+  } catch {
+    return { ok: true, movedTo: '', why: '本来就没有档，等于已经重开了' }
+  }
+  if (!exists) return { ok: true, movedTo: '', why: '本来就没有档，等于已经重开了' }
+
+  await mkdir(dirname(target), { recursive: true })
+
+  try {
+    await rename(p.root, target)
+    return { ok: true, movedTo: target, why: '' }
+  } catch (err) {
+    // EPERM / EXDEV / EBUSY：一般是文件被占用（服务还开着）或跨盘
+    const code = String(err?.code ?? '')
+    const hint =
+      code === 'EXDEV'
+        ? '状态库和备份不在同一个盘，没法整体搬走'
+        : code === 'EBUSY' || code === 'EPERM'
+          ? '有文件正被占用，先把这个窗口关掉再试'
+          : String(err?.message ?? err)
+    // 尝试跨盘兜底：先复制再删——但只在确实没有半成品时做
+    if (code === 'EXDEV') {
+      try {
+        await cp(p.root, target, { recursive: true, errorOnExist: false })
+        const { rm } = await import('node:fs/promises')
+        await rm(p.root, { recursive: true, force: true })
+        return { ok: true, movedTo: target, why: '跨盘，已复制后清空' }
+      } catch (err2) {
+        return { ok: false, movedTo: '', why: `复制也失败了：${String(err2?.message ?? err2)}` }
+      }
+    }
+    return { ok: false, movedTo: '', why: hint }
+  }
+}

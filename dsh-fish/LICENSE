@@ -1,0 +1,29 @@
+MIT License
+
+Copyright (c) 2026 大肥鱼（dsh-fish）作者
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+---
+
+第三方来源与致谢
+
+本项目早期骨架派生自 DeepSeek Harness 的 `video-watch` 示例插件（上游版权归其原作者，按 MIT 许可使用）。此后 `lib/` 下的实现已重写：事件流、四道成长瓶颈、记忆显著性与固化、拒绝与疤、事件卡与节奏缩放等，均为本项目新增。若上游另有版权声明文件，请以该文件为准并保留。
+
+插件不内置任何人物形象、头像或表情包：头像由用户自行上传（存在 `~/.dsh-fish/avatar.<ext>`），仓库里没有第三方美术资源。

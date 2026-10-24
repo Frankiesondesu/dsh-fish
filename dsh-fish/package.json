@@ -1,0 +1,51 @@
+{
+  "name": "dsh-fish",
+  "version": "0.1.0",
+  "description": "养一条会自己长大的鱼：不给配置面板，靠事件长人格。状态库在 ~/.dsh-fish，只追加不改写。",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "LICENSE",
+    "lib",
+    "media",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node --test \"test/*.test.mjs\""
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": []
+    }
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "agent",
+    "pet"
+  ],
+  "author": "ssamurias",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ssamurias/dsh-fish.git"
+  },
+  "homepage": "https://github.com/ssamurias/dsh-fish#readme",
+  "bugs": {
+    "url": "https://github.com/ssamurias/dsh-fish/issues"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
