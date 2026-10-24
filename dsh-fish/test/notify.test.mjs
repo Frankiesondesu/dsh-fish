@@ -12,7 +12,7 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -165,9 +165,18 @@ test('markShown 记下今天，之后同一天不再 due', async () => {
 })
 
 test('回写失败不抛：最多明天少提醒一次', async () => {
-  const r = await markShown('Z:/不存在的盘/fish-notify', '2026-10-23')
-  assert.equal(r.ok, false)
-  assert.equal(r.lastShown, '')
+  // 造一个"一定写不进去"的 root：先建一个普通文件，再把它当目录用。
+  // 以前写的是 'Z:/不存在的盘/…'，那只是 Windows 上的坏盘符；在 Linux/macOS
+  // 上它是个相对路径，mkdir -p 会就地建出来，于是写入成功、断言反了。
+  // 拿文件当父目录在两种平台上都会 ENOTDIR，才是真的"写不进去"。
+  const dir = await mkdtemp(join(tmpdir(), 'fish-notify-bad-'))
+  try {
+    const blocker = join(dir, 'blocker')
+    await writeFile(blocker, 'x')
+    const r = await markShown(join(blocker, 'fish-notify'), '2026-10-23')
+    assert.equal(r.ok, false)
+    assert.equal(r.lastShown, '')
+  } finally { await rm(dir, { recursive: true, force: true }) }
 })
 
 test('不再有任何子进程路径：原 PowerShell 方案已删除', async () => {
