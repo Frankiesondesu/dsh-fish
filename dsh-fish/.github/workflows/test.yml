@@ -1,0 +1,47 @@
+name: test
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+        node: ['20', '22', '24']
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      # 这个项目零依赖，没有 install 步骤——少一步就少一处会因为 lockfile 漂移而失败。
+      - name: 确认零依赖
+        run: node -e "const p=require('./package.json');for(const k of ['dependencies','devDependencies','peerDependencies'])if(p[k]&&Object.keys(p[k]).length)throw new Error(k+' 不是空的');console.log('零依赖 OK')"
+
+      - name: 跑测试
+        run: npm test
+
+  # Windows 单独跑一轮：路径归一化、chmod 语义、ffmpeg 探测在这边和 Linux 不一样，
+  # 而这些正是这个插件最容易出问题的地方。
+  test-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: 跑测试
+        run: npm test
+        shell: bash
