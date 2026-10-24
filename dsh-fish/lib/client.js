@@ -1138,7 +1138,7 @@ window.__ModuleLoader__.load({
             ? rowTip('立场', `${s.stanceCount} 条`, '立场是在四个阶段都走完之后才开始产生的：喜欢什么、绝不做哪几件事。每条都有代价——要么栽过一次，要么同一件事她反复提起过。')
             : s.stanceReady
               ? rowTip('立场', '0 条', '完成整合，但暂未形成自己的立场。')
-              : rowTip('立场', '还没开始', '要等四个阶段（信任 / 自主 / 主动 / 整合）都走完，立场才开始产生。它不是第五关，是走完之后自然长出来的东西。'),
+              : rowTip('立场', '还没开始', '要等四个阶段（信任 / 自主 / 主动 / 整合）都走完，立场才开始产生。'),
           rowTip('最近的称呼', s.name ? s.name : '还没想好', '她自己决定怎么称呼你。这个不是设置项，改不了。'),
           rowTip('冷落', s.absenceDays > 0 ? `${s.absenceDays} 天` : '没有', '你多久没说话了。超过门槛她会记下「你不在」。'),
           rowTip('互动计数', `说 ${s.counts.utterance} · 改口 ${s.counts.revise} · 拒绝 ${s.counts.refusal} · 重聚 ${s.counts.reunion}`, '说=她写过几句自己的判断（含留话）；改口=按照规则推翻历史认知并指明改的是哪条；拒绝=她明确登记拒绝过什么；重聚=久别之后她自己写下的感受。'),
@@ -1582,7 +1582,8 @@ window.__ModuleLoader__.load({
             alt,
             style: { width: '100%', display: 'block', borderRadius: '10px', border: '0.5px solid var(--dsw-alias-border-l2)' },
           })),
-        h('figcaption', { className: 'hint', style: { margin: '6px 0 0' } }, caption))
+        // 图注与图之间留够距离（2026-10-25 用户反馈：图和说明文字挤在一起、看着像重叠）
+        h('figcaption', { className: 'hint', style: { margin: '12px 0 0' } }, caption))
 
       // 放大层：fixed 铺满视口，拖的时候不选中文字；点空白处关闭，但拖完那一下不算点击。
       const zoomOverlay = zoom ? h('div', {
@@ -1654,7 +1655,7 @@ window.__ModuleLoader__.load({
         groupFull('两张图看懂她怎么长大',
           '第一张讲「经历怎么变成认知」，第二张讲「记忆怎么被筛、哪些永远不折叠」。图小的时候点一下放大，按住可以拖动，滚轮缩放，Esc 关掉。',
           zoomable(`${API}/media/principle-loop.svg`, '认知构建循环：五步循环、四阶段与三道瓶颈',
-            '图一：表态 → 撞上 → 落差 → 改写 → 回顾。左边是她每天会撞上的事，右边是循环结束后留下的东西，底部是四个阶段与三道成长瓶颈', '0 0 18px'),
+            '图一：表态 → 撞上 → 落差 → 改写 → 回顾。左边是她每天会撞上的事，右边是循环结束后留下的东西，底部是四个阶段与三道成长瓶颈，最后一块是走完才长出来的立场清单', '0 0 18px'),
           zoomable(`${API}/media/principle-memory.svg`, '遗忘与固化：显著性排序、折叠、永久记忆',
             '图二：先按显著性排序，再按身份文档的预算摆放；摆不下的一行带过，但原文一条没丢，她自己还能调用查询。', 0)),
 
