@@ -105,6 +105,11 @@ window.__ModuleLoader__.load({
       '.dfish .savebar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding-top:4px}',
       '.dfish button.primary{background:var(--dsw-alias-brand-primary);border-color:var(--dsw-alias-brand-primary);color:#fff}',
       '.dfish button.primary:hover:not(:disabled){opacity:.9;color:#fff}',
+      // GitHub 链接（2026-10-25 用户要求）：商标小图 + 文字，点开新窗口。
+      // 用 inline-flex 让 icon 和文字基线对齐；hover 只换颜色不动位置。
+      '.dfish .ghlink{display:inline-flex;align-items:center;gap:6px;font-size:13px;line-height:20px;color:var(--dsw-alias-label-primary);text-decoration:none;border-radius:6px;padding:2px 4px;margin-left:-4px}',
+      '.dfish .ghlink:hover{color:var(--dsw-alias-brand-primary);background:rgba(128,128,128,.1)}',
+      '.dfish .ghlink svg{flex:0 0 auto}',
     ].join('\n')
 
     function useStyleOnce() {
@@ -283,6 +288,10 @@ window.__ModuleLoader__.load({
       const [replyChars, setReplyChars] = useState(0)
       // B 站登录提示卡：他点过「不用了」就别再出现（存进 config.ui）
       const [uiHintDismissed, setUiHintDismissed] = useState(false)
+      // 检查更新（2026-10-25 用户要求）：null=还没查过，{...}=查过。
+      // 只有点按钮才查，不自动轮询——她运行期不该操心自己是几号版本。
+      const [upd, setUpd] = useState(null)
+      const [updBusy, setUpdBusy] = useState(false)
 
       useEffect(() => {
         if (!zoom) return undefined
@@ -1724,8 +1733,78 @@ window.__ModuleLoader__.load({
         zoomOverlay)
 
       // ---------------------------- 插件 ----------------------------
+      // 检查更新（2026-10-25 用户要求）：从 GitHub 装回来之后，没有任何东西
+      // 会告诉用户作者又发了新版——所以这里放一颗手动按钮，点了才查。
+      // 查的动作在服务端 /update（地址硬编码），客户端只负责显示。
+      const checkUpdate = async () => {
+        setUpdBusy(true)
+        try {
+          const r = await jget('/update?ms=8000')
+          setUpd(r)
+        } catch (e) {
+          setUpd({ ok: false, error: e.message })
+        } finally {
+          setUpdBusy(false)
+        }
+      }
+
+      const curVer = s?.meta?.version || ''
+      // GitHub 商标小图（官方 mark 的官方路径，16×16 视觉尺寸）。
+      // 为什么内联而不是引外链：设置页不该为了一个图标去等网络，
+      // 而且插件里引远程图 = 用户一打开设置就往外发请求。
+      const ghMark = h('svg', {
+        width: '16', height: '16', viewBox: '0 0 16 16', 'aria-hidden': 'true',
+        style: { marginRight: '6px', verticalAlign: '-3px', flex: '0 0 auto' },
+      },
+        h('path', {
+          fill: 'currentColor',
+          d: 'M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z',
+        }))
+
+      const aboutCard = group('关于',
+        '这个插件是从 GitHub 装的，装完之后没有东西会提醒你作者又发了新版——想查就点一下。',
+        h('div', null,
+          rowTip('当前版本', curVer || '读不到',
+            '插件自己记的版本号，和 GitHub 上 tag 对应的那个。'),
+          h('div', { style: { display: 'flex', gap: '10px', alignItems: 'center', flexWrap: 'wrap', marginTop: '10px' } },
+            h('button', { disabled: updBusy, onClick: checkUpdate },
+              updBusy ? '正在查……' : '检查更新'),
+            upd && upd.ok && upd.hasUpdate
+              ? h('a', {
+                  href: upd.url || 'https://github.com/ssamurias/dsh-fish/releases',
+                  target: '_blank', rel: 'noopener noreferrer', className: 'ghlink',
+                }, `有新版本 ${upd.latest}，去下载`)
+              : null),
+          // 结果只写一句人话。失败不吓人：国内 GitHub 时通时不通是常态。
+          // 第三种情况单独处理：查到了最新版、但读不到自己装的是哪版——
+          // 这时既不说"有新版"也不说"已最新"，如实说"只知道 GitHub 上是几号"。
+          upd
+            ? h('p', { className: upd.ok ? (upd.hasUpdate ? 'ok' : 'hint') : 'warn', style: { margin: '8px 0 0' } },
+                upd.ok
+                  ? (upd.hasUpdate
+                      ? `GitHub 上已经是 ${upd.latest} 了（你现在是 ${upd.current || curVer}）。点上面的链接去下载新版，装法跟第一次一样。`
+                      : upd.known === false
+                        ? `GitHub 上最新是 ${upd.latest}。这台机器上读不到自己装的版本号，所以不好替你判断是不是最新的——差得远就下载一次。`
+                        : `已经是最新的（${upd.latest}）。`)
+                  : (upd.error || '查不到，过一会儿再试。'))
+            : null,
+          // 来源写出来，省得用户以为"查过=一定准"——镜像有缓存时会滞后。
+          upd && upd.ok && upd.source
+            ? h('p', { className: 'hint', style: { margin: '4px 0 0' } }, `（从 ${upd.source} 读到的）`)
+            : null),
+
+        h('div', { style: { marginTop: '12px', paddingTop: '10px', borderTop: '0.5px solid var(--dsw-alias-border-l2)' } },
+          h('a', {
+            href: 'https://github.com/ssamurias/dsh-fish',
+            target: '_blank', rel: 'noopener noreferrer', className: 'ghlink',
+            title: '打开 GitHub 上的仓库',
+          }, ghMark, 'GitHub'),
+          h('p', { className: 'hint', style: { margin: '6px 0 0' } },
+            '代码、更新记录、怎么装都在那边。觉得有用的话，点个 Star 就是最实在的支持。')))
+
       const envPage = h('div', { className: 'page' },
         toolsCard,
+        aboutCard,
         group('为什么默认只放这几个',
           '别的插件一装，宿主会把它们的工具定义也塞进她的上下文。',
           h('div', { style: { fontSize: '13px', lineHeight: '1.9', opacity: 0.85 } },

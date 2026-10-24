@@ -177,15 +177,16 @@ lib/
   status.js     「现在在干什么」的旁观者视角
   log.js        插件自己的运行日志
   selfcheck.js  环境自检
+  update.js     检查更新（只在点按钮时出网，六条源并发取最新版本号）
   backup.js     整包备份 / 恢复
   reset.js      把她放回第一天（封存，不删）
   readme.js     数据文件夹里的那份「说明.md」
   restrict.js   只让她看见自己的工具
   tool.js       插件自己注册工具时用的定义函数
   toolschema.js 简写参数 DSL → 标准 JSON Schema
-  observe.js    宿主侧 JSON API（/dsh-fish/state、/events、/beliefs、/diary、/config、/wake、/browse、/reports）
+  observe.js    宿主侧 JSON API（/dsh-fish/state、/events、/beliefs、/diary、/config、/wake、/browse、/reports、/update）
   client.js     浏览器半边：设置 → 大肥鱼
-test/           557 个测试，node --test 全绿
+test/           573 个测试，node --test 全绿
 ```
 
 ## 跑测试
@@ -225,6 +226,8 @@ node --test                     # 在插件目录里跑（不带参数，Node �
 
 装完**重启 DSH**，设置 → 大肥鱼。
 
+想查有没有新版：设置 → 大肥鱼 → **插件** → 点「检查更新」。它只在点按钮那一下出网（六条源并发取最新版本号，国内通哪条算哪条），插件跑起来之后**不会**自己去查、也不会自动装。同一张卡里还有个 GitHub 入口，代码、更新记录、怎么装都在那边。
+
 > 路径里带中文时，用 ASCII 目录联接（junction）指过去更稳：先 `fs.symlinkSync(真目录, ASCII 别名, 'junction')`，再 `link:<ASCII 别名>`。用 `mklink /J` 接中文目标路径常把目录名写成乱码，随后 `MODULE_NOT_FOUND`。
 
 ## 卸载 / 停用
@@ -237,7 +240,7 @@ node --test                     # 在插件目录里跑（不带参数，Node �
 P1（骨架）：事件流、派生、阶段门、生物钟、工具、冷落检测、日记、观测台。
 P2（她真的会刷 B 站并写报告）：`lib/bili.js` 只读客户端 + `lib/browse.js` 选题筛读 + `lib/look.js` 的 `bili_look` 工具 + `lib/report.js` 写稿，已接进生物钟。
 
-**已有 557 个测试全绿**，真接口跑通过一轮（10.8s，含首页+详情+评论+弹幕）。
+**已有 573 个测试全绿**，真接口跑通过一轮（10.8s，含首页+详情+评论+弹幕）。
 
 `browse.enabled` 默认 **true**（装好就能用）；不想让她上网就在设置 → 大肥鱼里关掉，关掉后定时器一次都不会调 B 站接口。
 
