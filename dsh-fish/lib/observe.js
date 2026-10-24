@@ -51,6 +51,8 @@ import { readRestrictState, knownToolNames } from './restrict.js'
 import { riskState, clearRisk } from './risk.js'
 import { decodeBase64Image, saveImage } from './media.js'
 import { LOG_KEEP, LOG_MAX_BYTES, buildBundle, clearLog, logLine, logsDir, redactConfig, tailLog } from './log.js'
+// 「有没有新版」（2026-10-25 用户要求）：只读、只出网、不落盘。
+import { checkUpdate, REPO_URL, normalizeVersion } from './update.js'
 
 /**
  * 引导文案：别人第一次装，本机没有现成 cookie。
@@ -189,7 +191,7 @@ export function registerObserve(ctx, deps = {}) {
         })(),
         grants: activeGrants(events, Date.now()),
         config: { window: config.window, daily: config.daily, diary: { enabled: config.diary.enabled, visible: config.diary.visible }, absenceAfterDays: config.absenceAfterDays },
-        meta: { root, skippedLines: skipped, configFresh: fresh, configBroken: broken, dateKey: dateKey() },
+        meta: { root, skippedLines: skipped, configFresh: fresh, configBroken: broken, dateKey: dateKey(), version: normalizeVersion(deps.version) || String(deps.version ?? '') },
       })
     }],
 
@@ -452,6 +454,25 @@ export function registerObserve(ctx, deps = {}) {
         restrictEnabled: config?.tools?.restrict !== false,
       })
       send(res, 200, r)
+    }],
+
+    // 「有没有新版」（2026-10-25 用户要求）。
+    // 只在设置页点「检查更新」时走一次，插件运行期**从不**自动查——
+    // 她不需要知道自己是几号版本，那是装她的人的事。
+    // 地址全部硬编码在 update.js 里，这里绝不接受客户端传 URL（否则就是 SSRF 口子）。
+    ['/update', async (req, res) => {
+      const current = normalizeVersion(deps.version) || String(deps.version ?? '')
+      const url = new URL(req.url, 'http://x')
+      const ms = Math.min(15_000, Math.max(1_000, Number(url.searchParams.get('ms') ?? 6000) || 6000))
+      // checkUpdate 自己永不抛（连不上是常态），这里再包一层只是防手滑。
+      let r
+      try {
+        r = await checkUpdate({ current, timeoutMs: ms })
+      } catch (err) {
+        r = { ok: false, current, error: String(err?.message ?? err) }
+      }
+      // GitHub 地址一并下发，客户端不需要自己拼（仓库改名只改 update.js 一处）。
+      send(res, 200, { ...r, repoUrl: REPO_URL })
     }],
 
     // 「你不在的时候」：不推送，只在你回来时告诉你错过了什么。

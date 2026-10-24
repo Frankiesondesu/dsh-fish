@@ -157,6 +157,25 @@ test('observe：/away 与 /cover 两条路由都注册了', async () => {
   assert.ok(registered.includes('/dsh-fish/cover'), '/cover 要注册')
 })
 
+test('observe：/update 路由注册了，且把版本号带给了客户端', async () => {
+  // 「检查更新」是 2026-10-25 用户要求的：插件从 GitHub 装回来后没人提醒有新版本。
+  // 这里只钉住"路由存在 + 版本号能传到前端"，真正联网的行为靠人手点一次验证。
+  const { registerObserve } = await import('../lib/observe.js')
+  const root = tmpRoot()
+  const registered = []
+  const webServer = { register: (r) => { registered.push(r.path); return () => {} } }
+  const ctx = {
+    get: (k) => (k === 'connection' ? { requestRejection: () => null } : k === 'webServer' ? webServer : null),
+    webServer,
+    slots: { inject: () => {} },
+  }
+  registerObserve(ctx, { root, version: 'v0.3.0' })
+  assert.ok(registered.includes('/dsh-fish/update'), '/update 要注册')
+  // 版本号要在 /state 的 meta 里（前端「当前版本」那行读的就是它）
+  const src = fs.readFileSync(new URL('../lib/observe.js', import.meta.url), 'utf8')
+  assert.ok(/meta:\s*\{[^}]*version:/.test(src), '/state 的 meta 里要有 version')
+})
+
 test('封面目录跟着状态库走（重开也不删）', () => {
   const root = tmpRoot()
   assert.equal(coverDir(root), path.join(paths(root).outDir, 'covers'))

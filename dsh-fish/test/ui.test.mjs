@@ -50,3 +50,36 @@ test('运行日志预览：4~5 行高 + 内部滚动', async () => {
   assert.ok(src.includes("maxHeight: '104px'"), '预览框只有 4~5 行高')
   assert.ok(!src.includes("maxHeight: '220px'"), '旧的高框已经拿掉')
 })
+
+test('关于卡：GitHub 商标小图 + 「GitHub」文字（2026-10-25 用户要求）', async () => {
+  const src = await readFile(CLIENT, 'utf8')
+  // 用户点名要「github 的商标小图 + "github" 的文字」，不是纯文字链接。
+  assert.ok(src.includes('const ghMark'), '要有内联的 GitHub 商标 svg')
+  assert.ok(src.includes("viewBox: '0 0 16 16'"), '商标用官方 16×16 视框')
+  // 图标必须内联、不引外链：设置页不该为一个图标等网络，也不该一打开就往外发请求。
+  assert.ok(!/src:\s*['"]https?:/.test(src), '图标不能是远程图片')
+  assert.ok(!src.includes('github.com/ssamurias/dsh-fish/logo'), '不要引远程 logo')
+  // 文字必须恰好是 GitHub（大小写按用户说的）
+  assert.ok(/ghMark,\s*'GitHub'/.test(src), '图标后面要跟「GitHub」这几个字')
+  // 链接指向仓库，新窗口打开且带 noopener
+  assert.ok(src.includes('https://github.com/ssamurias/dsh-fish'), '要指向仓库地址')
+  assert.ok(src.includes("rel: 'noopener noreferrer'"), '外链必须带 noopener')
+})
+
+test('关于卡：检查更新按钮只在点击时查，不自动轮询', async () => {
+  const src = await readFile(CLIENT, 'utf8')
+  assert.ok(src.includes("jget('/update?ms=8000')"), '检查更新走 /update 路由')
+  // 关键：不能放进 load() 的 Promise.all（那样一打开设置就天天往 GitHub 发请求）
+  const loadBody = src.match(/const load = useCallback\(async \(\) => \{([\s\S]*?)\n {6}\}, \[\]\)/)
+  assert.ok(loadBody, '要能定位到 load()')
+  assert.ok(!loadBody[1].includes('/update'), 'load() 里不该自动查更新')
+  // 也不能有定时器
+  assert.ok(!src.includes("setInterval(() => checkUpdate"), '不许自动定时查更新')
+})
+
+test('关于卡：读不到当前版本时不谎报「已是最新」', async () => {
+  const src = await readFile(CLIENT, 'utf8')
+  assert.ok(src.includes('upd.known === false'), 'known=false 要有单独一条文案')
+  // 那句人话要如实承认判断不了，而不是直接说"已经是最新的"
+  assert.ok(src.includes('读不到自己装的版本号'), '要如实说明读不到版本')
+})
