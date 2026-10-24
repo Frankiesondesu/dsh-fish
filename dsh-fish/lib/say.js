@@ -29,7 +29,6 @@ import { addExchange } from './talkmem.js'
 import { refreshSelfDoc } from './selfdoc.js'
 import { looksLikeRewriting } from './guard.js'
 import { classifyReaction } from './refuse.js'
-import { taskMeta, looksLikeRework } from './capability.js'
 import { lengthBudget } from './budget.js'
 
 // 等她说完最多等这么久。一次回话通常 8–30 秒；75 秒还没结束就先把
@@ -146,14 +145,6 @@ export async function sayToHer(ctx, text, deps = {}) {
     events = (await readEvents(root)).events
     model = deriveSelf(events, { growthDays: config.growthDays })
   }
-
-  // 横向·能力（2026-10-25）：把这一句算成一次任务窗口，只落 task:0/1——
-  // 不落他的话。返工（"不对 / 重做 / 不是这样"）说明上一轮没被采纳。
-  await appendEvent(
-    { type: 'meta', text: taskMeta(looksLikeRework(body)) },
-    { day: model.day, stage: model.stage, source: 'system' },
-    root,
-  ).catch(() => null)
 
   // 记住"说话前最后一条事件"，用来分辨哪几句是她这一轮新写的
   const sinceId = events.length ? events[events.length - 1].id : null
