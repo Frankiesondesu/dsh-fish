@@ -1,0 +1,138 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1400 980" width="1400" height="980" font-family="'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#fbfaf8"/>
+      <stop offset="1" stop-color="#f4f2ee"/>
+    </linearGradient>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#0d9488"/>
+    </marker>
+    <filter id="soft" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="2" stdDeviation="5" flood-color="#1f2937" flood-opacity="0.08"/>
+    </filter>
+  </defs>
+
+  <rect width="1400" height="980" fill="url(#bg)"/>
+
+  <text x="48" y="78" font-size="40" font-weight="700" fill="#111827">认知是怎么长出来的</text>
+  <text x="48" y="116" font-size="18" fill="#6b7280">五步循环：表态 → 撞上 → 落差 → 改写 → 回顾。走完一圈，一条判断变硬一点；两句话对不上，就长成一处矛盾。</text>
+  <line x1="48" y1="140" x2="1352" y2="140" stroke="#e5e7eb"/>
+
+  <!-- 左：输入 -->
+  <text x="48" y="184" font-size="16" font-weight="700" fill="#0d9488">她每天会撞上</text>
+  <text x="48" y="206" font-size="12.5" fill="#9ca3af">这些不是设定，是发生的事</text>
+
+  <g font-size="13.5" fill="#1f2937">
+    <rect x="48" y="224" width="248" height="44" rx="10" fill="#ffffff" stroke="#d1d5db"/>
+    <text x="66" y="251">刷到一条视频（带评论区）</text>
+    <rect x="48" y="278" width="248" height="44" rx="10" fill="#ffffff" stroke="#d1d5db"/>
+    <text x="66" y="305">评论区里别人写的一句话</text>
+    <rect x="48" y="332" width="248" height="44" rx="10" fill="#ffffff" stroke="#d1d5db"/>
+    <text x="66" y="359">你问她的一句问题</text>
+    <rect x="48" y="386" width="248" height="44" rx="10" fill="#ffffff" stroke="#d1d5db"/>
+    <text x="66" y="413">你说的和她记得的不一样</text>
+    <rect x="48" y="440" width="248" height="44" rx="10" fill="#ffffff" stroke="#d1d5db"/>
+    <text x="66" y="467">她被拒绝、被顶回来</text>
+    <rect x="48" y="494" width="248" height="44" rx="10" fill="#ffffff" stroke="#d1d5db"/>
+    <text x="66" y="521">久别之后重新说话</text>
+  </g>
+
+  <path d="M300 316 H 336" fill="none" stroke="#0d9488" stroke-width="2" marker-end="url(#arrow)" opacity="0.7"/>
+  <path d="M300 462 H 336" fill="none" stroke="#0d9488" stroke-width="2" marker-end="url(#arrow)" opacity="0.7"/>
+
+  <!-- 中：五步（S 形流） -->
+  <rect x="340" y="172" width="672" height="400" rx="18" fill="#f0fdfa" stroke="#99f6e4"/>
+
+  <g font-size="15" font-weight="700" fill="#0f766e">
+    <rect x="360" y="196" width="290" height="72" rx="12" fill="#ffffff" stroke="#0d9488" stroke-width="1.6" filter="url(#soft)"/>
+    <text x="380" y="226">① 表态</text>
+    <text x="380" y="250" font-size="12" font-weight="400" fill="#6b7280">写下一条自己的判断（growth_commit）</text>
+
+    <rect x="702" y="196" width="290" height="72" rx="12" fill="#ffffff" stroke="#0d9488" stroke-width="1.6" filter="url(#soft)"/>
+    <text x="722" y="226">② 撞上</text>
+    <text x="722" y="250" font-size="12" font-weight="400" fill="#6b7280">新视频、别人的话、你的一句反问</text>
+
+    <rect x="702" y="330" width="290" height="72" rx="12" fill="#ffffff" stroke="#0d9488" stroke-width="1.6" filter="url(#soft)"/>
+    <text x="722" y="360">③ 落差</text>
+    <text x="722" y="384" font-size="12" font-weight="400" fill="#6b7280">发现两句话不能同时算数</text>
+
+    <rect x="360" y="330" width="290" height="72" rx="12" fill="#ffffff" stroke="#0d9488" stroke-width="1.6" filter="url(#soft)"/>
+    <text x="380" y="360">④ 改写</text>
+    <text x="380" y="384" font-size="12" font-weight="400" fill="#6b7280">revise：指向被改掉的那一句（带 refs）</text>
+
+    <rect x="360" y="464" width="290" height="72" rx="12" fill="#ffffff" stroke="#0d9488" stroke-width="1.6" filter="url(#soft)"/>
+    <text x="380" y="494">⑤ 回顾</text>
+    <text x="380" y="518" font-size="12" font-weight="400" fill="#6b7280">过几天问自己：现在还这么想吗</text>
+  </g>
+
+  <g fill="none" stroke="#0d9488" stroke-width="2" marker-end="url(#arrow)" opacity="0.7">
+    <path d="M654 232 H 696"/>
+    <path d="M847 272 V 324"/>
+    <path d="M696 366 H 654"/>
+    <path d="M505 406 V 458"/>
+    <path d="M654 500 H 700 V 470 H 700" display="none"/>
+    <path d="M360 500 H 344 V 232 H 352"/>
+  </g>
+
+  <!-- 环回说明 -->
+  <text x="676" y="556" text-anchor="middle" font-size="12" fill="#0f766e">走完⑤再回到①：同一句可以再被撞一次，第二次回来会被要求「说清为什么没变，或者改一句」</text>
+
+  <!-- 右：留下什么 -->
+  <text x="1352" y="184" font-size="16" font-weight="700" fill="#b45309" text-anchor="end">一圈走完会留下什么</text>
+  <g font-size="12.5">
+    <rect x="1036" y="200" width="316" height="82" rx="12" fill="#fffbeb" stroke="#fcd34d"/>
+    <text x="1052" y="224" font-size="14" font-weight="700" fill="#92400e">一条判断</text>
+    <text x="1052" y="246" fill="#78350f">下次摆出来只有一句话；提得越多越难被挤掉</text>
+    <text x="1052" y="268" fill="#a16207">被验证过两次 → 标成「记得很牢」</text>
+
+    <rect x="1036" y="294" width="316" height="82" rx="12" fill="#fffbeb" stroke="#fcd34d"/>
+    <text x="1052" y="318" font-size="14" font-weight="700" fill="#92400e">一次改口</text>
+    <text x="1052" y="340" fill="#78350f">旧的那句标成「被推翻」，新的那句顶上</text>
+    <text x="1052" y="362" fill="#a16207">不改写历史，只追加一条（事件流只增不改）</text>
+
+    <rect x="1036" y="388" width="316" height="100" rx="12" fill="#fef2f2" stroke="#fca5a5"/>
+    <text x="1052" y="412" font-size="14" font-weight="700" fill="#991b1b">一道疤</text>
+    <text x="1052" y="434" fill="#7f1d1d">明确拒绝 → 被顶回来 / 你因此难过 → 她后来还是让了</text>
+    <text x="1052" y="456" fill="#b91c1c">永不折叠；同类情境先回引，逼她面对</text>
+    <text x="1052" y="476" fill="#b91c1c">想通只能靠一次带 refs 的改写</text>
+
+    <rect x="1036" y="500" width="316" height="100" rx="12" fill="#f5f3ff" stroke="#c4b5fd"/>
+    <text x="1052" y="524" font-size="14" font-weight="700" fill="#5b21b6">一处矛盾</text>
+    <text x="1052" y="546" fill="#4c1d95">两句话不能同时算数，但一条都没删</text>
+    <text x="1052" y="568" fill="#4c1d95">写进身份文档 → 她可以来问你哪个对</text>
+    <text x="1052" y="588" fill="#6d28d9">想通之前，这处矛盾一直摆着</text>
+  </g>
+
+  <!-- 底部：四阶段 -->
+  <line x1="48" y1="612" x2="1352" y2="612" stroke="#e5e7eb"/>
+  <text x="48" y="650" font-size="17" font-weight="700" fill="#111827">四个阶段按天推进，三道门要她自己走</text>
+  <text x="452" y="650" font-size="12.5" fill="#9ca3af">门没过，天数到了也停在原地——这是「快慢」和「是不是她」的分界</text>
+
+  <g font-size="12.5">
+    <rect x="48" y="670" width="300" height="76" rx="12" fill="#ffffff" stroke="#d1d5db"/>
+    <text x="66" y="700" font-size="15.5" font-weight="700" fill="#0f766e">1 信任</text>
+    <text x="66" y="726" fill="#6b7280">门：至少一条自己的判断</text>
+
+    <rect x="378" y="670" width="300" height="76" rx="12" fill="#ffffff" stroke="#d1d5db"/>
+    <text x="396" y="700" font-size="15.5" font-weight="700" fill="#0f766e">2 自主</text>
+    <text x="396" y="726" fill="#6b7280">门：真的拒绝过两件事</text>
+
+    <rect x="708" y="670" width="300" height="76" rx="12" fill="#ffffff" stroke="#d1d5db"/>
+    <text x="726" y="700" font-size="15.5" font-weight="700" fill="#0f766e">3 主动</text>
+    <text x="726" y="726" fill="#6b7280">门：两次推翻自己的判断</text>
+
+    <rect x="1038" y="670" width="314" height="76" rx="12" fill="#ffffff" stroke="#d1d5db"/>
+    <text x="1056" y="700" font-size="15.5" font-weight="700" fill="#0f766e">4 整合</text>
+    <text x="1056" y="726" fill="#6b7280">门：回头看，发现自己变了</text>
+  </g>
+
+  <g stroke="#0d9488" stroke-width="1.6" fill="none" marker-end="url(#arrow)" opacity="0.6">
+    <path d="M352 708 H 372"/>
+    <path d="M682 708 H 702"/>
+    <path d="M1012 708 H 1032"/>
+  </g>
+
+  <text x="48" y="800" font-size="12.5" fill="#6b7280">理论出处：五步循环 ← Kolb 经验学习圈（1984）＋ Piaget 失衡（1936）；四阶段 ← Bowlby 依恋理论（1969）／ Erikson 心理社会发展（1950）；</text>
+  <text x="48" y="822" font-size="12.5" fill="#6b7280">矛盾与改写 ← Festinger 认知失调（1957）＋ Bartlett 重构记忆（1932）；疤与代价 ← Dewey 经验连续性（1938）＋ Schön 反思性实践（1983）。</text>
+  <text x="48" y="856" font-size="12.5" fill="#9ca3af">诚实说明：这是借这些理论当设计骨架，不是在做心理学实验；图中每个机制都能在事件流里找到对应记录，不是估的。</text>
+</svg>
