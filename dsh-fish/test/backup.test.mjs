@@ -69,7 +69,7 @@ test('备份：该拿的都拿到，日志与旧备份不进包', async () => {
     assert.ok(b.skipped.some((s) => s.startsWith('backups/')), b.skipped.join('|'))
     assert.match(backupFileName(new Date('2026-10-25T00:31:00Z')), /^大肥鱼-20261025-\d{4}\.json$/)
   } finally {
-    await rm(root, { recursive: true, force: true })
+    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
   }
 })
 
@@ -135,7 +135,7 @@ test('恢复：格式不对时什么都不动', async () => {
     assert.equal(ev.events.length, 1)
     await assert.doesNotReject(stat(join(root, 'events.jsonl')))
   } finally {
-    await rm(root, { recursive: true, force: true })
+    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
   }
 })
 
@@ -150,7 +150,7 @@ test('封存目录名带 pre-restore 前缀，同一秒两次不撞名', async (
     assert.notEqual(a, b)
     assert.match(b, /-2$/)
   } finally {
-    await rm(root, { recursive: true, force: true })
+    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
     const parent = dirname(root)
     const { readdir } = await import('node:fs/promises')
     for (const n of await readdir(parent)) {
@@ -183,7 +183,7 @@ test('事件格式版本：新事件带 v，老事件按 v1 读并计数', async
     assert.equal(r2.legacy, 1, '只有那条老的算 legacy')
     assert.equal(r2.events[1].v, 1)
   } finally {
-    await rm(root, { recursive: true, force: true })
+    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
   }
 })
 
@@ -199,7 +199,7 @@ test('备份进包后能原样读回（含二进制）', async () => {
     const txt = await readFile(join(dest, 'diary', '2026-10-25.md'), 'utf8')
     assert.match(txt, /今天看到了海/)
   } finally {
-    await rm(root, { recursive: true, force: true })
+    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
     await rm(dest, { recursive: true, force: true })
     const parent = dirname(dest)
     const { readdir } = await import('node:fs/promises')

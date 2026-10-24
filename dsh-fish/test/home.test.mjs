@@ -80,7 +80,7 @@ test('宿主没有 workspaceRegistry：明确返回 ok:false，不假装成功',
     // 屋子目录仍然建出来：身份文件得有地方落
     const dir = await ensureHomeDir(root)
     assert.ok((await stat(dir)).isDirectory())
-  } finally { await rm(root, { recursive: true, force: true }) }
+  } finally { await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) }
 })
 
 test('建屋子：工作区指向 ~/.dsh-fish/home，会话挂进工作区并改标题', async () => {
@@ -95,7 +95,7 @@ test('建屋子：工作区指向 ~/.dsh-fish/home，会话挂进工作区并改
     assert.equal(created.length, 1)
     assert.equal(created[0].workspaceId, r.wsId, '会话必须挂进工作区，否则侧栏看不见')
     assert.deepEqual(renamed.map((x) => x.title), ['跟大肥鱼说话'])
-  } finally { await rm(root, { recursive: true, force: true }) }
+  } finally { await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) }
 })
 
 test('幂等：重复 bootstrap 不会再建一个会话', async () => {
@@ -108,7 +108,7 @@ test('幂等：重复 bootstrap 不会再建一个会话', async () => {
     assert.equal(a.sessionId, b.sessionId, '第二次必须复用同一个会话')
     assert.equal(b.reused, true)
     assert.equal(created.length, 1, '只应建过一次会话')
-  } finally { await rm(root, { recursive: true, force: true }) }
+  } finally { await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) }
 })
 
 test('她把会话归档了：下次启动重建一个新的', async () => {
@@ -128,7 +128,7 @@ test('她把会话归档了：下次启动重建一个新的', async () => {
     assert.equal(ses.ok, true, ses.why)
     assert.notEqual(ses.sessionId, oldId, '旧会话没了就得建新的')
     assert.equal(ses.reused, false)
-  } finally { await rm(root, { recursive: true, force: true }) }
+  } finally { await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) }
 })
 
 test('没有工作区 id 时说清楚原因，不抛', async () => {
@@ -138,7 +138,7 @@ test('没有工作区 id 时说清楚原因，不抛', async () => {
     const r = await ensureTalkSession(ctx, { root, wsId: '' })
     assert.equal(r.ok, false)
     assert.match(r.why, /工作区/)
-  } finally { await rm(root, { recursive: true, force: true }) }
+  } finally { await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) }
 })
 
 test('同一路径不会建两个工作区（先查后建）', async () => {
@@ -149,7 +149,7 @@ test('同一路径不会建两个工作区（先查后建）', async () => {
     const b = await ensureWorkspace(ctx, { root })
     assert.equal(a.wsId, b.wsId)
     assert.equal(sessions.size, 1)
-  } finally { await rm(root, { recursive: true, force: true }) }
+  } finally { await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) }
 })
 
 // ---------- 身份文件 ----------
@@ -179,7 +179,7 @@ test('身份文件：有禁令、有工具说明，且不泄露任何路径/数�
     assert.equal(md.includes('events.jsonl'), false)
     assert.equal(md.includes('config.json'), false)
     assert.equal(/好感度\s*[:：]/.test(md), false, '不能出现好感度数字')
-  } finally { await rm(root, { recursive: true, force: true }) }
+  } finally { await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) }
 })
 
 test('身份文件幂等：内容没变就不重写（不触发宿主重复加载）', async () => {
@@ -190,7 +190,7 @@ test('身份文件幂等：内容没变就不重写（不触发宿主重复加�
     const b = await writeSelfDoc(root)
     assert.equal(a.changed, true)
     assert.equal(b.changed, false, '内容一样时不该重写')
-  } finally { await rm(root, { recursive: true, force: true }) }
+  } finally { await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) }
 })
 
 test('她写下新判断后，身份文件跟着变（changed:true）', async () => {
@@ -205,7 +205,7 @@ test('她写下新判断后，身份文件跟着变（changed:true）', async ()
     assert.equal(b.changed, true, '状态变了就应重写')
     const md = await readFile(selfDocPath(root), 'utf8')
     assert.match(md, /我想他大概是在试探我/)
-  } finally { await rm(root, { recursive: true, force: true }) }
+  } finally { await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) }
 })
 
 test('selfDocStatus：文件不存在时如实返回 exists:false', async () => {
@@ -218,7 +218,7 @@ test('selfDocStatus：文件不存在时如实返回 exists:false', async () => 
     const s2 = await selfDocStatus(root)
     assert.equal(s2.exists, true)
     assert.ok(s2.bytes > 100)
-  } finally { await rm(root, { recursive: true, force: true }) }
+  } finally { await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) }
 })
 
 test('homeStatus：home.json 不存在时返回空 id，不抛', async () => {
@@ -228,7 +228,7 @@ test('homeStatus：home.json 不存在时返回空 id，不抛', async () => {
     assert.equal(h.wsId, '')
     assert.equal(h.sessionId, '')
     assert.ok(h.dir.endsWith('home'))
-  } finally { await rm(root, { recursive: true, force: true }) }
+  } finally { await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) }
 })
 
 // ------------------------------------------------- talkSessionId（2026-10-24 加）
@@ -241,7 +241,7 @@ test('talkSessionId：有屋子时返回屋子里那个会话', async () => {
     assert.ok(id, '应当拿到会话 id')
     const h = await homeStatus(root)
     assert.equal(id, h.sessionId)
-  } finally { await rm(root, { recursive: true, force: true }) }
+  } finally { await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) }
 })
 
 test('talkSessionId：没有 workspaceRegistry 时交白卷，不建任何会话', async () => {
@@ -253,7 +253,7 @@ test('talkSessionId：没有 workspaceRegistry 时交白卷，不建任何会话
     assert.equal(id, '')
     assert.equal(created.length, 0, '一个会话都不该建')
     assert.ok(notes.some((n) => /屋子没接上/.test(n)), '要留一条人话日志，别静默')
-  } finally { await rm(root, { recursive: true, force: true }) }
+  } finally { await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) }
 })
 
 test('talkSessionId：记下的会话被归档了，会重建一次而不是原地报错', async () => {
@@ -269,7 +269,7 @@ test('talkSessionId：记下的会话被归档了，会重建一次而不是原�
     const second = await talkSessionId(ctx, { root })
     assert.ok(second, '应当重建出一条可用的会话')
     assert.notEqual(second, first, '重建的必须是新的那条')
-  } finally { await rm(root, { recursive: true, force: true }) }
+  } finally { await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) }
 })
 
 // ---- 2026-10-24：preset 透传（工具面收窄的入口，宿主侧暂未生效，但线要接对）----
@@ -285,7 +285,7 @@ test('preset：建会话时真的提上去了，并记进 home.json', async () =
     assert.equal(r.preset, 'fish-home')
     const h = await homeStatus(root)
     assert.equal(h.preset, 'fish-home', 'homeStatus 要能读出实际用的是哪套组合')
-  } finally { await rm(root, { recursive: true, force: true }) }
+  } finally { await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) }
 })
 
 test('preset：宿主不认这套组合时回落建会话，但日志要说清楚（不静默降级）', async () => {
@@ -300,7 +300,7 @@ test('preset：宿主不认这套组合时回落建会话，但日志要说清�
     assert.equal(created[1].agentPreset, undefined)
     assert.equal(r.preset, '', '实际没用上就得如实记空')
     assert.ok(notes.some((n) => /没被接受/.test(n)), '必须留一条日志说明为什么放宽了')
-  } finally { await rm(root, { recursive: true, force: true }) }
+  } finally { await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) }
 })
 
 test('preset：配置里写的那套会被 talkSessionId 读出来并传下去', async () => {
@@ -311,7 +311,7 @@ test('preset：配置里写的那套会被 talkSessionId 读出来并传下去',
     const id = await talkSessionId(ctx, { root })
     assert.ok(id)
     assert.equal(created[0].agentPreset, 'fish-home', '配置是唯一来源，建会话要按它来')
-  } finally { await rm(root, { recursive: true, force: true }) }
+  } finally { await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) }
 })
 
 // ---------- 老档改名（2026-10-25）----------
@@ -332,7 +332,7 @@ test('早先建的工作区叫「鱼」：用实体的 setTitle 改成「大肥�
     assert.equal(r.renamed, true, '改成了要报出来')
     assert.equal(entity.title, '大肥鱼的家')
     assert.deepEqual(calls, ['大肥鱼的家'])
-  } finally { await rm(root, { recursive: true, force: true }) }
+  } finally { await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) }
 })
 
 test('宿主没有改名接口时保持原名，不抛', async () => {
@@ -346,7 +346,7 @@ test('宿主没有改名接口时保持原名，不抛', async () => {
     assert.equal(r.ok, true)
     assert.equal(r.renamed, false)
     assert.equal(entity.title, '鱼', '改不动就保持原名')
-  } finally { await rm(root, { recursive: true, force: true }) }
+  } finally { await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) }
 })
 
 test('观测台的 /home 现读工作区标题，不靠 home.json 的旧值', async () => {

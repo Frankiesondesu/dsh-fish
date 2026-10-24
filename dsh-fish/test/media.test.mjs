@@ -90,7 +90,7 @@ test('saveImage：真的写进 media/，名字带前缀，坏数据与空数据�
     assert.equal(tooBig.ok, false)
     assert.match(tooBig.why, /太大了/)
   } finally {
-    await rm(root, { recursive: true, force: true })
+    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
   }
 })
 
@@ -109,7 +109,7 @@ test('sweepMedia：只删过期的，留着新的；空目录不炸', async () =
     assert.equal(r.removed, 1)
     assert.equal(r.kept, 1)
   } finally {
-    await rm(root, { recursive: true, force: true })
+    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
   }
 })
 
