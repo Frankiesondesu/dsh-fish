@@ -24,10 +24,13 @@ export const STANCE_MIN_GROUP = 2
 export const STANCE_MIN_MENTIONS = 3
 /** 或者：被检验（test / answer / revise 指向）到这个次数。 */
 export const STANCE_MIN_VERIFIED = 2
-/** 清单上限（内部保留多少条）。 */
-export const STANCE_MAX = 8
-/** 写进身份文档的条数上限——多了就变成口号墙。 */
-export const STANCE_PROMPT_MAX = 4
+/** 清单上限（内部保留多少条）。注意：这只是「算出来之后留下来几条」，
+ *  原始的判断一条都没删——立场是从 events.jsonl 现算的，数据本来就在本地。 */
+export const STANCE_MAX = 12
+/** 写进身份文档的条数上限。原先 4 条，用户认为太少（立场越多人格越稳），
+ *  提到 8 条；真正的天花板是身份文档的字数预算（`memory.docBudget`），
+ *  摆不下时会由 assemble() 按预算收，不会把别的段落挤到没人管。 */
+export const STANCE_PROMPT_MAX = 8
 /** 归组的相似度阈值（与「反复提起」同一套字面判据，宁可少归）。 */
 export const STANCE_SIM = 0.45
 
@@ -117,15 +120,79 @@ export function buildStances(model = {}) {
     })
   }
 
-  return groups
+  return resolveConflicts(groups)
     .sort((a, b) => (b.scars - a.scars) || ((b.mentions + b.verified) - (a.mentions + a.verified)))
     .slice(0, STANCE_MAX)
 }
 
+/** `since` 是 ISO 串，取不到时间就返回 null（判不出先后）。 */
+function sinceOf(s) {
+  const t = Date.parse(s?.since ?? '')
+  return Number.isFinite(t) ? t : null
+}
+
+/**
+ * 立场之间会打架，两条真实路径：
+ *   ① 跨类：同一件事上「我绝不做」和「我其实喜欢」各成一组，同时成立；
+ *   ② 改口：早期「我绝不吃辣」，后来「我喜欢吃辣」。
+ *
+ * 规则：**后来的算数**——保留时间较新的一条，给它挂 `changedFrom`（旧话原样留着，
+ * 只在内部，用于渲染那句「我改过口」）；`since` 缺失或完全相同（判不出先后）时
+ * 两条都不进清单——替她选一条，等于替她编立场。
+ */
+function stanceObject(text) {
+  // 比的是「说的是哪件事」，不是怎么说。把态度词与标点剥掉之后剩下的才是对象：
+  // 「我绝不吃辣」和「我喜欢吃辣」→ 都是「吃辣」，这才算同一件事上的两种态度。
+  return String(text ?? '')
+    .replace(/我|绝不|永远不会|不再|不想|不愿意|不喜欢|不|喜欢|爱看|爱听|偏爱|更想|宁愿|更愿意/g, '')
+    .replace(/[\s，。！？、,.!?；;：:'"「」（）()]/g, '')
+}
+
+function sameTopic(a, b) {
+  const x = stanceObject(a)
+  const y = stanceObject(b)
+  if (!x || !y) return false
+  if (x === y) return true
+  return similarity(x, y) >= 0.6
+}
+
+function resolveConflicts(groups) {
+  const out = []
+  for (const g of groups) {
+    const clash = out.findIndex(
+      (o) => o.kind !== g.kind && sameTopic(o.text, g.text),
+    )
+    if (clash < 0) {
+      out.push(g)
+      continue
+    }
+    const other = out[clash]
+    const a = sinceOf(other)
+    const b = sinceOf(g)
+    if (a === null || b === null || a === b) {
+      out.splice(clash, 1)
+      continue
+    }
+    if (b > a) {
+      g.changedFrom = other.text
+      out.splice(clash, 1)
+      out.push(g)
+    } else {
+      other.changedFrom = g.text
+    }
+  }
+  return out
+}
+
 /** 一条立场怎么落成她能读的一句话（不带任何次数、权重）。 */
 export function stanceLine(s) {
-  const note = s.scars > 0 ? '（这件事我栽过一次，没忘）' : s.mentions >= STANCE_MIN_MENTIONS ? '（这句话我说过不止一次）' : ''
-  return `- ${s.text}${note}`
+  const cost = s.scars > 0
+    ? '（这件事我栽过一次，没忘）'
+    : s.mentions >= STANCE_MIN_MENTIONS
+      ? '（这句话我说过不止一次）'
+      : ''
+  const flip = s.changedFrom ? '（这件事我改过口，以前不是这么说的）' : ''
+  return `- ${s.text}${cost}${flip}`
 }
 
 /** 身份文档里的那一段（空清单返回空串，不占预算）。 */

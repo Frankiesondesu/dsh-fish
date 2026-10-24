@@ -5,6 +5,7 @@ import {
   classifyStance,
   gatesDone,
   buildStances,
+  stanceLine,
   stanceSection,
   stanceSummary,
   STANCE_MAX,
@@ -171,8 +172,35 @@ test('原理页与原理图不再提「能力」这条线', () => {
 test('原理页给「立场」单独一张卡，且不再有「从计次到能力」', () => {
   const c = read('lib/client.js')
   assert.ok(c.includes("theoryCard('立场：走完门才开始攒'"), '立场够格单独一张卡')
-  assert.ok(c.includes('四个阶段都走完才开始产生'))
-  assert.ok(c.includes('最多 4 条，再多就成口号墙'))
+  assert.ok(c.includes('一、什么时候开始：四个阶段都走完开始进行，没有尽头，也没有「通关终点」。'))
+  assert.ok(c.includes('二、什么算立场：同一种类型的事，两次表达过一样的观点；或者在这件事上出现过伤疤。'))
+  assert.ok(c.includes('三、不会被折叠：写进上下文提示词。如果遗漏，那立场也将消失。'))
   assert.ok(c.includes("theoryCard('从计次到复现'"), '能力已删，卡片改名')
   assert.ok(!c.includes("'从计次到能力'"))
+})
+
+test('立场之间会打架：后来的算数，判不出先后就两条都不要', () => {
+  const basis = (text, since) => ({ id: `b_${Math.random().toString(36).slice(2)}`, text, since, status: 'active', mentions: 3, verified: 0 })
+  const model = (bs) => ({ stage: 4, stageForced: false, beliefs: bs, scars: [] })
+  // 同话题：早期「我绝不吃辣」+ 后来「我喜欢吃辣」→ 只留新的，并标 changedFrom
+  const r = buildStances(model([basis('我绝不吃辣。', '2026-10-01T00:00:00Z'), basis('我喜欢吃辣。', '2026-10-20T00:00:00Z')]))
+  assert.equal(r.length, 1)
+  assert.equal(r[0].kind, 'like')
+  assert.equal(r[0].changedFrom, '我绝不吃辣。')
+  assert.ok(stanceLine(r[0]).includes('这件事我改过口'))
+  // 时间相同：判不出先后 → 两条都不在
+  const same = buildStances(model([basis('我绝不吃辣。', '2026-10-01T00:00:00Z'), basis('我喜欢吃辣。', '2026-10-01T00:00:00Z')]))
+  assert.equal(same.length, 0)
+  // 时间缺失：同样不替她选
+  const noTime = buildStances(model([basis('我绝不吃辣。'), basis('我喜欢吃辣。', '2026-10-20T00:00:00Z')]))
+  assert.equal(noTime.length, 0)
+})
+
+test('上限：内部 12 条、写进提示词 8 条', () => {
+  assert.equal(STANCE_MAX, 12)
+  assert.equal(STANCE_PROMPT_MAX, 8)
+  const many = []
+  for (let i = 0; i < 10; i++) many.push({ kind: 'never', text: `我不做第${i}种事。`, scars: 9 - i, mentions: 0, verified: 0 })
+  const bullets = stanceSection(many).split(String.fromCharCode(10)).filter((x) => x.startsWith('- '))
+  assert.equal(bullets.length, 8)
 })
