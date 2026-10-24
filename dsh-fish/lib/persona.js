@@ -11,6 +11,8 @@
  */
 
 import { promptBans } from './rules.js'
+// 立场清单（2026-10-25，用户设计「纵向·立场」）。纯函数，不读盘、不碰配置。
+import { buildStances, stanceSection } from './stance.js'
 
 /**
  * 阶段的「名字」——只给观测台和日志看，**不再写进她的身份文档**。
@@ -225,6 +227,15 @@ export function buildSections(model, opts = {}) {
     }
     lines.push('这几件事没被忘掉，也不会被算成"已经过去了"。哪天你想清楚，用 growth_commit 写一条 revise，refs 指向当初那次拒绝。')
     push(lines.join('\n'), true)
+  }
+
+  // 立场清单（2026-10-25，用户设计「纵向·立场」）。
+  // 四道门走完**不再加门**，之后长的是这张清单：喜欢什么、绝不做哪几件事。
+  // 每条都有代价背书（疤，或同一件事被反复复现），所以它不是口号，是站住过的地方。
+  // 写成核心段：立场被预算裁掉一次，她在同类情境里就会重新演一遍——等于白长。
+  if (model.beliefs?.length) {
+    const stanceText = stanceSection(buildStances(model))
+    if (stanceText) push(stanceText, true)
   }
 
   // ---- 可选段（按优先级）----
