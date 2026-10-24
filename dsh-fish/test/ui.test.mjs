@@ -83,3 +83,18 @@ test('关于卡：读不到当前版本时不谎报「已是最新」', async ()
   // 那句人话要如实承认判断不了，而不是直接说"已经是最新的"
   assert.ok(src.includes('读不到自己装的版本号'), '要如实说明读不到版本')
 })
+
+test('插件页顺序：「关于」在「为什么默认只放这几个」之后（2026-10-25 用户定）', async () => {
+  const src = await readFile(CLIENT, 'utf8')
+  const body = src.match(/const envPage = h\('div', \{ className: 'page' \},([\s\S]*?)\n {6}\)\n/)
+  assert.ok(body, '要能定位到 envPage')
+  const order = ['toolsCard', '为什么默认只放这几个', 'aboutCard']
+  let at = -1
+  for (const item of order) {
+    const next = body[1].indexOf(item)
+    assert.ok(next > at, `「${item}」要排在上一项之后`)
+    at = next
+  }
+  // 「关于」是这一页的收尾，不该插在工具说明中间
+  assert.ok(!/toolsCard,\s*\n\s*aboutCard/.test(body[1]), '「关于」不能紧跟工具卡')
+})
