@@ -57,7 +57,12 @@ function waitTurnEnd(ctx, sessionId, timeoutMs) {
     // 真机上这条分支意味着"她回了，但我们不知道什么时候回完"——如实降级，不假装成功。
     const budget = typeof ctx.on === 'function' ? timeoutMs : Math.min(timeoutMs, 8_000)
     timer = setTimeout(finish, budget)
-    timer.unref?.()
+    // 只有真宿主（有事件总线）才 unref：那时进程还有别的句柄撑着，unref 只是
+    // 不拖慢退出。没有总线时（单测 / 老宿主）这个定时器是唯一的句柄，一 unref
+    // 事件循环立刻空转结束，等待中的 Promise 再也等不到 resolve——Node 20/22
+    // 会直接判 "Promise resolution is still pending but the event loop has
+    // already resolved"（CI 首跑就是被这条拖红了 7 个用例）。
+    if (typeof ctx.on === 'function') timer.unref?.()
     if (typeof ctx.on === 'function') {
       off = ctx.on('session/event', (session, event) => {
         const id = session?.header?.id ?? session?.id
