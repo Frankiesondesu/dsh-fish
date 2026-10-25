@@ -103,7 +103,11 @@ test('cover：coverLines 只给已经存在的图', () => {
   assert.match(lines[0], /^!\[二舅上\]\(.*BV1MN4y177PB\.jpg\)$/, '标题里的方括号要去掉')
   // 2026-10-26 用户实测：反斜杠路径在客户端显示「图片无法预览」，正斜杠正常
   assert.ok(!lines[0].includes('\\'), '图片路径不能带反斜杠')
-  assert.match(lines[0], /\(C:\//, '是正斜杠的盘符路径')
+  // 盘符那条断言只能在本机（Windows）成立：CI 的 ubuntu 跑的是 /tmp 临时目录，
+  // 没有盘符可比。盘符格式由 test/posix.test.mjs 的 slashed 用例负责。
+  if (process.platform === 'win32') {
+    assert.match(lines[0], /\([A-Za-z]:\//, 'Windows 下是正斜杠的盘符路径')
+  }
   assert.equal(coverPath(root, BV2), '')
 })
 
