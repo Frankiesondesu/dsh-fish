@@ -26,6 +26,7 @@ import { promises as fs } from 'node:fs'
 import { join } from 'node:path'
 import { rootDir, paths, readJson, writeAtomic } from './store.js'
 import { recentExchanges, renderCarry } from './talkmem.js'
+import { WAKE_TRIGGER } from './wakeconst.js'
 
 const TITLE_WORKSPACE = '大肥鱼的家'
 const TITLE_SESSION = '跟大肥鱼说话'
@@ -173,6 +174,57 @@ export async function ensureTalkSession(ctx, { root = rootDir(), wsId, title = T
  * 一次做完全部：屋子目录 → 工作区 → 会话。
  * 任何一步失败都返回 ok:false + 人话原因，**不抛**——启动链路上抛异常会带走插件树。
  */
+/**
+ * 叫醒一间空白屋子。
+ *
+ * 为什么需要：宿主的侧栏可见性规则是
+ *   `if (session.blank && session.id !== current) return false`
+ * ——空白会话只在它是「当前主视图会话」时才显示。插件用 API 建出来的会话
+ * 不会被设成当前会话，于是它一直藏在列表外面：用户点完重置看到的是「没有新会话」，
+ * 重启也一样。让它跑一轮（blank 在开跑/成功后清掉）才是唯一能落地显示的办法。
+ *
+ * 代价：只在她确实空白时叫一次，复用会话里有内容就什么都不做。
+ */
+export async function wakeIfBlank(ctx, { sessionId, log, freshOnly = false } = {}) {
+  if (!sessionId) return { woke: false, why: '没有会话 id' }
+  const sc = ctx?.get?.('sessionController') ?? ctx?.sessionController
+  if (!sc) return { woke: false, why: '宿主没有 sessionController 服务' }
+
+  let blank = false
+  try {
+    const l = typeof sc.list === 'function' ? await sc.list({}) : null
+    const items = l?.items ?? l?.value?.items ?? []
+    const row = items.find((x) => String(x?.sessionId ?? x?.id ?? '') === String(sessionId))
+    if (row === undefined) {
+      // 查不到这一行：新建的会话按空白处理，复用的按有内容处理——
+      // 宁可漏唤醒，也不要每次启动都让她说话。
+      blank = freshOnly === true
+    } else if (typeof row.blank === 'boolean') {
+      blank = row.blank
+    } else {
+      // 宿主没给 blank 字段：只有刚建出来的一定是空的，复用的不碰
+      blank = freshOnly === true
+    }
+  } catch (err) {
+    log?.(`查会话状态失败（${String(err?.message ?? err).slice(0, 100)}），这次不唤醒`)
+    return { woke: false, why: '查不到会话状态' }
+  }
+  if (!blank) return { woke: false, why: '' }
+  if (typeof sc.prompt !== 'function') return { woke: false, why: '宿主没有 sessionController.prompt' }
+
+  // 不能 await：这一轮要等模型跑完，屋子建好不该被它拖住。
+  void sc
+    .prompt({
+      requestId: `wake-fresh-${Date.now()}`,
+      sessionId,
+      mode: 'queue',
+      content: [{ type: 'text', text: WAKE_TRIGGER }],
+    })
+    .catch((err) => log?.(`新屋子唤醒失败：${String(err?.message ?? err).slice(0, 140)}`))
+  log?.('新屋子还是空的，叫了她一声（要等她这一轮动起来，侧栏才会显示）')
+  return { woke: true, why: '' }
+}
+
 export async function bootstrapHome(ctx, { root = rootDir(), log, preset = '' } = {}) {
   const ws = await ensureWorkspace(ctx, { root })
   if (!ws.ok) return { ok: false, why: ws.why, wsId: '', sessionId: '' }
@@ -180,6 +232,9 @@ export async function bootstrapHome(ctx, { root = rootDir(), log, preset = '' } 
   const ses = await ensureTalkSession(ctx, { root, wsId: ws.wsId, preset, log })
   if (!ses.ok) return { ok: false, why: ses.why, wsId: ws.wsId, sessionId: '' }
 
+  // 唤醒**不放在这里**：talkSessionId 在屋子缺失时也会调 bootstrapHome，
+  // 那样每次「第一次说话」都会多叫一次，她一轮被点两次火。只在明确的两个入口叫：
+  // index.js 的启动、observe.js 的 POST /reset。
   log?.(`屋子就绪 · 工作区 ${ws.wsId} · 会话 ${ses.sessionId}${ses.reused ? '（复用）' : '（新建）'}${ses.preset ? ` · preset ${ses.preset}` : ''}`)
   return { ok: true, why: '', wsId: ws.wsId, sessionId: ses.sessionId, dir: ws.dir, reused: ses.reused, preset: ses.preset ?? '' }
 }

@@ -25,8 +25,9 @@ import { avatarFile, avatarInfo, saveAvatar, removeAvatar } from './avatar.js'
 import fs from 'node:fs'
 import { commentCountToday, replyCountToday, herComments, scanReplies } from './comment.js'
 import { describeState, resetAll } from './reset.js'
+import { readHomeRecord, retireHomeSessions } from './retire.js'
 import { collectBackup, backupFileName, restoreBackup } from './backup.js'
-import { homeStatus } from './home.js'
+import { bootstrapHome, homeStatus, wakeIfBlank } from './home.js'
 import { selfDocStatus } from './selfdoc.js'
 import { personaBudget, BELIEF_SHOWN, shownCount } from './persona.js'
 // 立场清单（2026-10-25，用户设计「纵向·立场」）：四道门走完之后长出来的那张清单。
@@ -37,6 +38,7 @@ import { fileURLToPath } from 'node:url'
 import { ensureDataReadme } from './readme.js'
 import { rulesByLayer } from './rules.js'
 import { ruleStatus, offerHistory, pendingOffer, activeGrants } from './unlock.js'
+import { devMode } from './devmode.js'
 import { ruleById } from './rules.js'
 import { appendEvent } from './store.js'
 import { validateEvent } from './schema.js'
@@ -151,6 +153,9 @@ export function registerObserve(ctx, deps = {}) {
       send(res, 200, {
         day: m.day,
         growthDays: m.growthDays,
+        // 本机测试版：`.dev` 文件在不在（决定设置页要不要渲染「让她去刷 B 站」）。
+        // 只影响界面；正式版里这个字段恒为 false。
+        dev: await devMode(root),
         stage: m.stage,
         stageName: m.stageName,
         stageForced: m.stageForced,
@@ -222,15 +227,21 @@ export function registerObserve(ctx, deps = {}) {
     ['/diary', async (req, res) => {
       const { config } = await loadConfig(root)
       if (!config.diary.enabled) return send(res, 200, { enabled: false, visible: false, items: [], note: '她没在写日记' })
+      const dates = await listDiary(root)
       if (!config.diary.visible) {
         // 不可见时不返回任何正文，只给日期目录——她自己知道写了什么，玩家不知道
-        const dates = await listDiary(root)
         return send(res, 200, { enabled: true, visible: false, items: [], lockedDates: dates, note: '日记已写，但设置为不可见' })
       }
-      const dates = await listDiary(root)
+      // 一页一天，正文按天取：日记可能攒了几百天，一次全发过去既慢也没必要。
+      const url = new URL(req.url, 'http://x')
+      const day = url.searchParams.get('day')
+      if (day) {
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(day) || !dates.includes(day)) return send(res, 404, { error: '这天没有日记' })
+        return send(res, 200, { date: day, text: await readDaily('diaryDir', day, root) })
+      }
       const items = []
-      for (const d of dates.slice(0, 30)) items.push({ date: d, text: await readDaily('diaryDir', d, root) })
-      send(res, 200, { enabled: true, visible: true, items })
+      for (const d of dates.slice(0, 1)) items.push({ date: d, text: await readDaily('diaryDir', d, root) })
+      send(res, 200, { enabled: true, visible: true, dates, items })
     }],
 
     ['/config', async (req, res) => {
@@ -603,8 +614,15 @@ export function registerObserve(ctx, deps = {}) {
 
     ['/wake', async (req, res) => {
       if (req.method !== 'POST') return send(res, 405, { error: 'method not allowed' })
-      const r = await wakeNow(ctx, { root, log: (...a) => console.log('[dsh-fish]', ...a) })
-      send(res, r.ok ? 200 : 409, r)
+      // ?focus=browse：设置页那个「让她去刷 B 站」按钮（仅本机测试版）。
+      // 传下去之后 wakeNow 会跳过「今天该不该醒」的判断，只做一件事：叫醒她，并让这一轮
+      // 的处境明确指向 B 站首页。
+      let focus = ''
+      try { focus = new URL(String(req.url ?? '/'), 'http://localhost').searchParams.get('focus') ?? '' } catch { /* 解析失败就当没传 */ }
+      const r = await wakeNow(ctx, { root, focus, log: (...a) => console.log('[dsh-fish]', ...a) })
+      // 失败时补一个 error 字段：前端 jpost 只认得 error，不然界面只会显示「HTTP 409」，
+      // 而真正的原因（「今天已经叫过三次了」这类）就在 r.why 里。
+      send(res, r.ok ? 200 : 409, r.ok ? r : { ...r, error: r.why || '这次没叫醒' })
     }],
 
     // ---- P3-1：对话入口 ----
@@ -940,9 +958,40 @@ export function registerObserve(ctx, deps = {}) {
       let b = {}
       try { b = JSON.parse(body || '{}') } catch { return send(res, 400, { error: 'body 不是合法 JSON' }) }
       if (b.confirm !== 'reset') return send(res, 400, { error: '要带 confirm:"reset"' })
+      // 2026-10-25 修：resetAll 只搬 ~/.dsh-fish，宿主侧的工作区/会话记录在
+      // ~/.dsh/storages/workspace.json 里，不跟着状态库走 —— 所以先记下 home.json
+      // （resetAll 之后它就被搬走了），重置成功再把旧会话归档。
+      const home = await readHomeRecord(root)
       const r = await resetAll(root)
       if (!r.ok) return send(res, 409, { ok: false, error: r.why })
-      send(res, 200, { ok: true, movedTo: r.movedTo, note: r.why || '旧的一切已经封存，下次启动她就是第一天。' })
+      const retired = await retireHomeSessions(ctx, { root, home, log: (m) => console.log('[dsh-fish]', m) })
+      // 2026-10-26 修（用户 m00260）：重置只搬状态库 + 归档旧会话，**不会**建新会话——
+      // 新建发生在 bootstrapHome，而它只在 DSH 启动时跑。于是「点了重置 → 侧栏空着 →
+      // 不知道去哪儿说话」。这里重置完立刻把新的一局开出来，不用等下次启动。
+      const { config: cfg } = await loadConfig(root)
+      const fresh = await bootstrapHome(ctx, {
+        root,
+        preset: cfg?.tools?.preset ?? '',
+        log: (m) => console.log('[dsh-fish]', m),
+      })
+      // 空白会话在侧栏里是隐形的（宿主 sessionVisible：blank && id !== current → false）。
+      // 插件用 API 建的会话不会被设成当前会话，所以要让她先动一轮，侧栏才看得见。
+      const woke = fresh.ok
+        ? await wakeIfBlank(ctx, { sessionId: fresh.sessionId, log: (m) => console.log('[dsh-fish]', m), freshOnly: !fresh.reused })
+        : { woke: false }
+      send(res, 200, {
+        ok: true,
+        movedTo: r.movedTo,
+        archived: retired.archived,
+        retiredError: retired.ok ? '' : retired.why,
+        fresh: fresh.ok ? { wsId: fresh.wsId, sessionId: fresh.sessionId, title: fresh.reused ? '' : '跟大肥鱼说话', woke: woke.woke === true } : null,
+        freshError: fresh.ok ? '' : fresh.why,
+        note: fresh.ok
+          ? (retired.ok
+            ? '旧的一切已经封存，旧会话移进「已归档」。新的一局已经开好；点一下「叫醒大肥鱼」，侧栏里才会出现那条会话。'
+            : '状态库已封存，新的一局也开好了；只有旧会话没全收进「已归档」。点一下「叫醒大肥鱼」，侧栏里才会出现会话。')
+          : '状态库已封存，但新会话没建出来（重启 DSH 会自动建）。',
+      })
     }],
 
     ['/', async (req, res) => {

@@ -12,7 +12,7 @@
  *    失败就退回「建新目录 + 中止」，绝不部分搬走（半搬状态比不搬更糟）。
  */
 
-import { rename, mkdir, readdir, stat, cp } from 'node:fs/promises'
+import { rename, mkdir, readdir, stat, cp, readFile, writeFile } from 'node:fs/promises'
 import { join, dirname, resolve } from 'node:path'
 import { rootDir, paths } from './store.js'
 
@@ -81,7 +81,36 @@ export async function describeState(root = rootDir()) {
 }
 
 /**
- * 执行重置。返回 { ok, movedTo, why? }。
+ * 「钥匙」：重置时**不跟着人生一起搬走**的那几样东西。
+ *
+ * 2026-10-26 修（用户 m00751）：`owner.json` 存的是这台机器上那个 B 站账号的
+ * 登录凭据（SESSDATA 等），不是她的记忆。旧实现把整个 root 一起 rename，
+ * 于是「重开一局」之后 cookie 进了备份目录，B 站当场变成未登录——
+ * 用户得重新导一次 cookie 才能让她继续刷。
+ * 她是换了一辈子，不是换了台机器；钥匙还是同一把。
+ *
+ * 2026-10-26 再修（用户 m01201）：`config.json` 也留下。设置页上那些旋钮
+ * （上网时段、每天几醒、刷站额度、成长节奏）说的是「这台机器怎么待她」，
+ * 不是「她经历过什么」。重开一局不该顺手把人家的养法也恢复出厂——
+ * 那更像换了个主人，不像重新活一次。
+ */
+const CARRIED = ['owner.json', 'config.json', '.dev']
+
+/** 把「钥匙」从封存目录里抄回新状态库（rename 之后调用）。抄失败不影响重置成功。 */
+async function carryKeys(from, root, log) {
+  for (const name of CARRIED) {
+    try {
+      const buf = await readFile(join(from, name))
+      await mkdir(root, { recursive: true })
+      await writeFile(join(root, name), buf)
+    } catch (err) {
+      if (String(err?.code ?? '') !== 'ENOENT') log?.(`钥匙没抄回来（${name}）：${String(err?.message ?? err)}`)
+    }
+  }
+}
+
+/**
+ * 执行重置。返回 { ok, movedTo, why?, carried? }。
  *
  * 顺序很关键：
  *   ① 先把「封存目录」的父目录建好；
@@ -105,7 +134,8 @@ export async function resetAll(root = rootDir(), opts = {}) {
 
   try {
     await rename(p.root, target)
-    return { ok: true, movedTo: target, why: '' }
+    await carryKeys(target, p.root, opts.log)
+    return { ok: true, movedTo: target, why: '', carried: CARRIED }
   } catch (err) {
     // EPERM / EXDEV / EBUSY：一般是文件被占用（服务还开着）或跨盘
     const code = String(err?.code ?? '')
@@ -121,7 +151,8 @@ export async function resetAll(root = rootDir(), opts = {}) {
         await cp(p.root, target, { recursive: true, errorOnExist: false })
         const { rm } = await import('node:fs/promises')
         await rm(p.root, { recursive: true, force: true })
-        return { ok: true, movedTo: target, why: '跨盘，已复制后清空' }
+        await carryKeys(target, p.root, opts.log)
+        return { ok: true, movedTo: target, why: '跨盘，已复制后清空', carried: CARRIED }
       } catch (err2) {
         return { ok: false, movedTo: '', why: `复制也失败了：${String(err2?.message ?? err2)}` }
       }

@@ -22,10 +22,14 @@ import { join } from 'node:path'
 import {
   IDENTITY_ORDER,
   IDENTITY_SECTION,
+  WAKE_ORDER,
+  WAKE_SECTION,
   attachIdentity,
+  clearWakeSection,
   identityText,
   registerIdentity,
   resetIdentityCache,
+  setWakeSection,
 } from '../lib/identity.js'
 import { legacySelfDocPath, selfDocPath } from '../lib/selfdoc.js'
 import { DEFAULTS } from '../lib/settings.js'
@@ -65,8 +69,9 @@ test('identityText：读到文件内容，改文件后（mtime 变）能拿到�
   assert.equal(identityText(root), '第二版身份')
 })
 
-test('attachIdentity：挂成 system prompt 段（名字、顺序、text 是函数）', () => {
+test('attachIdentity：挂两段——身份 + 这一次的处境（后者平时是空）', () => {
   resetIdentityCache()
+  clearWakeSection()
   const root = tmp()
   fs.mkdirSync(join(root, 'home'), { recursive: true })
   fs.writeFileSync(selfDocPath(root), '我是她', 'utf8')
@@ -75,12 +80,23 @@ test('attachIdentity：挂成 system prompt 段（名字、顺序、text 是函�
   const agent = { ctx: { systemPrompt: { section: (o) => calls.push(o) } } }
   const r = attachIdentity(agent, root)
   assert.equal(r.ok, true)
-  assert.equal(calls.length, 1)
+  assert.equal(calls.length, 2, '身份一段 + 处境一段')
   const sec = calls[0]
   assert.equal(sec.name, IDENTITY_SECTION)
   assert.equal(sec.order, IDENTITY_ORDER)
   assert.equal(typeof sec.text, 'function', 'text 必须是函数：每轮组装时现读，文件变了立即生效')
   assert.equal(sec.text(), '我是她')
+
+  // 第二段：这一次的处境。平时空串（等于不存在），唤醒前才填。
+  const wake = calls[1]
+  assert.equal(wake.name, WAKE_SECTION)
+  assert.equal(wake.order, WAKE_ORDER)
+  assert.equal(typeof wake.text, 'function')
+  assert.equal(wake.text(), '', '没唤醒时这段必须是空，否则他聊天时她还带着上一次的处境')
+  setWakeSection('第 1 天，你醒了。')
+  assert.equal(wake.text(), '第 1 天，你醒了。')
+  clearWakeSection()
+  assert.equal(wake.text(), '')
 })
 
 test('attachIdentity：没有 systemPrompt 时返回 ok:false，不抛', () => {
@@ -110,7 +126,7 @@ test('registerIdentity：只给她那个 agent 挂（按 cwd 判），别人不�
   handler({ agent: { session: { header: { cwd: join(root, 'other') } }, ctx: { systemPrompt: { section: (o) => others.push(o) } } } })
   handler({ agent: { session: { header: { cwd: '' } }, ctx: { systemPrompt: { section: (o) => others.push(o) } } } })
 
-  assert.equal(mine.length, 1, '她那条会话必须挂上')
+  assert.equal(mine.length, 2, '她那条会话必须挂上（身份 + 处境两段）')
   assert.equal(others.length, 0, '用户自己的会话不许挂')
 })
 

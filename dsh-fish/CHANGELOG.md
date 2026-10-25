@@ -1,6 +1,157 @@
+## 0.5.0 — 2026-10-26
+
+- **修「图片无法预览」**（用户 m01408：「为什么我在和大肥鱼对话的时候，提示我图片无法预览」）。
+  根因是**反斜杠路径**，不是文件缺失、不是权限、也不是跨目录读取。同一张图做了三组对照（2026-10-26 实测）：
+  - `![x](C:\Users\me\.dsh-fish\media\sheet-….png)` → 显示「图片无法预览」
+  - `![x](C:/Users/me/.dsh-fish/media/sheet-….png)` → 正常显示
+  - 同一文件复制到工作区内、用正斜杠 → 正常显示
+  宿主渲染 markdown 图片时把路径拼进 `/api/file?path=`，反斜杠在那一层取不到文件；
+  跨目录读取本身没有问题（宿主文档明确写着「不限制目录包含关系」）。
+  她照抄工具给的路径，所以**插件交给模型的路径一律改成正斜杠**：新增 `lib/posix.js` 的 `slashed()`，
+  用在 `bili_watch` 的返回（`lib/watch.js`）、拼图路径（`lib/video.js`）、封面 markdown（`lib/cover.js`）、
+  「他发了张图，在这儿：…」（`lib/say.js`）。内部读写文件仍用 `node:path`，行为不变。
+  **注意：历史消息里已经写下的反斜杠图不会变好**，只有从这一版起新生成的消息能显示。
+- 新增 `test/posix.test.mjs`（2 条）+ `coverLines` 的「不含反斜杠」断言；
+  全量 `node --test --test-isolation=none` = 600 tests / 598 pass / 2 已知跨文件假红
+  （`cover：fetchCover`、`ULID 单调递增`，单文件跑都绿）。
+
+- **公开发布前的清理**：仓库里出现过的本机用户名统一改成 `me`（`lib/posix.js` 注释、`test/posix.test.mjs` 的三处断言、本文件里的两行示例）；`.gitignore` 补上 `owner.json` / `config.json` / `.dev`。
+  历史提交逐条查过：只有测试用的假凭据（`SESSDATA=abc123`、`abcdef123456` 这类），**没有真实 cookie**；`lib/owner.js` 是读取与打码逻辑，不含任何账号数据。
+
+## 0.4.9 — 2026-10-26
+
+- **改掉重置后那句不诚实的提示**（用户 m01426 真机反馈：「上面说什么重置了，应该能在侧边栏看到对话了，但是我实测不行，还是要点叫醒大肥鱼才行」）。
+  0.4.3 起重置会顺手建新会话、还会 `wakeIfBlank` 叫一声，提示就写成「侧栏里应该已经冒出「跟大肥鱼说话」」——
+  但宿主的可见性规则是 `if (session.blank && session.id !== current) return false`，插件用 API 建的会话
+  **永远不会成为 current**，所以自动叫一声并不保证它出现。实测只有人自己点「叫醒大肥鱼」才会出现。
+  现在三处文案统一改成「点一下「叫醒大肥鱼」，她开一次口，侧栏里才会出现这条会话」：
+  - 重置按钮上方的说明（`lib/client.js` 重置卡）
+  - 点完的即时提示（`doReset` 的 `tail`）
+  - `/reset` 返回的 `note`（`lib/observe.js`，给不走前端的调用方）
+  行为没改（仍然尝试自动唤醒，成功算白赚），只是不再承诺侧栏会自己冒出。
+
+## 0.4.8 — 2026-10-26
+
+- **重置不再把配置也恢复出厂**（用户 m01201：「不仅仅是cookie不变，那个配置也应该不变，就是包括上网、成长的相关设置」）。
+  `resetAll` 的 `CARRIED` 从 `['owner.json', '.dev']` 扩到 `['owner.json', 'config.json', '.dev']`：重开一局搬走的是
+  她经历过的事（事件流、日记、屋子、备份），不搬「这台机器怎么待她」——每天醒几次、上网时段与额度、成长节拍、
+  日记可见性都原样留着。备份里同样还有一份。
+  - 回归补强：`test/p4.test.mjs` 的「重置把钥匙留下」用例改成同时断言 `owner.json` 与 `config.json`
+    （`wakesPerDay` / `browse.perDay` / `memory.sleepEveryDays`）在新库与备份目录里都在。
+- **日记栏一天一页，多了自动出翻页**（用户 m01201：「每天的日记都单独归类」「我倾向于自动出现翻页按钮」）。
+  原来观测台一次把 30 天正文全塞进一个 `<pre>`，日子一多既慢又没法看。现在：
+  - `/diary` 默认只回 `dates`（日期目录，新→旧）+ 最新那一天的正文；`?day=YYYY-MM-DD` 单独取一天，
+    那天没有就 404。不可见时仍然只给 `lockedDates`，开关语义没变。
+  - 页上多天时出现「← 更早　2026-10-20　1 / 12　更晚 →」，单天时只显示日期；翻过的页缓存在内存里，
+    30 秒轮询只刷新当前页，不会把正在看的那页弹走。
+  - 新增回归 1 条（`test/boot.test.mjs`「日记可见时一天一页：默认只给最新一天，?day= 取指定那天」）：
+    默认只带一天、指定 `day` 只回那天（不混进别的日子）、不存在的日子 404。
+- 全量 `node --test --test-isolation=none` = **598 tests / 596 pass / 2 fail**，两条仍是已知跨文件假红
+  （`cover：fetchCover…`、`ULID 单调递增…`，单文件跑都绿）。
+
+## 0.4.7 — 2026-10-26
+
+- **叫醒消息不再派活**（用户 m00928 原话：「叫醒内容太多，就给改到常驻身份文档」）。
+  原来一条唤醒消息里连着两段祈使句手册：`diaryPrompt` 的「今天写日记…写今天发生了什么、你注意到什么」
+  和 `sleepPrompt` 的「这一周过去了…不要总结」。她在 `fish-wake-2026-10-26-manual` 里的 reasoning 是
+  「需要做的是：说一句…然后写日记」——那不是醒来，是领工单。
+  现在：**做法**常驻在身份文档（`persona.DIARY_BRIEF` / `SLEEP_BRIEF` → `selfdoc.renderSelfDoc` 的
+  「## 平常会做的事」两节），**时机**只留一句 `SLEEP_TODAY`（「（今天停下来，想一想。）」）。
+  日记提示整段从唤醒消息里删掉——她每天都记，不需要每次醒来被念一遍。
+- **新增「让她去刷 B 站」按钮，仅本机测试版**（用户 m00928：「仅在本机的测试版生效…我需要用这个按钮
+  来测试刷 b 站功能能不能生效，正式版不会有这个按钮」）。
+  判据是状态库根目录下的 `.dev` 文件（`lib/devmode.js`）：在则 `/state` 返回 `dev: true`，设置页状态卡
+  多出一个按钮；不在则前端连节点都不生成。`.dev` 进了 `resetAll` 的 `CARRIED`，重开一局不会把测试开关弄丢。
+  按钮走 `POST /wake?focus=browse`：跳过 `plan()` 的「今天该不该醒」，并让 `lookBeforeWake` 绕过上网时段与
+  `perDay`（`deps.forceBrowse`）——不绕过风控，那不是功能开关。
+- 新增回归 3 条（`test/nudge.test.mjs`）：forceBrowse 在时段外/额度用完时仍然去取素材；同配置没有 forceBrowse
+  时一次都不发（证明闸门没被顺带拆掉）；`devMode` 只认 `.dev` 文件。
+
+## 0.4.6 — 2026-10-26
+
+- **修掉「她刷不了 B 站」的真凶**（用户 m00751 的现场证据）：`lib/look.js:47` 原来是
+  `(await readEvents(root).then((r) => r.events)).catch(() => [])` —— 括号把 `await` 一起圈进去了，
+  `.catch` 就落在**已经 await 出来的数组**上，数组没有 `catch` → `TypeError: (intermediate value).catch is not a function`。
+  工具把它当成"这次没看到什么"返回给她，她连试两次都只得这一句，日记里还把它写成了"世界没让我看"。
+  现在改成 `await readEvents(root).then((r) => r.events).catch(() => [])`，实测首页三条正常出来。
+- **重置不再把 B 站 cookie 一起封存**：`resetAll` 把整个 `~/.dsh-fish` rename 到备份，
+  `owner.json`（SESSDATA 等登录凭据）也在里面，于是「重开一局」之后她当场变成未登录。
+  现在 rename 之后把 `owner.json` 抄回新状态库（`CARRIED = ['owner.json']`），备份里那份照旧保留。
+  理由：她是换了一辈子，不是换了台机器——钥匙跟人走，记忆不跟。
+- 新增回归 1 条：重置后 `owner.json` 在新状态库里、且封存目录里仍有一份（`test/p4.test.mjs`）。
+
+## 0.4.5 — 2026-10-26
+
+- **叫醒不再把对话扔进「未分组」**：`wakeNow` 原来硬编 `fish-wake-<日期>-manual-<ts>` 当会话 id，
+  宿主不认识这个 id，就按 cwd 另建一条 —— 那条会话不在任何工作区的 `sessionIds` 里，侧栏只能丢进「未分组」，
+  用户在「大肥鱼的家」里根本看不见（m00507）。现在先 `talkSessionId` 取屋里那条会话，真拿不到屋子才退回独立会话，
+  并且 `log` 写明「会落进未分组」。
+- **触发语从「……」改成「（醒一醒）」**：她真是把它当成用户发来的一句话去猜。
+  会话 `fish-wake-2026-10-26-manual` 的 reasoning 原文：「用户发来的只有一个省略号，"……"，没有实质请求。」，
+  侧栏标题还被 first-prompt 模型生成成 `Error`。现在触发语是括号旁白；`scheduler.js` 另加 `WAKE_HINT`
+  进 `fish:wake` 段：「对话里那条括号里的短句不是用户说的话，是叫醒你的信号」。
+- 身份文档新增「## 被叫醒的时候」一节（`selfdoc.js`）：说明括号短句是系统信号、不是用户的话。
+  必须常驻在身份里——手动唤醒走 `wake()` 会带 `WAKE_HINT`，但启动时的 `wakeIfBlank` 不走那段，
+  只放对话里盖不住两个入口。
+- 新增 2 条回归：有屋子时必须落在屋子会话里、不得再造 `fish-wake-*`；屋子没了才退回独立会话且必须 log。
+- 已知限制：宿主没有把已有会话挂回工作区的接口（`workspace/*` 只有 create/delete/rename/archive/pin），
+  已经掉进「未分组」的两条旧会话只能右键归档，挪不回来。
+
+## 0.4.4 — 2026-10-26
+
+- **修掉「重置完看不到新会话」的真正原因**：宿主的侧栏可见性规则是
+  `if (session.blank && session.id !== current) return false` —— 空白会话只在它是当前主视图会话时才显示。
+  插件用 API 建的会话不会被设成当前会话，于是它一直藏在列表外面，点多少次重置都「没有新会话」（m00331）。
+- `lib/home.js` 新增 `wakeIfBlank(ctx, { sessionId, freshOnly })`：查 `sessionController.list()` 的 `blank`，
+  确实空白就发一轮 `WAKE_TRIGGER`（与 scheduler 同一句），让她动起来；有内容则一个字不说。
+  判断失败时保守降级：只有刚建出来的会话（`freshOnly`）才按空白处理。
+- **只在两个入口叫**：`index.js` 启动、`observe.js` 的 `POST /reset`。
+  不放进 `bootstrapHome`——`talkSessionId` 在屋子缺失时也会调它，那样每次「第一次说话」会多叫一次，
+  她一轮被点两次火（`test/p3.test.mjs` 的「说一句话」正是这么红的）。`POST /reset` 的 `fresh` 一并带出 `woke`。
+- 唤醒语挪到 `lib/wakeconst.js`：`scheduler.js` 已经 import 了 `home.js`，反过来 import 会成环。
+- 新增 `test/wake.test.mjs`（6 条）：空白才叫、有内容不叫、查不到按有内容、list 抛错不穿透、
+  缺服务明确降级、prompt 失败只记日志。
+
+## 0.4.3 — 2026-10-26
+
+- 重置后**立刻**开好新会话：`POST /reset` 在「搬状态库 + 归档旧会话」之后调用
+  `bootstrapHome(ctx, { root, preset })`，返回值多带 `fresh: { wsId, sessionId }` / `freshError`。
+  此前新会话只在 DSH 启动时（`bootstrapHome`）创建，所以点完重置侧栏是空的，用户不知道该去哪说话（m00260）。
+- 前端重置提示改为「侧栏『跟大肥鱼说话』已经开好，点进去就能说话」，重置卡文案同步。
+- 事实核对（写进回答，不进代码）：宿主 Session 行「...」菜单只有 分叉/归档/取消归档/置顶/取消置顶/复制 Session ID/重命名，
+  **没有删除会话**；能删的只有「删除工作区」，且它只把工作区移出列表、会话归到「未分组」。
+
 # 更新日志
 
 这个插件的版本号含义很简单：**改了事件格式 = 次版本号进位**，其余都只是功能与文案。
+
+---
+
+## 0.4.2 · 2026-10-25
+
+一句话：**「重开一局」现在真的干净了，暗色模式下的下拉框也看得见了。**
+
+### 修复
+
+- **重置之后侧栏还留着旧对话（用户报告）**：`resetAll` 只搬 `~/.dsh-fish/`，而宿主把工作区和会话登记在
+  `~/.dsh/storages/workspace.json` 里——重启也不会变，因为那个注册表压根没被碰过。
+  现在重置成功后会把「大肥鱼的家」里登记的所有旧会话交给宿主的 `workspaceRegistry.archiveSession(sid, { stopActivity: true })`：
+  它们从工作区主列表移进「已归档」，文件一个字节不删；工作区保留（她下次启动还要住这间屋子）。
+  宿主没有「删除会话」的接口（已核实只有 archive / unarchive / pin），所以能做到的边界就是归档。
+- **暗色模式下所有下拉框变成白条、看不见字（用户报告）**：`select` 的背景写的是 `transparent`，
+  原生控件在深色主题里用 UA 白底绘制，而字色是 `--dsw-alias-label-primary`（深色下接近白）——白底白字。
+  改为 `--dsw-alias-bg-layer-1` 不透明层色 + `color-scheme: inherit`（跟随宿主在 `<html>` 上设的 dark/light），
+  并给 `option` 显式补同组底色/字色。`input[type=time]` 同样的毛病一并改。
+- **设置页的重置文案说了假话**：原来写「你在 DSH 侧栏那个会话也会一起被封存」，
+  实际根本没碰宿主侧。现在写的是真的：旧对话移进「已归档」、工作区留着、下次启动是新会话。
+
+### 工程
+
+- 新增 `lib/retire.js`（`readHomeRecord` / `retireHomeSessions`）与 `lib/observe.js` 的 `/reset` 串联：
+  resetAll 之前先读 `home.json`（之后它就被搬走了），成功后归档；归档不完整只回 `retiredError`，不让重置失败。
+- 新增 `test/retire.test.mjs` 7 条：全量归档去重、home.json 被搬走时用提前读的记录、无 registry 时明确降级、
+  老宿主单参数降级、单条失败不抛。
+- 测试数 575 → 582。
 
 ---
 

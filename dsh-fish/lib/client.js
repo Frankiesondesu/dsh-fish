@@ -73,16 +73,21 @@ window.__ModuleLoader__.load({
       '.dfish input[type=number]{width:62px;background:transparent;border:.5px solid var(--dsw-alias-border-l2);border-radius:6px;color:var(--dsw-alias-label-primary);font-size:12.5px;height:26px;padding:0 7px;outline:none}',
       '.dfish input[type=text]{flex:1;min-width:200px;background:transparent;border:.5px solid var(--dsw-alias-border-l2);border-radius:6px;color:var(--dsw-alias-label-primary);font-size:12.5px;height:26px;padding:0 7px;outline:none}',
       '.dfish button{background:transparent;border:.5px solid var(--dsw-alias-border-l2);border-radius:7px;color:var(--dsw-alias-label-primary);font-size:12.5px;height:28px;padding:0 12px;cursor:pointer}',
-      '.dfish button:hover:not(:disabled){border-color:var(--dsw-alias-brand-primary);color:var(--dsw-alias-brand-primary)}',
+      '.dfish button:hover:not(:disabled){border-color:var(--dsw-alias-state-business-primary);color:var(--dsw-alias-state-business-primary)}',
       '.dfish button:disabled{opacity:.5;cursor:default}',
       '.dfish textarea{width:100%;box-sizing:border-box;min-height:66px;resize:vertical;background:transparent;border:.5px solid var(--dsw-alias-border-l2);border-radius:8px;color:var(--dsw-alias-label-primary);font:inherit;font-size:13px;line-height:20px;padding:8px 10px;outline:none}',
       '.dfish .said{white-space:pre-wrap;word-break:break-word;font-size:13px;line-height:21px;border-left:2px solid var(--dsw-alias-border-l2);padding-left:10px;margin:6px 0}',
-      '.dfish .badge{display:inline-block;min-width:16px;text-align:center;padding:0 5px;border-radius:999px;background:var(--dsw-alias-brand-primary);color:#fff;font-size:10.5px;line-height:16px;margin-left:6px}',
+      '.dfish .badge{display:inline-block;min-width:16px;text-align:center;padding:0 5px;border-radius:999px;background:var(--dsw-alias-state-business-primary);color:var(--dsw-alias-label-primary-inverted,#fff);font-size:10.5px;line-height:16px;margin-left:6px}',
       '.dfish .tabs{display:flex;align-items:center;gap:6px;flex-wrap:wrap;border:.5px solid var(--dsw-alias-border-l2);border-radius:10px;padding:5px;background:rgba(128,128,128,.06)}',
       '.dfish .tab{background:transparent;border:.5px solid transparent;border-radius:7px;height:28px;padding:0 11px;font-size:12.5px;color:var(--dsw-alias-label-secondary,var(--dsw-alias-label-tertiary));cursor:pointer}',
       '.dfish .tab:hover{color:var(--dsw-alias-label-primary);background:rgba(128,128,128,.12)}',
-      '.dfish .tab.on{background:var(--dsw-alias-brand-primary);border-color:var(--dsw-alias-brand-primary);color:#fff;font-weight:500}',
-      '.dfish .tab.on:hover{color:#fff}',
+      // 选中态踩过两次坑（2026-10-25 用户真机截图暴露）：
+      // ① 最初写死 color:#fff —— 深色主题下白字压白底，整片看不见；
+      // ② 改成 brand-primary 当底色 —— 那其实是「正文墨色」（浅色 #0f1115 近黑 / 深色 #f9fafb 近白），
+      //    于是浅色主题出现黑块、深色主题出现白块，仍然难看。
+      // 正确做法：底色只用中性的浅罩层，强调靠 state-business-primary 的字色和描边。
+      '.dfish .tab.on{background:rgba(128,128,128,.18);border-color:var(--dsw-alias-border-l3);color:var(--dsw-alias-state-business-primary);font-weight:500}',
+      '.dfish .tab.on:hover{color:var(--dsw-alias-state-business-primary);background:rgba(128,128,128,.24)}',
       '.dfish .tabs .grow{flex:1}',
       '.dfish .tabhint{font-size:11.5px;line-height:16px;color:var(--dsw-alias-label-tertiary);margin:-6px 0 0}',
       '.dfish .page{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:14px;align-items:start}',
@@ -95,20 +100,30 @@ window.__ModuleLoader__.load({
       '.dfish .fhint{font-size:11.5px;line-height:16px;color:var(--dsw-alias-label-tertiary)}',
       '.dfish .hint{font-size:11.5px;line-height:17px;color:var(--dsw-alias-label-tertiary);margin:0}',
       '.dfish .warn{font-size:12px;line-height:18px;color:#b8860b;margin:6px 0}',
-      '.dfish select{height:28px;border:.5px solid var(--dsw-alias-border-l2);border-radius:7px;background:transparent;color:var(--dsw-alias-label-primary);font-size:12.5px;padding:0 8px;outline:none;cursor:pointer;max-width:240px}',
-      '.dfish input[type=time]{height:28px;border:.5px solid var(--dsw-alias-border-l2);border-radius:7px;background:transparent;color:var(--dsw-alias-label-primary);font-size:12.5px;padding:0 6px;outline:none}',
+      // 下拉框（2026-10-25 用户真机反馈：暗色下「只有一个白条」，字全看不见）。
+      // 根因：select 背景写的是 transparent，原生控件在深色主题里会用 UA 白底绘制，
+      // 而字色是 label-primary（深色主题下接近白）——白底白字。option 弹层同理。
+      // 修法：底色改成主题的不透明层色，option 显式给同一组底色/字色，
+      // color-scheme 继承 <html> 上宿主设的 dark/light（原生弹层跟着切换）。
+      '.dfish select{height:28px;border:.5px solid var(--dsw-alias-border-l2);border-radius:7px;background-color:var(--dsw-alias-bg-layer-1,Field);color:var(--dsw-alias-label-primary,CanvasText);color-scheme:inherit;font-size:12.5px;padding:0 8px;outline:none;cursor:pointer;max-width:240px}',
+      '.dfish select option{background-color:var(--dsw-alias-bg-layer-1,Field);color:var(--dsw-alias-label-primary,CanvasText)}',
+      '.dfish input[type=time]{height:28px;border:.5px solid var(--dsw-alias-border-l2);border-radius:7px;background-color:var(--dsw-alias-bg-layer-1,Field);color:var(--dsw-alias-label-primary,CanvasText);color-scheme:inherit;font-size:12.5px;padding:0 6px;outline:none}',
       '.dfish .step{width:26px;height:26px;padding:0;border-radius:6px;font-size:14px;line-height:1}',
+      // 日记翻页条（2026-10-26）：日期多于一天才出现，一行放得下三个元素就够。
+      '.dfish .pager{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:2px 0 8px}',
+      '.dfish .pager button{height:24px;padding:0 10px;font-size:12px;border-radius:6px}',
+      '.dfish .pager .dim{font-size:12px;font-variant-numeric:tabular-nums}',
       '.dfish .sw{position:relative;width:40px;height:22px;padding:0;border-radius:999px;border:.5px solid var(--dsw-alias-border-l2);background:rgba(128,128,128,.18);cursor:pointer;transition:background .15s}',
       '.dfish .sw .knob{position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;background:#fff;box-shadow:0 1px 2px rgba(0,0,0,.25);transition:left .15s}',
-      '.dfish .sw.on{background:var(--dsw-alias-brand-primary);border-color:var(--dsw-alias-brand-primary)}',
+      '.dfish .sw.on{background:var(--dsw-alias-state-business-primary);border-color:var(--dsw-alias-state-business-primary)}',
       '.dfish .sw.on .knob{left:20px}',
       '.dfish .savebar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding-top:4px}',
-      '.dfish button.primary{background:var(--dsw-alias-brand-primary);border-color:var(--dsw-alias-brand-primary);color:#fff}',
-      '.dfish button.primary:hover:not(:disabled){opacity:.9;color:#fff}',
+      '.dfish button.primary{background:var(--dsw-alias-state-business-primary);border-color:var(--dsw-alias-state-business-primary);color:var(--dsw-alias-label-primary-inverted,#fff)}',
+      '.dfish button.primary:hover:not(:disabled){opacity:.9;color:var(--dsw-alias-label-primary-inverted,#fff)}',
       // GitHub 链接（2026-10-25 用户要求）：商标小图 + 文字，点开新窗口。
       // 用 inline-flex 让 icon 和文字基线对齐；hover 只换颜色不动位置。
       '.dfish .ghlink{display:inline-flex;align-items:center;gap:6px;font-size:13px;line-height:20px;color:var(--dsw-alias-label-primary);text-decoration:none;border-radius:6px;padding:2px 4px;margin-left:-4px}',
-      '.dfish .ghlink:hover{color:var(--dsw-alias-brand-primary);background:rgba(128,128,128,.1)}',
+      '.dfish .ghlink:hover{color:var(--dsw-alias-state-business-primary);background:rgba(128,128,128,.1)}',
       '.dfish .ghlink svg{flex:0 0 auto}',
     ].join('\n')
 
@@ -292,6 +307,29 @@ window.__ModuleLoader__.load({
       // 只有点按钮才查，不自动轮询——她运行期不该操心自己是几号版本。
       const [upd, setUpd] = useState(null)
       const [updBusy, setUpdBusy] = useState(false)
+      // 日记翻页（2026-10-26 用户 m01201）：一天一页、日期多于一天才出翻页按钮。
+      // 正文按天取（`/diary?day=…`），翻过的缓存进 ref，来回翻不重复请求。
+      const [diaryDay, setDiaryDay] = useState(0)
+      const diaryCache = useRef({})
+      const diaryLoaded = useRef(false)
+      const [, setDiaryTick] = useState(0)
+
+      // 当前这天的正文没缓存就去取一次（一页一天，不预取；翻回去靠缓存）。
+      const diaryDates = diary?.dates ?? []
+      const diaryIdx = Math.min(Math.max(diaryDay, 0), Math.max(diaryDates.length - 1, 0))
+      const diaryCur = diaryDates[diaryIdx] ?? null
+      useEffect(() => {
+        if (!diaryCur || diaryCache.current[diaryCur] !== undefined) return undefined
+        let dead = false
+        jget(`/diary?day=${diaryCur}`)
+          .then((r) => {
+            if (dead) return
+            diaryCache.current[diaryCur] = r?.text ?? ''
+            setDiaryTick((n) => n + 1)
+          })
+          .catch(() => {})
+        return () => { dead = true }
+      }, [diaryCur])
 
       useEffect(() => {
         if (!zoom) return undefined
@@ -327,6 +365,13 @@ window.__ModuleLoader__.load({
           setBeliefs(b)
           setEvents(e.rows || [])
           setDiary(d)
+          // 首天正文随 /diary 一起回来了，先灌进翻页缓存（省一次往返）。
+          for (const it of d?.items ?? []) diaryCache.current[it.date] = it.text
+          // 只有第一次载入才跳到最新一天：30 秒轮询不该把人正在看的那页弹走。
+          if (!diaryLoaded.current) {
+            setDiaryDay(0)
+            diaryLoaded.current = true
+          }
           setBrowse(br)
           setInbox(ib)
           setHome(hm)
@@ -630,6 +675,20 @@ window.__ModuleLoader__.load({
         } catch (e) { setOwNote(e.message) } finally { setBusy('') }
       }
 
+      // 本机测试版专用（2026-10-26，用户 m00928）：绕过「今天该不该醒」，直接叫她去刷 B 站。
+      // 存在意义就是验证「她到底能不能刷」——所以不做配额判断、也不看上网时段。
+      // 正式版不渲染这个按钮（服务端 /state 的 dev 由 `.dev` 文件决定）。
+      const browseNow = async () => {
+        setBusy('wake-browse'); setNote('')
+        try {
+          const r = await jpost('/wake?focus=browse')
+          setNote(r.ok ? '叫醒她了，这一轮她会去看 B 站首页。刷新一下能看到她的新会话。' : `没叫：${r.why || ''}`)
+          await load()
+        } catch (e) {
+          setErr(e.message)
+        } finally { setBusy('') }
+      }
+
       const wake = async () => {
         setBusy('wake'); setNote('')
         try {
@@ -694,7 +753,18 @@ window.__ModuleLoader__.load({
         try {
           const r = await jpost('/reset', { confirm: 'reset' })
           setResetAsk(false)
-          setNote(r.movedTo ? `已重开。旧的都在：${r.movedTo}` : (r.note || '已重开。'))
+          const head = r.movedTo ? `已重开。旧的都在：${r.movedTo}` : (r.note || '已重开。')
+          // 单行：这个 note 用 <pre class="ok"> 渲染，换行会撑出一块绿色告示，不如一句话说清。
+          // 2026-10-26（m01426 真机反馈）：重置会把新会话建出来，也会顺手叫一声，但**侧栏仍然看不见**——
+          // 宿主的 sessionVisible 规则是「空白会话只有成为当前会话才显示」，而插件用 API 建的会话永远
+          // 不会成为 current。实测只有用户自己点一次「叫醒大肥鱼」才会出现。所以提示以这一步为准，
+          // 不再承诺「侧栏已经冒出」。
+          const tail = r.freshError
+            ? ` 新会话没建出来：${r.freshError}`
+            : (r.retiredError
+              ? ` 旧会话没收干净：${r.retiredError}。点一下「叫醒大肥鱼」，她开一次口，侧栏里才看得见新会话。`
+              : ' 侧栏这会儿还看不到她——点一下上面的「叫醒大肥鱼」，她开一次口，「跟大肥鱼说话」才会出现在侧栏里。')
+          setNote(`${head}${tail}`)
         } catch (e) {
           setErr(e.message)
         } finally { setBusy('') }
@@ -833,7 +903,7 @@ window.__ModuleLoader__.load({
         h('div', { className: 'dim' },
           '旧的一切不会删——整个状态库会被改名搬到同级的 dsh-fish-backups 里，想找回来整包搬回去就行。',
           '重开后是第一天，会重新从「你刚开始存在」开始。',
-          '你在 DSH 侧栏那个会话也会一起被封存（不然会出现"人重开了、话还留着"）。'),
+          '侧栏「大肥鱼的家」里那些旧对话会被移进「已归档」，工作区留着；点完会开一条新会话，但要再点一下「叫醒大肥鱼」，她开一次口，侧栏里才看得见（文件同样不删）。'),
         resetInfo ? h('div', { className: 'dim' },
           `现在有：事件 ${resetInfo.events} 条、日记 ${resetInfo.diaries} 天、报告 ${resetInfo.reports} 天。`) : null,
         h('div', { className: 'row' },
@@ -854,6 +924,17 @@ window.__ModuleLoader__.load({
       // 既容易误触，也不符合那一栏的语义。左边说状态、右边说「叫醒」，
       // 位置本身就说明了它是针对「现在这个状态」的操作。
       const phaseColor = { asleep: '#8a8a8a', waiting: '#b8860b', 'awake-idle': '#d97706', browsing: '#2563eb', talking: '#16a34a', writing: '#7c3aed', offline: '#9ca3af' }
+      // 只有本机测试版（`.dev` 文件）才出现。判据来自服务端 /state 的 dev，
+      // 不是前端猜的——正式版里这个字段恒为 false，按钮连节点都不生成。
+      const browseBtn = state?.dev
+        ? h('button', {
+            className: 'ghost',
+            onClick: browseNow,
+            disabled: busy === 'wake-browse',
+            style: { flex: '0 0 auto' },
+            title: '测试用：绕过「今天该不该醒」，直接叫她去看一眼 B 站首页。',
+          }, busy === 'wake-browse' ? '送出门…' : '让她去刷 B 站')
+        : null
       const wakeBtn = h('button', {
         className: 'ghost',
         onClick: wake,
@@ -960,6 +1041,7 @@ window.__ModuleLoader__.load({
               h('b', null, st ? st.label : '状态读取中…'),
               st && st.detail ? h('span', { className: 'dim' }, st.detail) : null),
             avatarCtl),
+          browseBtn,
           wakeBtn),
         st
           ? (Array.isArray(st.timeline) && st.timeline.length
@@ -1283,16 +1365,30 @@ window.__ModuleLoader__.load({
                     : null))),
 
         group('日记',
-          '如果你在「成长」页勾选了看日记。日记会在这里显示',
+          '如果你在「成长」页勾选了看日记。日记会在这里显示，一天一页，多天时自动出现翻页',
           !diary ? h('p', { className: 'empty' }, '读取中…')
             : !diary.enabled ? h('p', { className: 'empty' }, '没在写日记。')
             : !diary.visible ? h('p', { className: 'empty' },
                 `已写 ${(diary.lockedDates || []).length} 天，但设置里是不给你看。`)
-            : !diary.items.length ? h('p', { className: 'empty' }, '还没写')
-            : h('div', null, diary.items.map((it) =>
-                h('div', { key: it.date },
-                  h('p', { className: 'dim' }, it.date),
-                  h('pre', null, esc(it.text)))))),
+            : !diaryDates.length ? h('p', { className: 'empty' }, '还没写')
+            : h('div', null,
+                diaryDates.length > 1
+                  ? h('div', { className: 'row pager' },
+                      h('button', {
+                        className: 'ghost',
+                        disabled: diaryIdx >= diaryDates.length - 1,
+                        onClick: () => setDiaryDay(diaryIdx + 1),
+                      }, '← 更早'),
+                      h('span', { className: 'dim' }, `${diaryCur}　${diaryIdx + 1} / ${diaryDates.length}`),
+                      h('button', {
+                        className: 'ghost',
+                        disabled: diaryIdx <= 0,
+                        onClick: () => setDiaryDay(diaryIdx - 1),
+                      }, '更晚 →'))
+                  : h('p', { className: 'dim' }, diaryCur),
+                diaryCache.current[diaryCur] === undefined
+                  ? h('p', { className: 'empty' }, '读取中…')
+                  : h('pre', null, esc(diaryCache.current[diaryCur])))),
 
         group('本插件工作自检',
           '这个插件没有要安装的依赖（只用 Node 自带的东西，外加可选的 ffmpeg）。真会坏的是别的：状态库写不进去、cookie 过期、宿主没给接口、B 站风控。',
@@ -1902,7 +1998,7 @@ window.__ModuleLoader__.load({
                       setBusy('rep')
                       try { setReports(await jget(`/reports?date=${d}`)) } catch (e) { setErr(e.message) } finally { setBusy('') }
                     },
-                    style: d === reports.date ? { borderColor: 'var(--dsw-alias-brand-primary)' } : undefined,
+                    style: d === reports.date ? { borderColor: 'var(--dsw-alias-state-business-primary)' } : undefined,
                   }, d))),
                 h('div', { className: 'row', style: { flexWrap: 'wrap' } },
                   h('button', { onClick: () => setShowReport(!showReport) }, showReport ? '收起报告' : '每日报告'),

@@ -14,7 +14,7 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, rm, writeFile, mkdir, readdir, stat } from 'node:fs/promises'
+import { mkdtemp, rm, writeFile, readFile, mkdir, readdir, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -369,6 +369,35 @@ test('重置是改名封存：旧事件一个字节不少地留在 backups 里',
 
     // 封存目录名字带时间戳
     assert.match(r.movedTo, /reset-\d{8}-\d{6}$/)
+  })
+})
+
+test('重置把钥匙留下：owner.json 与 config.json 抄回新状态库，备份里也还有一份', async () => {
+  // 2026-10-26（用户 m00751）：旧代码把整个 root 一起 rename，
+  // 于是「重开一局」之后 cookie 进了备份目录，B 站当场变成未登录。
+  // 她是换了一辈子，不是换了台机器——钥匙得跟人走。
+  await withRoot(async (root) => {
+    const key = { uid: 12345, name: '某人', cookie: 'SESSDATA=abc; bili_jct=def' }
+    await writeFile(paths(root).owner, JSON.stringify(key), 'utf8')
+    // 2026-10-26（用户 m01201）：设置页那些旋钮（上网时段、每天几醒、成长节奏）
+    // 说的是「这台机器怎么待她」，不是「她经历过什么」。重开一局不该把养法也恢复出厂。
+    const cfg = { wakesPerDay: 3, browse: { perDay: 5 }, memory: { sleepEveryDays: 14 } }
+    await writeFile(paths(root).config, JSON.stringify(cfg), 'utf8')
+
+    const r = await resetAll(root)
+    assert.equal(r.ok, true)
+
+    // 新状态库里钥匙还在（内容一个字节不变）
+    const kept = JSON.parse(await readFile(paths(root).owner, 'utf8'))
+    assert.deepEqual(kept, key)
+    const keptCfg = JSON.parse(await readFile(paths(root).config, 'utf8'))
+    assert.deepEqual(keptCfg, cfg)
+
+    // 封存目录里同样还有一份——备份不能因为"抄回来"就变缺
+    const old = JSON.parse(await readFile(join(r.movedTo, 'owner.json'), 'utf8'))
+    assert.deepEqual(old, key)
+    const oldCfg = JSON.parse(await readFile(join(r.movedTo, 'config.json'), 'utf8'))
+    assert.deepEqual(oldCfg, cfg)
   })
 })
 

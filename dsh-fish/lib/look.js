@@ -44,7 +44,12 @@ export async function lookOnce(o = {}) {
     const cfg = o.cfg ?? (await loadConfig(root)).config
     const what = String(o.what ?? 'home')
     const limit = Math.max(1, Math.min(20, Number(cfg?.browse?.topN ?? 4)))
-    const events = o.events ?? (await readEvents(root).then((r) => r.events)).catch(() => [])
+    // 2026-10-26 修（用户 m00751 现场证据）：原来是
+    //   (await readEvents(root).then((r) => r.events)).catch(() => [])
+    // 括号把 await 一起圈进去了，于是 `.catch` 作用在**已经 await 出来的数组**上，
+    // 数组没有 catch → TypeError: (intermediate value).catch is not a function。
+    // 她两次刷首页/搜索都只拿到这个报错，日记里还把它当成了"世界没让我看"。
+    const events = o.events ?? (await readEvents(root).then((r) => r.events).catch(() => []))
     const seen = seenBvids(events)
 
     let list = []
