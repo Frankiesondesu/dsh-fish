@@ -32,6 +32,45 @@ import { isHerAgent } from './restrict.js'
 export const IDENTITY_SECTION = 'fish:identity'
 export const IDENTITY_ORDER = 8500
 
+/**
+ * 「这一次的处境」段（2026-10-25 晚）。
+ *
+ * 为什么另开一段（用户 m04080 报的问题）：
+ *   定时唤醒、自动刷 B 站推视频给她时，唤醒消息原来整段走 `sc.prompt()` 进对话，
+ *   于是他在对话框里看见「你该醒了」「这次推给你的是……」这些系统说的话。
+ *   宿主没有「模型看得见、用户看不见」的注入通道（核对过 asar：
+ *   `PromptContentPart` 没有 hidden 字段，`SurfaceOp` 只有 append/replace，
+ *   append 就一定进人类可见的对话流）。所以唯一的办法是**不把它放进对话**——
+ *   正文改从 system prompt 走，对话里只留一句极短的触发语。
+ *
+ * 生命周期：`setWakeSection()` 在 `sc.prompt()` **之前**写好，
+ * 她这一轮组装提示词时求值拿到；`turn/end` 之后立刻 `clearWakeSection()`，
+ * 免得他之后主动聊天时她还带着上一次的「此刻处境」。
+ */
+export const WAKE_SECTION = 'fish:wake'
+export const WAKE_ORDER = 8700
+
+/** 这一次唤醒的处境正文；空串表示没有（正常聊天时就是空）。 */
+let wakeText = ''
+
+/**
+ * 设这一次的处境正文。传空串等于清掉。
+ * @param {string} text
+ */
+export function setWakeSection(text) {
+  wakeText = String(text ?? '')
+}
+
+/** 清掉。回合结束、唤醒失败、插件卸载时都要调。 */
+export function clearWakeSection() {
+  wakeText = ''
+}
+
+/** 测试用：看现在挂着什么。 */
+export function getWakeSection() {
+  return wakeText
+}
+
 const cache = { file: '', mtimeMs: -1, text: '' }
 
 /**
@@ -78,6 +117,13 @@ export function attachIdentity(agent, root) {
       order: IDENTITY_ORDER,
       // 每次组装提示词时求值：文件变了，下一轮就是新的她。
       text: () => identityText(root),
+    })
+    // 「这一次的处境」单独一段：平时是空串（等于不存在），唤醒前才填。
+    // 它不进对话历史，所以他看不到系统在跟她说些什么。
+    sp.section({
+      name: WAKE_SECTION,
+      order: WAKE_ORDER,
+      text: () => wakeText,
     })
     return { ok: true }
   } catch (err) {

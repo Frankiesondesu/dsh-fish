@@ -101,6 +101,9 @@ test('cover：coverLines 只给已经存在的图', () => {
   const lines = coverLines(picks, root)
   assert.equal(lines.length, 1)
   assert.match(lines[0], /^!\[二舅上\]\(.*BV1MN4y177PB\.jpg\)$/, '标题里的方括号要去掉')
+  // 2026-10-26 用户实测：反斜杠路径在客户端显示「图片无法预览」，正斜杠正常
+  assert.ok(!lines[0].includes('\\'), '图片路径不能带反斜杠')
+  assert.match(lines[0], /\(C:\//, '是正斜杠的盘符路径')
   assert.equal(coverPath(root, BV2), '')
 })
 

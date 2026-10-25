@@ -26,6 +26,7 @@ import { deriveSelf } from './derive.js'
 import { writeInboxFile, newHerEventsSince } from './inbox.js'
 import { bumpTurns, rotateTalkSession, talkSessionId } from './home.js'
 import { addExchange } from './talkmem.js'
+import { slashed } from './posix.js'
 import { refreshSelfDoc } from './selfdoc.js'
 import { looksLikeRewriting } from './guard.js'
 import { classifyReaction } from './refuse.js'
@@ -118,7 +119,9 @@ async function recordReaction({ events = [], model, body, root }) {
 export async function sayToHer(ctx, text, deps = {}) {
   const root = deps.root ?? rootDir()
   const log = deps.log ?? (() => {})
-  const imagePath = deps.imagePath ? String(deps.imagePath) : ''
+  // 交给模型的正斜杠：她要是把这张图贴回来说话，反斜杠路径在客户端会显示成「无法预览」
+  //（2026-10-26 实测）。read_image 读正斜杠路径同样没问题。
+  const imagePath = deps.imagePath ? slashed(deps.imagePath) : ''
   let body = String(text ?? '').trim()
 
   // 只发图不写字是合法的：他自己也常这么干

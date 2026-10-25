@@ -14,11 +14,11 @@
 
 import { deriveSelf } from './derive.js'
 import { validateEvent } from './schema.js'
-import { readEvents, appendEvent, rootDir, readDaily, ensureHer } from './store.js'
+import { readEvents, appendEvent, rootDir, ensureHer } from './store.js'
 import { loadConfig, dateKey, inWindow, pickWakeTime } from './settings.js'
 import { plan } from './generator.js'
 import { findTemplate } from './events.js'
-import { diaryPrompt, sleepPrompt, offerPrompt } from './persona.js'
+import { offerPrompt, SLEEP_TODAY } from './persona.js'
 import { offerDueDay, pendingOffer, grantableRules } from './unlock.js'
 import { withWake } from './wakewin.js'
 import { detectAbsence } from './absence.js'
@@ -30,7 +30,9 @@ import { riskState, browsePlan, noteRisk } from './risk.js'
 import { scanReplies, renderReplies } from './comment.js'
 import { flushReport } from './report.js'
 import { talkSessionId } from './home.js'
+import { WAKE_TRIGGER } from './wakeconst.js'
 import { refreshSelfDoc } from './selfdoc.js'
+import { setWakeSection, clearWakeSection } from './identity.js'
 
 const TICK_MS = 60_000
 const INITIAL_DELAY_MS = 20_000
@@ -38,6 +40,24 @@ const WAKE_TIMEOUT_MS = 5 * 60_000
 // 等她的回合结束时最多等这么久。一次唤醒的思考通常 10–40 秒，
 // 90 秒足够；再久就说明卡住了，先把报告写出去，别让用户干等。
 const REPORT_WAIT_MS = 90_000
+
+// 2026-10-26（用户 m00507）：她看不懂对话里那句「……」。
+// 真机 reasoning 原话是「用户发来的只有一个省略号，没有实质请求」，接着猜
+// 「用户的意思是让我留一句话、写日记」——把系统叫醒当成了用户的请求。
+// 这句说明只进 system prompt 的 fish:wake 段（用户看不见），把性质讲清楚；
+// 触发语本身也换成了括号旁白（见 wakeconst.js）。两处必须一起在，只有其一
+// 她仍会去猜。
+const WAKE_HINT = '对话里那条括号里的短句不是用户说的话，是叫醒你的信号。不用回应它，也不用问它什么意思——这一轮是你自己的。'
+
+/**
+ * 唤醒时对话里唯一出现的那句话（2026-10-25 晚）。
+ *
+ * 为什么只剩这一句：真正的「这一次的处境」走 system prompt 的 `fish:wake` 段，
+ * 不进对话历史。对话里必须**有一条** user 消息才能把回合点起来，所以留这句。
+ * 它要短到不带任何剧本味——用户看到的是「屋子里有人动了」，而不是系统在给她派活。
+ */
+
+
 
 /**
  * 等这一次唤醒的回合真正结束。
@@ -196,7 +216,11 @@ export async function lookBeforeWake(root, model, config, dk, deps, log) {
   const empty = { text: '', intro: '', picks: [] }
   if (!config?.browse?.enabled) return empty
   const perDay = Number(config?.browse?.perDay ?? 0)
-  if (!(perDay > 0)) return empty
+  // forceBrowse（2026-10-26）：设置页那个「让她去刷 B 站」按钮专用。
+  // 它只在**本机测试版**出现，用途就是验证「她到底能不能刷」——所以绕过
+  // 当日上限与上网时段，别的什么都不改（素材仍然现场取、风控仍然生效）。
+  const forced = deps.forceBrowse === true
+  if (!forced && !(perDay > 0)) return empty
 
   // 上网时段（2026-10-23 加）：醒来和上网是两件事。
   // 醒了但不在上网时段 → 今天这轮不上网，她只说话、写日记。
@@ -205,7 +229,7 @@ export async function lookBeforeWake(root, model, config, dk, deps, log) {
     : Array.isArray(config?.window) ? config.window
       : ['00:00', '23:59'] // 两处都没配 → 全天可上网，保持旧行为
   // deps.now 只为测试注入：线上永远走 new Date()。
-  if (!inWindow({ window: bw }, deps.now ?? new Date())) return empty
+  if (!forced && !inWindow({ window: bw }, deps.now ?? new Date())) return empty
 
   // 风控闸（2026-10-23）：被锁着就不碰 B 站，但人照样醒。
   // 以前的做法是"接口失败 → 静默返回空"，于是页面看起来像"她今天什么都没说"，
@@ -220,7 +244,7 @@ export async function lookBeforeWake(root, model, config, dk, deps, log) {
     const events = deps.events ?? (await readEvents(root)).events
     // 今天的次数用完就不刷了。注意：**素材是每次唤醒现场取的，不缓存**——
     // 缓存会让她连着几天看同一批东西，那是投喂，不是刷站。
-    if (browseCountToday(events, dk) >= perDay) return empty
+    if (!forced && browseCountToday(events, dk) >= perDay) return empty
 
     // 刚被风控过 → 减半试探。不是"恢复原样当没发生过"，
     // 因为下一次撞墙的罚则会比这次更久。
@@ -310,13 +334,12 @@ async function wake(ctx, root, model, config, decision, dk, log, deps = {}) {
     // 能说话这件事的说明也在 AGENTS.md 里（开关打开才写进去），不在这儿重复。
   }
 
-  // 日记：同一条消息里顺带让她写，不另起一次唤醒（另起就是双倍 token，而她的注意力
-  // 本来就该是连续的：想完这件事，顺便记一下今天）。
-  // 已经写过就不问了 —— 判据是 diary/ 目录里今天有没有文件。
-  if (config.diary?.enabled !== false) {
-    const existing = await readDaily('diaryDir', dk, root).catch(() => null)
-    if (!existing) parts.push('', diaryPrompt(model))
-  }
+  // 日记：**不再在叫醒消息里推**（2026-10-26，用户 m00928：「叫醒仅仅只是叫醒」）。
+  // 病历：原来这里整段塞 diaryPrompt（「今天写日记…写今天发生了什么…」），加上后面的
+  // 「想一想」段，一条叫醒消息里连着一个祈使句手册。她在 `fish-wake-2026-10-26-manual`
+  // 的 reasoning 原话是「需要做的是：说一句…然后写日记」——她把它当成任务清单在执行。
+  // 现在写法常驻在身份文档（persona.DIARY_BRIEF → selfdoc），她一直知道该记；
+  // 叫醒只给处境，不再派活。
 
   // ---- 每 N 天的「想一想」----
   // 为什么必须是她自己做、而不是一个定时摘要器：
@@ -324,12 +347,13 @@ async function wake(ctx, root, model, config, decision, dk, log, deps = {}) {
   //   写偏了，那也是她自己写的。
   // 判据用 growthDay 取模（不是自然日），这样改了 growthDays 也不会突然连发。
   // 同一天只用一次，靠 `meta sleep:<dk>` 兜住。
+  // 做法写在身份文档（SLEEP_BRIEF），这里只给一句时机标记。
   const every = Number(config?.memory?.sleepEveryDays ?? 0)
   let askedSleep = false
   if (every > 0 && model.day > 1 && model.day % every === 0) {
     const events0 = (await readEvents(root).catch(() => ({ events: [] }))).events
     const doneToday = events0.some((e) => e?.type === 'meta' && String(e.text ?? '').startsWith(`sleep:${dk}`))
-    if (!doneToday) { parts.push('', sleepPrompt(model)); askedSleep = true }
+    if (!doneToday) { parts.push('', SLEEP_TODAY); askedSleep = true }
   }
 
   // ---- 规则解禁申请（R3，2026-10-24）----
@@ -366,15 +390,29 @@ async function wake(ctx, root, model, config, decision, dk, log, deps = {}) {
   }
   void askedOffer
 
-  // 只发「这一次」的话。身份由 AGENTS.md 承载（宿主每轮注入），不再拼进来。
+  // 「这一次的处境」不再放进对话（2026-10-25 晚，用户 m04080）。
+  // 宿主没有「模型看得见、用户看不见」的通道（asar 已核实：PromptContentPart
+  // 没有 hidden 字段、SurfaceOp 只有 append/replace），所以正文改走 system prompt
+  // 的动态段 `fish:wake`，对话里只留一句极短的触发语把这一轮点起来。
+  // 这样对话框里不会再出现「你该醒了」「这次推给你的是……」这些系统的话。
+  // 注意：`setWakeSection` 要等会话确定之后再设，否则提前 return 会留下脏段落。
   const content = parts.filter(Boolean).join('\n').trim()
+  // 空正文就别唤醒：没有处境可讲，起了也是空转。
+  if (!content) {
+    log('wake skipped: empty body')
+    return
+  }
+  // 给 wake 段加一句性质说明：对话里那句括号短句是叫醒信号，不是用户的话。
+  const wakeText = `${WAKE_HINT}\n\n${content}`
   // ---- 会话（P3 改造）----
   // 2026-10-23 用户定案：她的**所有**开口都落进侧栏那个真实会话，
   // 不再每天另起 `fish-wake-YYYY-MM-DD`。
   // 理由：用户要的是"打开就能看见她"，不是"去一个隐藏会话里找她说过什么"。
   // 副作用（刻意接受）：定时唤醒的内容会出现在同一条对话流里，读起来像
   //   「她自己在那个房间里说话了」——这正是要的效果。
-  // 手动唤醒仍然传 deps.sessionId（带时间戳），调试时想要一份干净上下文。
+  // 手动唤醒以前传 deps.sessionId（带时间戳的独立会话），2026-10-26 改掉：
+  // 用 cwd 建的会话没有工作区归属，宿主侧栏把它丢进「未分组」，用户在
+  // 「大肥鱼的家」里看不见（m00507）。现在 wakeNow 也先取屋子会话。
   let sessionId = deps.sessionId
   if (!sessionId) {
     // 2026-10-24 改：不再退回 `fish-wake-${dk}`（那种用 cwd 建的会话没有工作区
@@ -425,12 +463,14 @@ async function wake(ctx, root, model, config, decision, dk, log, deps = {}) {
     }).catch(() => null)
   }
 
-  const watcher = watchTurnEnd(ctx, sessionId, () => { void writeReport() })
+  const watcher = watchTurnEnd(ctx, sessionId, () => { void writeReport(); clearWakeSection() })
 
+  // 处境走 system prompt 段；对话里只留这一句（她看到的是「有人来了」，不是剧本）。
+  setWakeSection(wakeText)
   try {
     await withWake(async () => {
       await sc.prompt(
-        { requestId: `wake-${dk}-${Date.now()}`, sessionId, mode: 'queue', content: [{ type: 'text', text: content }] },
+        { requestId: `wake-${dk}-${Date.now()}`, sessionId, mode: 'queue', content: [{ type: 'text', text: WAKE_TRIGGER }] },
         ac.signal,
       )
     })
@@ -468,8 +508,17 @@ async function wake(ctx, root, model, config, decision, dk, log, deps = {}) {
     // 不 await 是刻意的：唤醒本身不该被拖住。
     // ⚠️ 监听器的注销必须在 finally **之外**做——放进 finally 会当场把它摘掉，
     // 于是 turn/end 永远等不到，报告又是一版空的。
-    setTimeout(() => { try { watcher.off?.() } catch { /* ignore */ } }, REPORT_WAIT_MS).unref?.()
+    // 同理，`clearWakeSection()` 也不能放 finally：prompt() 只等入队就返回，
+    // 她还没开始想，这里清掉等于她根本看不到这次处境。
+    // 兜底：如果 turn/end 一直不来，最迟 REPORT_WAIT_MS 后也把段落清掉，
+    // 免得残留到下一轮（他之后主动聊天时会看到她上一次的处境）。
+    setTimeout(() => {
+      try { watcher.off?.() } catch { /* ignore */ }
+      clearWakeSection()
+    }, REPORT_WAIT_MS).unref?.()
   } catch (err) {
+    // 这一次没起来，处境要立刻清掉。
+    clearWakeSection()
     await appendEvent(
       { type: 'meta', text: `wakefail:${dk} ${String(err?.message ?? err).slice(0, 120)}` },
       { day: model.day, stage: model.stage, source: 'timer' },
@@ -489,6 +538,15 @@ async function wake(ctx, root, model, config, decision, dk, log, deps = {}) {
  * 那个后缀会跟着进 browse 记账、日记文件名、报告文件名和会话 id，
  * 于是报告按 `2026-10-23` 去查，记账却写在 `2026-10-23-manual` 里 →
  * 报告"看了什么"永远显示"今天没看"。区分手动只用在 sessionId 上。
+ *
+ * 2026-10-26（用户 m00507）：**手动唤醒也走屋子会话**。
+ * 原来的实现每次手动唤醒都伪造一个 `fish-wake-<dk>-manual-<ts>` 的 id，
+ * 宿主不认识这个 id → `sc.create({ sessionId, cwd: herDir })` 按 cwd 建一条
+ * 新会话，而她的房间（`~/.dsh-fish/home/her`）是工作区 `~/.dsh-fish/home`
+ * 的**子目录**，匹配不上工作区路径 → 侧栏把它丢进「未分组」。
+ * 用户看到的就是「叫醒之后，对话到了未分组」。
+ * 现在先拿屋子里那条真会话（它由 workspaceId 建，天然属于家）；
+ * 只有拿不到屋子时（测试 / 屋子坏了）才退回旧的伪造 id，让调试还能用。
  */
 export async function wakeNow(ctx, deps = {}) {
   const root = deps.root ?? rootDir()
@@ -497,14 +555,26 @@ export async function wakeNow(ctx, deps = {}) {
   const model = deriveSelf(events, { growthDays: config.growthDays })
   const dk = dateKey()
   const counts = { dateKey: dk, sent: 0, questions: 0, proactive: 0 }
-  const decision = plan(model, config, counts, events, { squeeze: gapSqueeze(gapSinceLastWake(events)) })
+  // focus='browse'：设置页那个「让她去刷 B 站」按钮（**仅本机测试版**，2026-10-26）。
+  // 不走 plan()——plan 判的是「今天该不该醒」，而这个按钮是人工要求她醒一次去看站；
+  // 语气也别写成"任务"，她看到"去看一眼"会自己决定看不看。
+  const forcedBrowse = deps.focus === 'browse'
+  if (forcedBrowse) deps = { ...deps, forceBrowse: true }
+  const decision = forcedBrowse
+    ? { action: 'wake', prompt: '（现在，去看一眼 B 站首页在推什么。）', template: { id: 'manual-browse' } }
+    : plan(model, config, counts, events, { squeeze: gapSqueeze(gapSinceLastWake(events)) })
   if (decision.action !== 'wake') return { ok: false, why: decision.why ?? 'no candidate' }
-  await wake(ctx, root, model, config, decision, dk, deps.log ?? (() => {}), {
-    ...deps,
-    sessionId: `fish-wake-${dk}-manual-${Date.now()}`,
-  })
-  return { ok: true, template: decision.template?.id }
-}
+  const log = deps.log ?? (() => {})
+  let sessionId = deps.sessionId
+  if (!sessionId) {
+    sessionId = await talkSessionId(ctx, { root, log }).catch(() => '')
+    if (!sessionId) {
+      sessionId = `fish-wake-${dk}-manual-${Date.now()}`
+      log(`屋子没接上，这次手动唤醒用独立会话（会落进「未分组」）：${sessionId}`)
+    }
+  }
+  await wake(ctx, root, model, config, decision, dk, log, { ...deps, sessionId })
+  return { ok: true, template: decision.template?.id, sessionId }}
 
 /**
  * 今日配额：从事件流里数，不用内存。

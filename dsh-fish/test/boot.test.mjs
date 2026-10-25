@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, rm, stat, readdir, readFile } from 'node:fs/promises'
+import { mkdtemp, rm, stat, readdir, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -12,6 +12,8 @@ import { startScheduler, wakeNow } from '../lib/scheduler.js'
 import { rememberKnownTools } from '../lib/restrict.js'
 import { dateKey } from '../lib/settings.js'
 import { writeSelfDoc } from '../lib/selfdoc.js'
+import { clearWakeSection, getWakeSection } from '../lib/identity.js'
+import { WAKE_TRIGGER } from '../lib/wakeconst.js'
 
 async function withRoot(fn) {
   const root = await mkdtemp(join(tmpdir(), 'fish-boot-'))
@@ -268,6 +270,46 @@ test('日记默认不可见：只给日期，不给正文', async () => {
   })
 })
 
+test('日记可见时一天一页：默认只给最新一天，?day= 取指定那天', async () => {
+  // 2026-10-26（用户 m01201）：日记攒到几十天之后，一次全发给前端既慢又没法看。
+  // 现在 /diary 只给「日期目录 + 最新一天」，翻页按 day 单独取。
+  await withRoot(async (root) => {
+    await writeConfig(normalizeConfig({ diary: { enabled: true, visible: true } }), root)
+    const { ctx, routes } = fakeCtx()
+    const h = apply(ctx, { root })
+    await new Promise((r) => setTimeout(r, 120))
+
+    const { writeDaily } = await import('../lib/store.js')
+    await writeDaily('diaryDir', '2026-10-19', '前一天写的。', root)
+    await writeDaily('diaryDir', '2026-10-20', '今天没人来。', root)
+
+    const route = routes.find((r) => r.path === '/dsh-fish/diary')
+
+    // 默认：日期全给（新在前），正文只给最新一天
+    const r1 = fakeRes()
+    await route.handler({ url: '/dsh-fish/diary', method: 'GET' }, r1)
+    assert.deepEqual(r1.json.dates, ['2026-10-20', '2026-10-19'])
+    assert.equal(r1.json.items.length, 1, '默认只带一天正文')
+    assert.equal(r1.json.items[0].date, '2026-10-20')
+    assert.ok(String(r1.json.items[0].text).includes('今天没人来'))
+
+    // 指定更早一天：只回那一天，页里不能混进别的日子
+    const r2 = fakeRes()
+    await route.handler({ url: '/dsh-fish/diary?day=2026-10-19', method: 'GET' }, r2)
+    assert.equal(r2.code, 200)
+    assert.equal(r2.json.date, '2026-10-19')
+    assert.ok(String(r2.json.text).includes('前一天写的'))
+    assert.ok(!String(r2.json.text).includes('今天没人来'), '一页只放一天')
+
+    // 那天没有（或日期不是 YYYY-MM-DD）：404 带说明
+    const r3 = fakeRes()
+    await route.handler({ url: '/dsh-fish/diary?day=2026-01-01', method: 'GET' }, r3)
+    assert.equal(r3.code, 404)
+
+    h.dispose?.()
+  })
+})
+
 test('dispose 之后不再有后台活动（定时器真的停了）', async () => {
   await withRoot(async (root) => {
     const { ctx } = fakeCtx()
@@ -297,11 +339,12 @@ test('scheduler.tick 在时间窗外不唤醒', async () => {
   })
 })
 
-// 回归（2026-10-23 用户报「她会话里有一大块隐藏提示词」）：
-// 唤醒消息会作为一条 user message 留在她的会话里，用户点开就看得见。
-// 所以它**只许说她这一次的处境**；身份、工具说明、四条禁令一律走
-// `home/她的身份.md` → `systemPrompt.section`（system 角色、不进对话历史）。
-test('唤醒消息只有这一次的处境，不再重复身份段与工具说明', async () => {
+// 回归（2026-10-23 用户报「她会话里有一大块隐藏提示词」→ 2026-10-25 晚再次报
+// 「自动刷 B 站把她推醒了，对话框里又出现提示词」）：
+// 唤醒会作为一条 user message 留在她的会话里，用户点开就看得见。
+// 宿主没有「模型看得见、用户看不见」的通道（asar 已核实），所以正文不再进对话——
+// 它走 system prompt 的 `fish:wake` 动态段；对话里只留一句极短的触发语。
+test('唤醒消息只剩一句触发语，处境走 system prompt 段不进对话', async () => {
   await withRoot(async (root) => {
     // 关掉刷站，这两条测试才不会去打真接口（慢且不确定）。
     await writeConfig(normalizeConfig({ browse: { enabled: false } }), root)
@@ -311,17 +354,22 @@ test('唤醒消息只有这一次的处境，不再重复身份段与工具说�
     assert.equal(prompts.length, 1)
     const text = prompts[0].content[0].text
 
-    // 不许再出现的：身份段、禁令、工具手册
+    // 对话里只剩一句：不许再出现处境、身份、禁令、工具手册
+    assert.equal(text, WAKE_TRIGGER, `对话里只该剩触发语，现在是：${text.slice(0, 80)}`)
+    // 2026-10-26（用户 m00507）：原来是「……」，她当成用户发来的一句话去猜，
+    // 侧栏标题还被生成成「Error」。现在触发语是括号旁白，且必须**不是**省略号。
+    assert.ok(!text.includes('……'), '不能再拿省略号当触发语')
     assert.ok(!text.includes('## 你是谁'), '身份段不该出现在会话消息里')
     assert.ok(!text.includes('## 不能做的'), '禁令段不该出现在会话消息里')
     assert.ok(!text.includes('撒娇'), '禁令正文不该出现在会话消息里')
     assert.ok(!text.includes('autonomy'), '不能泄露字段名')
+    assert.ok(!text.includes('第 1 天'), '处境正文不该再进对话')
 
-    // 必须仍然出现的：这一次的处境
-    assert.ok(text.includes('第 1 天') || text.includes('醒'), '要留下这一次的处境')
-
-    // 而且短：上千字的提示词就是用户看到的那一大坨
-    assert.ok(text.length < 600, `唤醒消息过长：${text.length} 字`)
+    // 处境必须还在——只是换了通道（system prompt 段，见 attachIdentity）
+    const wake = getWakeSection()
+    assert.ok(wake.length > 0, '这次唤醒的处境不能为空')
+    assert.ok(wake.includes('第 1 天') || wake.includes('醒'), '处境正文要在 wake 段里')
+    assert.ok(wake.length < 1200, `处境段过长：${wake.length} 字`)
 
     // 身份必须还在落盘副本里（真通道是 systemPrompt 段，见 test/identity.test.mjs）
     await writeSelfDoc(root)
@@ -385,6 +433,71 @@ test('她的会话 cwd 是她自己的空房间，不是状态库根目录', asy
     const inRoom = await readdir(cwd)
     assert.ok(!inRoom.includes('events.jsonl'))
     assert.ok(!inRoom.includes('config.json'))
+  })
+})
+
+// 回归（2026-10-26 用户 m00507「叫醒之后，对话到了未分组」）：
+// 手动唤醒原来每次都伪造一个 `fish-wake-<日期>-manual-<ts>` 当会话 id，
+// 宿主不认识它 → 按 cwd 新建一条 → 那条会话不在任何工作区的 sessionIds 里，
+// 侧栏只能把它丢进「未分组」，用户在「大肥鱼的家」里根本看不见。
+// 现在只要有屋子，就落在屋子那条会话里，会话自然还在工作区名下。
+test('手动唤醒落在屋子会话里，不再另造一条（否则会掉进「未分组」）', async () => {
+  await withRoot(async (root) => {
+    // 关掉刷站：这条测的是会话归属，不该去打真接口
+    await writeConfig(normalizeConfig({ browse: { enabled: false } }), root)
+    const { ctx, prompts, creates } = fakeCtx()
+    const WS = 'ws-home'
+    const SID = 'session-home-1'
+    const ws = { sessionIds: [SID] }
+    ctx.workspaceRegistry = {
+      get: (id) => (id === WS ? ws : undefined),
+      list: () => [ws],
+      archivedSessionIds: [],
+    }
+    await writeFile(
+      join(paths(root).root, 'home.json'),
+      JSON.stringify({ wsId: WS, sessionId: SID, title: '跟大肥鱼说话', preset: '' }),
+      'utf8',
+    )
+
+    const r = await wakeNow(ctx, { root })
+    assert.equal(r.ok, true, JSON.stringify(r))
+    assert.equal(r.sessionId, SID, '手动唤醒没有走屋子会话')
+    assert.equal(prompts.length, 1)
+    assert.equal(prompts[0].sessionId, SID, '唤醒消息发进了别的会话')
+    // 不许再顺手造一条新会话（那条就是会掉进未分组的东西）
+    for (const c of creates) {
+      assert.notEqual(c.sessionId, undefined)
+      assert.ok(!String(c.sessionId).startsWith('fish-wake-'), `不该再伪造 wake 会话：${c.sessionId}`)
+    }
+  })
+})
+
+// 反向：屋里那条会话被删/被归档了，就当没屋子，退回独立会话 —— 但要想办法
+// 让人知道（log 里有话），不能默默再制造一条未分组垃圾。
+test('屋子会话没了：退回独立会话，并且把原因说出来', async () => {
+  await withRoot(async (root) => {
+    await writeConfig(normalizeConfig({ browse: { enabled: false } }), root)
+    const { ctx, prompts } = fakeCtx()
+    const WS = 'ws-home'
+    const logs = []
+    ctx.workspaceRegistry = {
+      get: (id) => (id === WS ? { sessionIds: ['session-gone'] } : undefined),
+      list: () => [{ sessionIds: ['session-gone'] }],
+      archivedSessionIds: [],
+    }
+    // home.json 指向一条早已不在工作区里的会话
+    await writeFile(
+      join(paths(root).root, 'home.json'),
+      JSON.stringify({ wsId: WS, sessionId: 'session-old', title: '跟大肥鱼说话', preset: '' }),
+      'utf8',
+    )
+
+    const r = await wakeNow(ctx, { root, log: (m) => logs.push(String(m)) })
+    assert.equal(r.ok, true, JSON.stringify(r))
+    assert.ok(String(r.sessionId).startsWith('fish-wake-'), '没有屋子时才该用独立会话 id')
+    assert.equal(prompts.length, 1)
+    assert.ok(logs.some((m) => m.includes('未分组')), `退回独立会话必须写明后果，实际日志：${JSON.stringify(logs)}`)
   })
 })
 

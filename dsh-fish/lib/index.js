@@ -21,17 +21,19 @@ import { registerWatch } from './watch.js'
 import { registerLetter } from './letter.js'
 import { registerObserve } from './observe.js'
 import { startScheduler } from './scheduler.js'
-import { bootstrapHome, homeStatus } from './home.js'
+import { bootstrapHome, homeStatus, wakeIfBlank } from './home.js'
 import { writeSelfDoc } from './selfdoc.js'
 import { registerToolRestrict } from './restrict.js'
-import { registerIdentity } from './identity.js'
+// `clearWakeSection` 在 dispose 里用：它挂在 system prompt 段上，是个模块级变量，
+// 停用时不清的话下次启用会带着上一次的残留（2026-10-25）。
+import { clearWakeSection, registerIdentity } from './identity.js'
 
 import { logBoot, makeLogger } from './log.js'
 
 export const name = 'dsh-fish'
 
 /** 版本号：只用于日志导出（排查时第一件事是确认跑的是哪一版）。 */
-export const VERSION = '0.4.1'
+export const VERSION = '0.5.0'
 
 // ⚠️ 一个数组写全，不要拆成对象
 export const inject = ['sessionController', 'tools', 'webServer', 'connection']
@@ -130,6 +132,16 @@ export function apply(ctx, baseConfig = {}) {
       home = { ok: false, why: String(err?.message ?? err).slice(0, 160), wsId: '', sessionId: '' }
     }
     if (!home.ok) logger.warn(`[dsh-fish] 屋子没建起来：${home.why}`)
+    else {
+      // 屋子是空的（上一次开了但从没说过话）时，侧栏不会显示它——见 sessionVisible。
+      // 启动时就叫一声，免得用户重启后以为"人不见了"。
+      try {
+        const woke = await wakeIfBlank(ctx, { sessionId: home.sessionId, log: (...a) => logger.info(...a), freshOnly: !home.reused })
+        if (woke.woke) logger.info('[dsh-fish] 屋子是空的，已经叫了她一声')
+      } catch (err) {
+        logger.warn(`[dsh-fish] 启动唤醒失败：${String(err?.message ?? err).slice(0, 120)}`)
+      }
+    }
 
     // ---- 身份文本再落一次盘：屋子建好之后 activeCarry 等才齐，内容可能变 ----
     // 这条改动之后它**不再被宿主注入**（那是旧的 AGENTS.md 通道），只是落盘副本；
@@ -186,12 +198,14 @@ export function apply(ctx, baseConfig = {}) {
 
   ctx.on?.('dispose', () => {
     try { scheduler?.dispose?.() } catch { /* ignore */ }
+    try { clearWakeSection() } catch { /* ignore */ }
     for (const d of disposers) { try { d() } catch { /* ignore */ } }
   })
 
   return {
     dispose() {
       try { scheduler?.dispose?.() } catch { /* ignore */ }
+      try { clearWakeSection() } catch { /* ignore */ }
       for (const d of disposers) { try { d() } catch { /* ignore */ } }
     },
   }

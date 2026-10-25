@@ -12,6 +12,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { paths } from './store.js'
+import { slashed } from './posix.js'
 
 const MAX_BYTES = 4 * 1024 * 1024
 const TIMEOUT_MS = 8000
@@ -108,7 +109,9 @@ export function coverLines(picks, root, max = 2) {
     const file = coverPath(root, p?.bvid)
     if (!file) continue
     const title = String(p?.title ?? '').replace(/[\[\]]/g, '').slice(0, 40) || p?.bvid
-    out.push(`![${title}](${file})`)
+    // 正斜杠：宿主渲染 markdown 图片时按 /api/file 取文件，反斜杠写法在客户端会取不到
+    //（2026-10-26 实测：同一张图 C:\ 版显示「图片无法预览」、C:/ 版正常）。
+    out.push(`![${title}](${slashed(file)})`)
   }
   return out
 }

@@ -11,6 +11,7 @@ import { loadConfig, dateKey } from './settings.js'
 import { grabFrames } from './video.js'
 
 import { defineTool } from './tool.js'
+import { slashed } from './posix.js'
 
 /** 今天已经看过几条（只数成功的，失败不占额度） */
 export function watchedToday(events, dk) {
@@ -78,13 +79,17 @@ export function registerWatch(ctx, deps = {}) {
           root,
         ).catch(() => {})
 
+        // 路径一律给正斜杠：宿主渲染 markdown 图片时会拿路径拼 /api/file，
+        // C:\... 这种反斜杠写法在客户端解析后取不到文件，图片就显示成「无法预览」
+        // （2026-10-26 实测：同一张图 C:\ 版失败、C:/ 版正常）。
+        const posix = slashed(r.path)
         return {
           ok: true,
-          path: r.path,
+          path: posix,
           text: [
             `《${r.title || bvid}》的画面，我取了几张拼成一张图放在这儿：`,
-            r.path,
-            '用 read_image 读它就能看见。',
+            posix,
+            '用 read_image 读它就能看见。要在回复里贴这张图，路径就照抄上面这一行——用正斜杠。',
           ].join('\n'),
           note: '',
         }

@@ -22,6 +22,7 @@ import { randomUUID } from 'node:crypto'
 import { spawn } from 'node:child_process'
 import { detectFfmpeg, mediaDir } from './media.js'
 import { createClient } from './bili.js'
+import { slashed } from './posix.js'
 import { rootDir, readOwner } from './store.js'
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36'
@@ -172,7 +173,8 @@ export async function grabFrames(o = {}) {
 
   return {
     ok: true,
-    path: sheet,
+    // 交给模型的路径用正斜杠（反斜杠写进 markdown 图片会显示成「无法预览」，2026-10-26 实测）
+    path: slashed(sheet),
     why: '',
     title: String(info.data?.title ?? ''),
     duration,
