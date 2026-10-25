@@ -1312,7 +1312,7 @@ window.__ModuleLoader__.load({
             Num({ label: '你多久不出现算冷落', value: absent, onChange: setAbsent, min: 1, max: 30, unit: '天',
               hint: '超过这么多天没说话，她会记下「你不在」。' }))),
         group('日记',
-          '日记是她写给自己的记录，不是写给你的。',
+          '她每天会写日记。打开下面那个开关，你就能看。',
           h('div', { className: 'grid2' },
             Toggle({ label: '写日记', on: diaryEnabled, onChange: setDiaryEnabled,
               hint: '关掉后不再写新的，已经写好的不会删。' }),

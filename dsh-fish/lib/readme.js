@@ -28,7 +28,7 @@ export const README_TEXT = `${README_MARK}
 
 | 名字 | 是什么 |
 | --- | --- |
-| \`events.jsonl\` | 唯一真相源，只追加不修改。她全部经历就是这一行行的记录。 |
+| \`events.jsonl\` | 不能删除记录，唯一可信源。她全部经历就是这一行行的记录。 |
 | \`config.json\` | 你敢在设置页上调的那些东西：时间窗、配额、开关。 |
 | \`state.json\` | 宿主侧记的游标（最后一次醒来的时间之类）。 |
 | \`owner.json\` | 主人是谁、B 站 cookie 存在这附近。**别外传。** |
