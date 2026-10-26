@@ -4,8 +4,10 @@
  * 用户要的是「重开一局」，不是「删档」。所以：
  *   1. 整个状态库目录**改名**到 `backups/reset-<时间戳>/`，一个字节都不删；
  *   2. 新状态库是空的，下次启动时 seed 会重新落下「你刚开始存在」；
- *   3. 她的屋子（`home/`）也在被搬走的目录里，所以 DSH 里那个会话的记忆也一起封存了
- *      —— 否则会出现「人重开了，但会话里还留着上一辈子的对话」这种更诡异的状态。
+ *   3. 她的屋子（`home/`）也在被搬走的目录里。**但 DSH 里的会话记录不在这里**——
+ *      会话存在 `~/.dsh/storages/workspace.json` 和 `~/.dsh/sessions/`，
+ *      所以重置后旧会话要由调用方归档（`lib/retire.js` 的 retireHomeSessions）。
+ *      这条注释原来写的是「会话记忆一起封存了」，2026-10-25 被用户实测打脸后改掉。
  *
  * ⚠️ 唯一真正要做的事是「改名」，不是复制也不是删除。
  *    在 Windows 上跨盘改名会失败，所以只在同盘内用 rename；
@@ -135,6 +137,10 @@ export async function resetAll(root = rootDir(), opts = {}) {
   try {
     await rename(p.root, target)
     await carryKeys(target, p.root, opts.log)
+    // 2026-10-27：这里原来要清一个 config 里的「导入豁免」标记。
+    // 现在不需要了——「这一局是不是接别人养的」只由事件流里那条 meta 决定，
+    // 而事件流整体被 rename 走了，新的一局天生没有那条记录（用户 m03769 的要求：
+    // 豁免必须来自导入动作本身，不能是能被备份/恢复搬运的状态）。
     return { ok: true, movedTo: target, why: '', carried: CARRIED }
   } catch (err) {
     // EPERM / EXDEV / EBUSY：一般是文件被占用（服务还开着）或跨盘

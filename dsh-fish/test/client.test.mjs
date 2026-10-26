@@ -201,8 +201,37 @@ test('组件在"有数据"时把关键信息渲染出来', async () => {
   delete globalThis.fetch
 })
 
-test('组件里没有任何"改她性格"的控件（B §8 红线）', async () => {
+test('「下载交接单模板」不挂在任何分支里：养着鱼的人也要看得到（用户 m05086）', async () => {
+  // 现场事实：这个按钮原来写在「!importInfo.canImport 且 importAsk 展开」那一支里，
+  // 已经有起点的人走的是另一条分支，页面上根本没有按钮。用户原话：
+  // 「我没在导入其他人的大肥鱼那里看到这个交接单模版下载的按钮」。
+  // 这里不出渲染树（要精确命中 importInfo 那个 useState 下标太脆），只钉结构：
+  // 按钮必须出现在「importCard」内部、且排在所有分支判断之前。
   const src = await readFile(CLIENT, 'utf8')
+  const cardStart = src.indexOf('const importCard = h(')
+  const cardEnd = src.indexOf('const resetCard = h(')
+  assert.ok(cardStart > 0 && cardEnd > cardStart, '必须能定位到导入卡这段源码')
+  const card = src.slice(cardStart, cardEnd)
+
+  const btn = card.indexOf("'下载交接单模板'")
+  assert.ok(btn > 0, '导入卡里必须有「下载交接单模板」按钮')
+
+  // 分支起点：第一个判断 importInfo 有没有读到的地方
+  const branch = card.indexOf('!importInfo\n')
+  assert.ok(branch > 0, '必须能定位到「还没读到 /import」那条分支')
+  assert.ok(btn < branch, '下载按钮要排在分支之前——排在后面就又变成「只在某一支里才有」')
+
+  // 顺带钉住那句旁注：它解释了为什么按钮跟能不能接无关
+  assert.ok(card.includes('模板随时能下载'), '下载按钮旁要有那句说明')
+})
+
+test('组件里没有任何"改她性格"的控件（B §8 红线）', async () => {
+  const raw = await readFile(CLIENT, 'utf8')
+  // 2026-10-27：导入卡里有一段**说明性**文案，用户明确要求写清「如果你原本的好感度设定，
+  // 到这里她看不到自己的好感度、你也不能改她的人设」。它是解释，不是控件——
+  // 先把这一段剥掉再扫，别处再出现这些词照样红。
+  const src = raw.replace(/此外，根据本插件的规则[\s\S]*?换一种人设。/, '')
+  assert.notStrictEqual(src, raw, '导入卡那段说明文案必须还在（它被用户点名要求保留）')
   for (const banned of ['好感度', '亲密度', 'affinity', '外向', '黏人程度', '性格滑条']) {
     assert.ok(!src.includes(banned), `客户端代码里不该出现 ${banned}`)
   }

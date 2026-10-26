@@ -25,6 +25,7 @@ import { avatarFile, avatarInfo, saveAvatar, removeAvatar } from './avatar.js'
 import fs from 'node:fs'
 import { commentCountToday, replyCountToday, herComments, scanReplies } from './comment.js'
 import { describeState, resetAll } from './reset.js'
+import { applyHandover, IMPORT_TEMPLATE } from './import.js'
 import { readHomeRecord, retireHomeSessions } from './retire.js'
 import { collectBackup, backupFileName, restoreBackup } from './backup.js'
 import { bootstrapHome, homeStatus, wakeIfBlank } from './home.js'
@@ -257,6 +258,8 @@ export function registerObserve(ctx, deps = {}) {
         // 白名单：只允许改"环境"，不允许任何指向她本人的键
         // chat/memory 是 2026-10-23 加的：一个是会话轮换阈值，一个是她能背多少字。
         // 两个都不是性格，但必须在这里登记，否则观测台「保存」会被 400 挡回来。
+        // persona 不在这里：它是导入动作的副产物（见 lib/import.js），
+        // 不给「从设置页直接改」的入口——否则就等于给了一个「关掉那两条禁令」的开关。
         const allowed = ['growthDays', 'wakesPerDay', 'window', 'daily', 'diary', 'absenceAfterDays', 'avoid', 'browse', 'video', 'comment', 'notify', 'chat', 'memory', 'tools', 'observe', 'ui']
         const bad = Object.keys(patch).filter((k) => !allowed.includes(k))
         if (bad.length) return send(res, 400, { error: `不允许修改：${bad.join(', ')}` })
@@ -726,7 +729,9 @@ export function registerObserve(ctx, deps = {}) {
       // 用「字」而不是「字节」算用量：中文一个字三字节，按字节算会永远显示撑满。
       // 摆几条判断由配置决定（1–8），身份文档和这里的数字必须同源
       const shownCap = shownCount(config?.memory?.beliefsShown ?? BELIEF_SHOWN)
-      const pb = personaBudget(model, { budget, withBans: true, shown: shownCap })
+      // 禁不禁用跟身份文档同源：只看事件流里有没有「导入」那条标记（2026-10-27，用户 m03769），
+      // 不看 config——备份/恢复搬回来的 config 不算数。
+      const pb = personaBudget(model, { budget, withBans: model?.persona?.imported !== true, shown: shownCap })
       const diary = await listDiary(root).catch(() => [])
       // 2026-10-24：这个数原来写死 8，而身份文档里实际只摆 BELIEF_SHOWN（3）条。
       // 界面说"8 条在眼前"、她只看见 3 条——用户当场问过这个矛盾，现在对齐同一条常量。
@@ -948,6 +953,52 @@ export function registerObserve(ctx, deps = {}) {
       })
     }],
 
+    // ---- 导入别人养过的大肥鱼（2026-10-27，用户 m03170 / m03201）----
+    // GET  → 现在能不能导（有没有起点）+ 交接文档该长什么样
+    // POST { text, source } → 写进去
+    // 只认「还没有起点」的一局：她已经有 seed 时拒绝，让用户自己先重置，
+    // 不替他做「覆盖掉一个已经在长的她」这种决定。
+    ['/import', async (req, res) => {
+      if (req.method === 'GET') {
+        const { events } = await readEvents(root).catch(() => ({ events: [] }))
+        const hasSeed = events.some((e) => e.type === 'seed')
+        // 这一位是不是接来的，只认事件流（用户 m03769）。配置里不再存这件事。
+        const { config } = await loadConfig(root).catch(() => ({ config: null }))
+        const model = deriveSelf(events, { growthDays: config?.growthDays })
+        return send(res, 200, {
+          canImport: !hasSeed,
+          reason: hasSeed ? '她已经有自己的起点了。想换成别人养的那一位，先重置成新的一局。' : '',
+          persona: { imported: model?.persona?.imported === true, source: model?.persona?.source ?? '' },
+          template: IMPORT_TEMPLATE,
+        })
+      }
+      if (req.method !== 'POST') return send(res, 405, { error: 'method not allowed' })
+      const raw = await readBody(req, 200_000)
+      let b = {}
+      try { b = JSON.parse(raw || '{}') } catch { return send(res, 400, { error: 'body 不是合法 JSON' }) }
+      // 来源跟着导入动作一起写进事件流（meta / import-mark:），不再写配置。
+      const r = await applyHandover(b.text, root, {
+        log: (m) => console.log('[dsh-fish]', m),
+        source: b.source ? String(b.source) : '',
+      })
+      if (!r.ok) return send(res, 409, { ok: false, error: r.why })
+      // 身份文档立刻重算：不然要等下一次她开口才换成人设，设置页会显示"还没变"。
+      await refreshSelfDoc(root).catch(() => {})
+      const { events } = await readEvents(root).catch(() => ({ events: [] }))
+      const model = deriveSelf(events, await loadConfig(root).then((x) => x.config))
+      send(res, 200, {
+        ok: true,
+        name: r.name,
+        tools: r.tools,
+        bodyChars: r.bodyChars,
+        // 把导入之后她的实际状态报回去，让界面能说「现在是第 1 天、她管你叫 X」
+        day: model.day,
+        stage: model.stage,
+        called: model.name,
+        note: '人设已经接过来。她是从第 1 天开始的，往后按你和她的事自己长。',
+      })
+    }],
+
     ['/reset', async (req, res) => {
       if (req.method === 'GET') {
         const info = await describeState(root)
@@ -977,7 +1028,7 @@ export function registerObserve(ctx, deps = {}) {
       // 空白会话在侧栏里是隐形的（宿主 sessionVisible：blank && id !== current → false）。
       // 插件用 API 建的会话不会被设成当前会话，所以要让她先动一轮，侧栏才看得见。
       const woke = fresh.ok
-        ? await wakeIfBlank(ctx, { sessionId: fresh.sessionId, log: (m) => console.log('[dsh-fish]', m), freshOnly: !fresh.reused })
+        ? await wakeIfBlank(ctx, { sessionId: fresh.sessionId, root, log: (m) => console.log('[dsh-fish]', m), freshOnly: !fresh.reused })
         : { woke: false }
       send(res, 200, {
         ok: true,

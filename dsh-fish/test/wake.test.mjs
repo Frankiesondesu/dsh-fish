@@ -1,9 +1,30 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { mkdtemp, readFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 import { wakeIfBlank } from '../lib/home.js'
 
 const tick = () => new Promise((r) => setTimeout(r, 0))
+
+/** 等一个条件成立（记账是 prompt 成功之后的异步落盘，不能只等一个 tick）。 */
+async function waitFor(fn, ms = 800) {
+  const t0 = Date.now()
+  for (;;) {
+    if (await fn()) return true
+    if (Date.now() - t0 > ms) return false
+    await new Promise((r) => setTimeout(r, 5))
+  }
+}
+
+async function readHome(root) {
+  try {
+    return JSON.parse(await readFile(join(root, 'home.json'), 'utf8'))
+  } catch {
+    return {}
+  }
+}
 
 /** 只造 wakeIfBlank 用到的那一层 ctx。 */
 function ctxWith(sc) {
@@ -93,19 +114,24 @@ test('新建的会话查不到行：按空白处理，叫一声', async () => {
   assert.equal(calls.length, 1)
 })
 
-test('新建会话唤醒：向宿主 prompt 传入 signal', async () => {
+test('叫醒必须给宿主传 signal：宿主 prompt 第一句就 signal.throwIfAborted()', async () => {
+  // 漏传会抛 `Cannot read properties of undefined (reading 'throwIfAborted')`，
+  // 这一声叫不醒，侧栏也看不到她（issue #1）。这里照宿主的真实写法验一遍。
   let signal
   const sc = {
     list: async () => ({ items: [] }),
-    prompt: async (_request, receivedSignal) => {
-      signal = receivedSignal
-      receivedSignal.throwIfAborted()
+    prompt: async (_req, received) => {
+      signal = received
+      received.throwIfAborted()
     },
   }
-  const r = await wakeIfBlank(ctxWith(sc), { sessionId: 's1', freshOnly: true })
+  const logs = []
+  const r = await wakeIfBlank(ctxWith(sc), { sessionId: 's1', freshOnly: true, log: (m) => logs.push(m) })
   assert.equal(r.woke, true)
   await tick()
-  assert.equal(typeof signal.throwIfAborted, 'function')
+  assert.equal(typeof signal?.throwIfAborted, 'function')
+  assert.equal(signal.aborted, false)
+  assert.equal(logs.some((m) => m.includes('唤醒失败')), false)
 })
 
 test('复用的会话查不到行：不碰，免得每次启动都让她说话', async () => {
@@ -132,4 +158,89 @@ test('宿主不给 blank 字段：新建才叫，复用不叫', async () => {
   assert.equal((await wakeIfBlank(ctxWith(sc), { sessionId: 's1', freshOnly: false })).woke, false)
   await tick()
   assert.equal(called, 1)
+})
+
+// --- 同一条会话只叫一次（issue #1 报的第二个问题）------------------------------
+//
+// 插件建的会话永远不是「当前会话」，宿主也就不把它放进可见列表，于是
+// `list()` 里查不到它 → `freshOnly` 那条分支每次都命中 → 每次重启都再叫一次。
+// 靠 list() 判不准，所以改成自己记账：叫成功一次就把 sessionId 写进 home.json。
+
+test('同一条会话不会被叫第二次：重启再跑一遍也收手（issue #1 后半）', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'fish-wake-'))
+  const calls = []
+  const sc = {
+    // 插件建的会话就是这个形状：宿主列表里根本没有它
+    list: async () => ({ items: [] }),
+    prompt: async (req) => { calls.push(req) },
+  }
+  const first = await wakeIfBlank(ctxWith(sc), { sessionId: 's1', root, freshOnly: true })
+  assert.equal(first.woke, true)
+  await tick()
+  assert.equal(calls.length, 1)
+  // 记账是 prompt resolve 之后才落盘的，等它真的写下去
+  assert.ok(await waitFor(async () => (await readHome(root)).wokeFor === 's1'), '应该把叫过的那条记下来')
+
+  // 模拟「重启之后又走到这里」：同一个 root、同一条 sessionId
+  const second = await wakeIfBlank(ctxWith(sc), { sessionId: 's1', root, freshOnly: true })
+  assert.equal(second.woke, false)
+  assert.match(second.why, /已经叫过/)
+  await tick()
+  assert.equal(calls.length, 1, '不该再叫第二声')
+
+  assert.equal((await readHome(root)).wokeFor, 's1')
+})
+
+test('换了会话就重新算一次：新 id 该叫还是叫', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'fish-wake-'))
+  const calls = []
+  const sc = {
+    list: async () => ({ items: [] }),
+    prompt: async (req) => { calls.push(req) },
+  }
+  await wakeIfBlank(ctxWith(sc), { sessionId: 's1', root, freshOnly: true })
+  await tick()
+  assert.ok(await waitFor(async () => (await readHome(root)).wokeFor === 's1'))
+  const r = await wakeIfBlank(ctxWith(sc), { sessionId: 's2', root, freshOnly: true })
+  assert.equal(r.woke, true)
+  await tick()
+  assert.deepEqual(calls.map((c) => c.sessionId), ['s1', 's2'])
+})
+
+test('没给 root 就不记账：不写文件、也不挡第二次（老行为）', async () => {
+  let called = 0
+  const sc = {
+    list: async () => ({ items: [] }),
+    prompt: async () => { called += 1 },
+  }
+  assert.equal((await wakeIfBlank(ctxWith(sc), { sessionId: 's1', freshOnly: true })).woke, true)
+  await tick()
+  assert.equal((await wakeIfBlank(ctxWith(sc), { sessionId: 's1', freshOnly: true })).woke, true)
+  await tick()
+  assert.equal(called, 2)
+})
+
+test('prompt 失败就不记账：下次启动还会再试一次', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'fish-wake-'))
+  const logs = []
+  let attempt = 0
+  const sc = {
+    list: async () => ({ items: [] }),
+    prompt: async () => {
+      attempt += 1
+      if (attempt === 1) throw new Error('模型不在')
+    },
+  }
+  const first = await wakeIfBlank(ctxWith(sc), { sessionId: 's1', root, freshOnly: true, log: (m) => logs.push(m) })
+  assert.equal(first.woke, true)
+  await tick()
+  assert.ok(logs.some((m) => m.includes('唤醒失败')))
+
+  // 第一声没送到 —— 不该留下「叫过了」的痕迹
+  assert.equal((await readHome(root)).wokeFor, undefined)
+
+  const second = await wakeIfBlank(ctxWith(sc), { sessionId: 's1', root, freshOnly: true })
+  assert.equal(second.woke, true, '上次没叫成，这次要重试')
+  await tick()
+  assert.equal(attempt, 2)
 })

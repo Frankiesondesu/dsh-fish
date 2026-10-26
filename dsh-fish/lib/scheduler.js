@@ -2,7 +2,7 @@
  * scheduler.js —— 生物钟
  *
  * 做什么：每分钟看一眼「现在该不该叫醒她」。该叫就起一个 headless 会话，只说这一次的处境
- * （身份由 home/AGENTS.md 承载，宿主每轮自己注入——不再拼进唤醒消息）。
+ * （身份由 identity.js 以 system prompt 段承载、每轮现读，不拼进唤醒消息）。
  *
  * 三条安全线（B §7）：
  *   1. 定时器只是**提议**。任何一次唤醒失败都不重试、不阻塞下一分钟。
@@ -110,7 +110,7 @@ export function startScheduler(ctx, deps = {}) {
       // 晚一步的话今天这次唤醒就用的是昨天的冷落结论。
       const absence = await detectAbsence(root)
       // 冷落条数变了 = 她对自己的看法变了，身份文件要跟着重写。
-      // 不写的话宿主那份 AGENTS.md 会一直停在上一次的值上（她"不知道自己被晾过"）。
+      // 不写的话那份 system prompt 段会一直停在上一次的值上（她"不知道自己被晾过"）。
       if (absence?.written) await refreshSelfDoc(root, { log })
 
       const { events } = await readEvents(root)
@@ -283,9 +283,13 @@ async function wake(ctx, root, model, config, decision, dk, log, deps = {}) {
   // 2026-10-23 用户指出：打开她的会话，看到的是一大块隐藏提示词。
   // 查了会话日志（agent/inbox/spliced → user/message），确认那块东西是**这条唤醒消息**：
   // 原来自带了整份身份段 + 工具说明 + 行为限制，一千多字。
-  // 而这些内容宿主本来就每轮从 `home/AGENTS.md` 注入一次（同一份文档，selfdoc 写的），
-  // 于是在她的会话里同一段身份出现两遍，第一遍还是一大坨。
-  // 现在：身份只走 AGENTS.md 一条路（宿主注入，不占消息位），唤醒消息只说她此刻的处境。
+  //
+  // 2026-10-26 更正：这里的旧注释写「那些内容宿主本来就每轮从 home/AGENTS.md 注入」，
+  // 那个通道 0.4.x 起已经不用了——身份改走 systemPrompt.section（lib/identity.js 挂载、
+  // lib/selfdoc.js 渲染），system 角色、不进对话历史、界面看不见；selfdoc 还会 unlink
+  // 旧 AGENTS.md。所以现在身份与处境是两条互不重复的路：
+  //   system prompt（每轮现读同一个文件）＝ 她是谁；这条唤醒消息 ＝ 她此刻遇到什么。
+  // 唤醒消息里任何"你是谁/你能做什么"的复述都是重复，交给身份文档。
   const parts = [decision.prompt]
 
   // ---- P2：醒之前先让她"看见点东西" ----
@@ -315,8 +319,9 @@ async function wake(ctx, root, model, config, decision, dk, log, deps = {}) {
   }
   if (look.riskNote) parts.push('', look.riskNote)
 
-  // 工具说明与上网说明不再在这里重复：AGENTS.md 的「我手上有什么」段已经带着它们，
-  // 而那份文档每轮都会被宿主注入。这里再写一遍 = 会话里出现两遍。
+  // 工具说明与上网说明不在这里重复：那两段在身份文档里（selfdoc.js 的
+  // 「我手上有什么」「上网」两节，随配置现渲染，\`speak\` 关着时整节不写），
+  // 而这整份文档每轮都以 system prompt 的形式在场。这里再写一遍 = 同一件事说两遍。
 
   // ---- P4：能不能在 B 站说话 ----
   // 关着的时候**连工具说明都不给**——不是"给了但拒绝"。
@@ -331,7 +336,8 @@ async function wake(ctx, root, model, config, decision, dk, log, deps = {}) {
       const txt = renderReplies(waiting)
       if (txt) parts.push('', txt)
     }
-    // 能说话这件事的说明也在 AGENTS.md 里（开关打开才写进去），不在这儿重复。
+    // 能说话这件事的说明在身份文档的「在网上说话」一节（开关打开时 selfdoc 才写），
+    // 不在这儿重复。
   }
 
   // 日记：**不再在叫醒消息里推**（2026-10-26，用户 m00928：「叫醒仅仅只是叫醒」）。
