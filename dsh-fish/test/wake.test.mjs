@@ -93,6 +93,21 @@ test('新建的会话查不到行：按空白处理，叫一声', async () => {
   assert.equal(calls.length, 1)
 })
 
+test('新建会话唤醒：向宿主 prompt 传入 signal', async () => {
+  let signal
+  const sc = {
+    list: async () => ({ items: [] }),
+    prompt: async (_request, receivedSignal) => {
+      signal = receivedSignal
+      receivedSignal.throwIfAborted()
+    },
+  }
+  const r = await wakeIfBlank(ctxWith(sc), { sessionId: 's1', freshOnly: true })
+  assert.equal(r.woke, true)
+  await tick()
+  assert.equal(typeof signal.throwIfAborted, 'function')
+})
+
 test('复用的会话查不到行：不碰，免得每次启动都让她说话', async () => {
   let called = 0
   const sc = {
