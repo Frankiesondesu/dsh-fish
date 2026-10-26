@@ -367,8 +367,9 @@ test('重置是改名封存：旧事件一个字节不少地留在 backups 里',
     const old = await readEvents(r.movedTo)
     assert.equal(old.events.length, before)
 
-    // 封存目录名字带时间戳
-    assert.match(r.movedTo, /reset-\d{8}-\d{6}$/)
+    // 封存目录名字带时间戳。同一秒内重置两次时 reset.js 会自动加 -2/-3 序号
+    // （撞名处理），所以这里允许可选后缀——否则多文件并发跑时这条会偶发红。
+    assert.match(r.movedTo, /reset-\d{8}-\d{6}(-\d+)?$/)
   })
 })
 
