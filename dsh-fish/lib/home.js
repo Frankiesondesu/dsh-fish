@@ -219,7 +219,7 @@ export async function wakeIfBlank(ctx, { sessionId, log, freshOnly = false } = {
       sessionId,
       mode: 'queue',
       content: [{ type: 'text', text: WAKE_TRIGGER }],
-    })
+    }, new AbortController().signal)
     .catch((err) => log?.(`新屋子唤醒失败：${String(err?.message ?? err).slice(0, 140)}`))
   log?.('新屋子还是空的，叫了她一声（要等她这一轮动起来，侧栏才会显示）')
   return { woke: true, why: '' }
