@@ -49,6 +49,18 @@ function fakeCtx({ allow = true, promptImpl } = {}) {
   return { ctx, tools, routes, prompts, sessions, creates }
 }
 
+/** 等注册生效：apply() 的工具/路由登记不是同步可见的，固定 sleep 在慢机上会偶发不够
+ *  （CI 的 ubuntu Node 20 就是这样红的：`Cannot read properties of undefined (reading 'handler')`）。 */
+async function waitFor(fn, ms = 5000) {
+  const t0 = Date.now()
+  for (;;) {
+    const v = fn()
+    if (v) return v
+    if (Date.now() - t0 > ms) return v
+    await new Promise((r) => setTimeout(r, 10))
+  }
+}
+
 test('插件元信息：名字与 inject', () => {
   assert.equal(name, 'dsh-fish')
   assert.ok(Array.isArray(inject), 'inject 必须是数组（写成对象会让 sessionController 静默丢失）')
@@ -83,7 +95,7 @@ test('注册了 growth_commit 与观测台路由', async () => {
     const h = apply(ctx, { root })
     await new Promise((r) => setTimeout(r, 120))
 
-    assert.ok(tools.has('growth_commit'))
+    assert.ok(await waitFor(() => tools.has('growth_commit')))
     const paths_ = routes.map((r) => r.path)
     assert.ok(paths_.includes('/dsh-fish'), '首页要注册')
     assert.ok(paths_.includes('/dsh-fish/state'))
@@ -98,7 +110,7 @@ test('信任栅栏 fail-closed：connection 拒绝时 403', async () => {
     const h = apply(ctx, { root })
     await new Promise((r) => setTimeout(r, 120))
 
-    const route = routes.find((r) => r.path === '/dsh-fish/state')
+    const route = await waitFor(() => routes.find((r) => r.path === '/dsh-fish/state'))
     const res = fakeRes()
     await route.handler({ url: '/dsh-fish/state', method: 'GET' }, res)
     assert.equal(res.code, 403)
@@ -113,7 +125,7 @@ test('观测台 /state 不泄露 needs 数值', async () => {
     const h = apply(ctx, { root })
     await new Promise((r) => setTimeout(r, 120))
 
-    const route = routes.find((r) => r.path === '/dsh-fish/state')
+    const route = await waitFor(() => routes.find((r) => r.path === '/dsh-fish/state'))
     const res = fakeRes()
     await route.handler({ url: '/dsh-fish/state', method: 'GET' }, res)
     assert.equal(res.code, 200)
@@ -138,7 +150,7 @@ test('/state 与 /memory 把「对不上」和「记得很牢」报出来（2026
     await appendEvent({ type: 'utterance', source: 'tool', text: '它是在看我。' }, {}, root)
     await appendEvent({ type: 'utterance', source: 'tool', text: '它不是在看我。' }, {}, root)
 
-    const stateRoute = routes.find((r) => r.path === '/dsh-fish/state')
+    const stateRoute = await waitFor(() => routes.find((r) => r.path === '/dsh-fish/state'))
     const sres = fakeRes()
     await stateRoute.handler({ url: '/dsh-fish/state', method: 'GET' }, sres)
     assert.equal(sres.code, 200)
@@ -147,7 +159,7 @@ test('/state 与 /memory 把「对不上」和「记得很牢」报出来（2026
     assert.ok(sres.json.tension.a && sres.json.tension.b, '两句原话都要给，界面才能显示')
     assert.equal(typeof sres.json.solidCount, 'number')
 
-    const memRoute = routes.find((r) => r.path === '/dsh-fish/memory')
+    const memRoute = await waitFor(() => routes.find((r) => r.path === '/dsh-fish/memory'))
     const mres = fakeRes()
     await memRoute.handler({ url: '/dsh-fish/memory', method: 'GET' }, mres)
     assert.equal(mres.code, 200)
@@ -167,7 +179,7 @@ test('config POST 白名单挡住指向她本人的键', async () => {
     const h = apply(ctx, { root })
     await new Promise((r) => setTimeout(r, 120))
 
-    const route = routes.find((r) => r.path === '/dsh-fish/config')
+    const route = await waitFor(() => routes.find((r) => r.path === '/dsh-fish/config'))
     const bad = fakeRes()
     await route.handler(reqWithBody('POST', JSON.stringify({ personality: { clingy: 0.9 } })), bad)
     assert.equal(bad.code, 400, '改人格的键必须被拒')
@@ -201,7 +213,7 @@ test('请求体里的中文即使被 TCP 切断也要完整还原（跨 chunk �
     const h = apply(ctx, { root })
     await new Promise((r) => setTimeout(r, 120))
 
-    const route = routes.find((r) => r.path === '/dsh-fish/config')
+    const route = await waitFor(() => routes.find((r) => r.path === '/dsh-fish/config'))
 
     // 真机病史（2026-10-23）：她回「传过来的字是碎的，我认不出」。
     // 根因是 readBody 用 `data += chunk`，Buffer 隐式 toString 按 latin1 逐字节拆中文
@@ -237,7 +249,7 @@ test('/dsh-fish 不再吐单页观测台，而是给一句"搬走了"', async ()
     const h = apply(ctx, { root })
     await new Promise((r) => setTimeout(r, 120))
 
-    const route = routes.find((r) => r.path === '/dsh-fish')
+    const route = await waitFor(() => routes.find((r) => r.path === '/dsh-fish'))
     const res = fakeRes()
     await route.handler({ url: '/dsh-fish', method: 'GET' }, res)
     assert.equal(res.code, 200)
@@ -259,7 +271,7 @@ test('日记默认不可见：只给日期，不给正文', async () => {
     const { writeDaily } = await import('../lib/store.js')
     await writeDaily('diaryDir', '2026-10-20', '今天没人来。', root)
 
-    const route = routes.find((r) => r.path === '/dsh-fish/diary')
+    const route = await waitFor(() => routes.find((r) => r.path === '/dsh-fish/diary'))
     const res = fakeRes()
     await route.handler({ url: '/dsh-fish/diary', method: 'GET' }, res)
     assert.equal(res.json.visible, false)
@@ -283,7 +295,7 @@ test('日记可见时一天一页：默认只给最新一天，?day= 取指定�
     await writeDaily('diaryDir', '2026-10-19', '前一天写的。', root)
     await writeDaily('diaryDir', '2026-10-20', '今天没人来。', root)
 
-    const route = routes.find((r) => r.path === '/dsh-fish/diary')
+    const route = await waitFor(() => routes.find((r) => r.path === '/dsh-fish/diary'))
 
     // 默认：日期全给（新在前），正文只给最新一天
     const r1 = fakeRes()
@@ -508,7 +520,7 @@ test('整条链路：她说一句 → 判断数 +1 → 阶段门仍卡着（不�
     const h = apply(ctx, { root })
     await new Promise((r) => setTimeout(r, 120))
 
-    const tool = tools.get('growth_commit')
+    const tool = await waitFor(() => tools.get('growth_commit'))
     await tool.execute({ type: 'utterance', text: '我不太确定自己喜不喜欢安静。', confidence: 0.3 })
 
     const { events } = await readEvents(root)
@@ -556,7 +568,7 @@ test('工具面白名单：拼错的名字不许保存，合法名字按全角�
     const h = apply(ctx, { root })
     await new Promise((r) => setTimeout(r, 120))
 
-    const route = routes.find((r) => r.path === '/dsh-fish/config')
+    const route = await waitFor(() => routes.find((r) => r.path === '/dsh-fish/config'))
 
     // 拼错一个字母：形状合法、名单里没有 —— 存进去就会让整条收窄失效，必须 400
     const typo = fakeRes()
