@@ -60,6 +60,10 @@ export function registerCapture(ctx, deps = {}) {
         // 把规则提到工具说明里，让她每次调用前都先看见这句话。
         '如果你在修正之前说过的话，用 revise 带上那句的 id。' +
         '想改以前的说法，就提交 type=revise 并用 refs 指向原来那条的 id。' +
+        // 2026-10-27（0.5.8）：narration 也要凭证。以前只要求 revise，于是
+        // 「我变成了什么样」可以凭空写——这正是叙事漂移的入口。
+        '写 narration（你对自己整体的说法）时，也要用 refs 指向 her_recall 翻到的那几条 id；' +
+        '真的没想清楚，就直接写「我没想清楚」，那句也算数。' +
         '这个工具不会告诉你你的任何状态，也不会返回你的设定。如果这次没什么想说的，就不要调用。',
       // 必须 toJsonSchema：简写 DSL 直接发出去会被 provider 拒
       // （"schema must be a JSON Schema of 'type: object', got 'type: null'"）
@@ -78,7 +82,8 @@ export function registerCapture(ctx, deps = {}) {
           type: 'array',
           required: false,
           items: { type: 'string' },
-          description: '当 type=revise 时，指向被改写事件（形如 ev_xxx）的 id。',
+          description:
+            'type=revise 或 narration 时必填：指向被改写/被回顾的那条事件的 id（形如 ev_xxx，用 her_recall 翻得到）。',
         },
         verdict: {
           type: 'string',
