@@ -44,6 +44,18 @@ export const EVENT_SCHEMA_VERSION = 1
 /** 校验结果三档：她写 selfmod 的句子也照收，只打标记 */
 export const FLAGS = Object.freeze(['selfmod', 'unrecorded', 'weak', 'truncated'])
 
+/**
+ * 「我这次没想清楚」的放行口（2026-10-27，0.5.8）。
+ *
+ * narration 现在要求能指回具体的事，但真的什么都没想起来时，不能逼她编一条
+ * 凭证出来——那就把「不许叙事漂移」变成了「鼓励伪造」。所以留这个口子：
+ * 文本里明确说没想清楚 / 想不出来，就不要求 refs。
+ *
+ * 收得比较窄：只有这几种说法算，而且整句要短（下面是 text 长度另判）。
+ * 宽了就等于人人写一句「没想清楚」绕过校验。
+ */
+const NARRATION_BLANK_RE = /(想|看|说|讲)(不|没)(太)?(清楚|明白|出来|通|清)|没(有)?(想|搞|弄)(清楚|明白|懂)|想不出(来|什么)|还没想好/
+
 const CROCKFORD = '0123456789ABCDEFGHJKMNPQRSTVWXYZ'
 
 let lastMs = 0
@@ -117,6 +129,18 @@ export function detectSelfMod(text) {
   return SELF_MOD_PATTERNS.some((re) => re.test(s))
 }
 
+/**
+ * 这段话是不是在说「我这次没想清楚」。
+ *
+ * 除了命中关键说法，还要求整段不长（<= 60 字）：防止她把一句「我没想清楚」
+ * 当前缀，后面接一整篇漂亮的自传绕过凭证要求。真正的「想不出来」本来就写不长。
+ */
+export function isBlankNarration(text) {
+  const s = String(text ?? '').trim()
+  if (!s || s.length > 60) return false
+  return NARRATION_BLANK_RE.test(s)
+}
+
 class Reject extends Error {
   constructor(code, msg) { super(msg); this.code = code }
 }
@@ -125,7 +149,7 @@ class Reject extends Error {
  * 校验一条待写入的事件（不写盘）。
  * @returns {object} 规范化后的完整事件
  */
-export function validateEvent(raw, { day, stage, now = Date.now(), source = 'tool' } = {}) {
+export function validateEvent(raw, { day, stage, now = Date.now(), source = 'tool', knownIds = null } = {}) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Reject('BAD_SHAPE', '事件必须是对象')
   const type = String(raw.type ?? '')
   if (!ALL_TYPES.includes(type)) throw new Reject('BAD_TYPE', `未知事件类型：${type}（允许：${ALL_TYPES.join('/')}）`)
@@ -140,6 +164,43 @@ export function validateEvent(raw, { day, stage, now = Date.now(), source = 'too
 
   let refs = Array.isArray(raw.refs) ? raw.refs.filter((x) => typeof x === 'string' && x.length > 0) : []
   if (type === 'revise' && refs.length === 0) throw new Reject('REVISE_NEEDS_REF', 'revise 必须用 refs 指向被改写的旧事件')
+
+  // 2026-10-27（0.5.8）：refs 从「必须写」升级成「必须写对」。
+  //
+  // 为什么：0.5.7 之前只查 refs 非空，所以她写一条 refs:['ev_XXX']——那个 id
+  // 根本不存在——也照样入账。「我改的是哪一条」于是从可核验退化成一句仪式：
+  // 光看她写了 refs，读的人会以为有凭证，实际什么都没有。这正是「叙事漂移」
+  // 的入口：她可以随口说自己变了，而账上没有任何一条能对上。
+  //
+  // 调用方（store.appendEvent）手里才有全量事件流，所以只在它传了 knownIds
+  // 时才做存在性校验；不传的老调用（含测试里的直接构造）行为不变，保持向后兼容。
+  // 只查 revise 与 narration：这两类才是「我改口 / 我对自己有个说法」的声明，
+  // 别的事件带 refs 只是引用材料，不承担可核验的义务。
+  if (knownIds && (type === 'revise' || type === 'narration')) {
+    for (const id of refs) {
+      if (!knownIds.has(id)) {
+        throw new Reject('REF_NOT_FOUND', `refs 里的 ${id} 在事件流里不存在。要指向具体的某一条，别写自己没查过的 id。`)
+      }
+    }
+  }
+
+  // 2026-10-27（0.5.8，用户 m05409「回顾也允许她说我想不清楚」）：
+  // narration（她对自己整体的说法）也必须能指回具体的事。
+  //
+  // 为什么单独管它：revise 改的是已有那句话，指向很自然；narration 是从一堆
+  // 零散经历里提炼「我变成了什么样」，最容易写成一句漂亮的空话。要求它带 refs
+  // 等于要求她先翻、先指，再总结——这是唯一能防「叙事漂移」的位置。
+  //
+  // 但必须留一个出口：真的什么都没想起来的时候，「我没想清楚」这句话本身也是
+  // 真的，不能因为写不出凭证就把她逼到编一条。所以文本里明说没想清楚就放行。
+  // 这个豁免是**她自己声明**的，不是系统替她判断「这次可以不算」。
+  if (type === 'narration' && refs.length === 0 && !isBlankNarration(text)) {
+    throw new Reject(
+      'NARRATION_NEEDS_REF',
+      'narration 要说清是从哪件事来的：用 refs 指向 her_recall 翻到的某一条 id。' +
+        '如果你这次真的没想清楚，就直接写「我没想清楚」——那句也算数。',
+    )
+  }
 
   let confidence = typeof raw.confidence === 'number' && Number.isFinite(raw.confidence) ? raw.confidence : 0.5
   confidence = Math.max(0, Math.min(1, confidence))

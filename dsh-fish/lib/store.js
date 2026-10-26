@@ -129,7 +129,23 @@ export async function readEvents(root = rootDir()) {
  * @param {object} ctx { day, stage, source }
  */
 export async function appendEvent(raw, ctx = {}, root = rootDir()) {
-  const ev = validateEvent(raw, ctx)
+  // 2026-10-27（0.5.8）：把「已有事件的 id 集合」交给校验器，让 refs 能真的查到。
+  //
+  // 只在写 revise / narration 时才去读一遍全量事件流——这两类才带 refs 义务，
+  // 别的写（meta、diary、voice…）占绝大多数，不该为它们多读一次盘。
+  // 读失败当「不知道有哪些 id」处理（knownIds = null），退化成 0.5.7 的只查非空，
+  // 不能因为查不了就拒收她的正常写入。
+  let knownIds = null
+  const type = String(raw?.type ?? '')
+  if (type === 'revise' || type === 'narration') {
+    try {
+      const { events } = await readEvents(root)
+      knownIds = new Set(events.map((e) => e.id).filter(Boolean))
+    } catch {
+      knownIds = null
+    }
+  }
+  const ev = validateEvent(raw, { ...ctx, knownIds })
   const p = paths(root)
   await ensureDir(p.root)
   await fs.appendFile(p.events, JSON.stringify(ev) + '\n', 'utf8')

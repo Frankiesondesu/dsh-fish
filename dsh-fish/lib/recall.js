@@ -12,7 +12,10 @@
  *     因为参数从来就不在事件流里。
  *   - **输出封顶**：一次最多几条、每条截断。翻不到就是翻不到，不给她一整个
  *     事件流——那等于把「回忆」变成「读档」。
- *   - 返回里只有时间、类型、她自己写下的那几句，没有 id 列表、没有字段名。
+ *   - 返回里只有时间、类型、她自己写下的那几句。**条文后面带一个 id**：
+ *     2026-10-27（0.5.8）起，她要写「我改口 / 我对自己有个说法」时必须用 refs
+ *     指向具体某一条，而 refs 是要被查存在性的。没有 id，这条规则就只是逼她编。
+ *     id 不是状态、不是参数——它只是「这句话在账上是第几行」。
  */
 
 import { toJsonSchema } from './toolschema.js'
@@ -87,6 +90,7 @@ export function searchEvents(events, query, o = {}) {
 
   scored.sort((a, b) => b.score - a.score || b.ts - a.ts)
   const rows = scored.slice(0, limit).map(({ ts, ev, text }) => ({
+    id: String(ev.id ?? ''),
     date: new Date(ts).toISOString().slice(0, 10),
     type: String(ev.type ?? ''),
     text: text.length > RECALL_SNIPPET ? text.slice(0, RECALL_SNIPPET - 1) + '…' : text,
@@ -98,7 +102,12 @@ export function searchEvents(events, query, o = {}) {
 export function renderRecall(rows) {
   if (!rows?.length) return '你翻了，没翻到。'
   const lines = ['你翻到的：']
-  for (const r of rows) lines.push(`- ${r.date}｜${r.text}`)
+  for (const r of rows) {
+    // id 用小括号挂在最后：她要 revise / narration 时原样抄进来。
+    // 没写 id 的老调用方（测试里的手写 fixture）就不显示括号，别凭空造一个。
+    const mark = r.id ? `（${r.id}）` : ''
+    lines.push(`- ${r.date}｜${r.text}${mark}`)
+  }
   return lines.join('\n')
 }
 
