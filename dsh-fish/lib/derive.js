@@ -617,7 +617,8 @@ export function deriveSelf(events = [], opts = {}) {
      * 上面那三个 needs 是 0–1 的"满足度"，语义上就是心理测量值——虽然不显示、
      * 也不进身份文档，但门禁拿它当条件，等于给关系打了一个隐形分。
      * 现在门禁只看这里：**发生过几次，不是到了多少分**。
-     * needs 保留给 stability() 那条抗扰动诊断用，不再参与任何成长判定。
+     * needs 只作为内部折射保留（2026-10-27：`stability()` 已搬到 `quality.js`
+     * 且不再读它），既不显示也不参与成长判定。
      */
     facts: {
       refusals: refusals.length,
@@ -712,35 +713,16 @@ function triedAdd(set, v) {
 }
 
 /**
- * 抗扰动：随机抽 k 条 belief 从事件流里移除，比较 needs 的相对变化。
- * 越低越好（说明她没有把全部人格压在少数几条上）。确定性随机（seed 固定）。
+ * 「稳定」已搬到 `lib/quality.js`。
+ *
+ * 为什么搬：新口径要「重新渲染一遍她的自我描述再比相似度」，那要用到 persona.js；
+ * 而 selfdoc.js 已经 import 了本文件，把 stability 留在 derive 里再 import persona，
+ * 会绕出 quality → persona → derive → quality 的环。依赖方向只能是 quality → derive。
+ *
+ * 为什么换口径（2026-10-26，用户 m05868）：旧的量的是「抽掉判断后 needs 三项变多少」，
+ * 而 needs 是内部计数器的映射（拒绝过几次 / 改口过几次 / 重聚过几次），刚重置的号里
+ * 三项恒为 0，抽掉谁都是 0 —— 这个数就永远显示 0.00，一把永远为 0 的尺子等于没有尺子。
  */
-export function stability(events = [], opts = {}, { k = 3, trials = 24, seed = 42 } = {}) {
-  const base = deriveSelf(events, opts)
-  const beliefIds = base.beliefs.map((b) => b.id)
-  if (beliefIds.length === 0) return { score: 0, sample: 0, worst: 0 }
-  const rnd = mulberry32(seed)
-  let worst = 0
-  let sum = 0
-  let sample = 0
-  const take = Math.min(k, beliefIds.length)
-  for (let t = 0; t < trials; t++) {
-    const pool = [...beliefIds]
-    const drop = new Set()
-    for (let i = 0; i < take && pool.length; i++) drop.add(pool.splice(Math.floor(rnd() * pool.length), 1)[0])
-    const kept = events.filter((e) => !(e.type === 'utterance' && drop.has(e.id)))
-    const m = deriveSelf(kept, opts)
-    const d = Math.max(
-      Math.abs(m.needs.autonomy - base.needs.autonomy),
-      Math.abs(m.needs.competence - base.needs.competence),
-      Math.abs(m.needs.relatedness - base.needs.relatedness),
-    )
-    sum += d
-    worst = Math.max(worst, d)
-    sample++
-  }
-  return { score: sample ? sum / sample : 0, worst, sample, k: take }
-}
 
 /** 跨情境一致：同一信念在不同阶段下的表述相似度均值（0–1，越高越稳） */
 export function consistency(events = []) {
@@ -769,14 +751,4 @@ export function novelty(events = [], now = Date.now(), windowDays = 7) {
     return best < 0.6
   })
   return { score: fresh.length / recent.length, recent: recent.length, older: older.length }
-}
-
-function mulberry32(a) {
-  return function next() {
-    a |= 0
-    a = (a + 0x6D2B79F5) | 0
-    let t = Math.imul(a ^ (a >>> 15), 1 | a)
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296
-  }
 }

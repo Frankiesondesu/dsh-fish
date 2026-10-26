@@ -156,6 +156,45 @@ window.__ModuleLoader__.load({
       return Number.isFinite(n) ? n.toFixed(2) : '—'
     }
 
+    /**
+     * 「判断漂移」那一行的值：样本不够时不准印 0.00。
+     *
+     * 2026-10-26（用户 m05785「为什么剩下两个全是0」）：三个指标在样本不足时给的
+     * 默认值原本被直接当成结果显示——没有判断时稳定 0.00、说话不足两条时一致 1.00、
+     * 没有七天前的老话时新鲜 0.00。三个数里有两个是"还没法测"，不是"她很差"。
+     * 现在把这种情况写成一句人话，数字只在真的能测时才印。
+     */
+    function bandOf(v) {
+      return typeof v === 'string' ? v.trim() : ''
+    }
+    function qStability(v) {
+      if (!v) return '—'
+      const band = bandOf(v && v.band)
+      // 2026-10-27（用户 m06350）：能测出来的时候，数字和判读一起给——只印那句
+      // 「长在这些事上，抽掉一条少一块」，用户看不出到底是多少，以为没测。
+      // 样本不够时才只给判读：那种 0.00 是默认值，不是测量结果，不能当数字印。
+      if (!Number(v.sample ?? 0) || !Number(v.beliefs ?? 0)) return band || '还没攒到判断，测不出来'
+      const n = Number(v.score)
+      const num = Number.isFinite(n) ? n.toFixed(2) : '—'
+      return band ? `${num} · ${band}` : num
+    }
+    function qConsistency(v) {
+      if (!v) return '—'
+      const pairs = Number(v.pairs ?? 0)
+      if (!pairs) return '还没有跨阶段的话可比'
+      const n = Number(v.score)
+      return Number.isFinite(n) ? n.toFixed(2) : '—'
+    }
+    function qNovelty(v) {
+      if (!v) return '—'
+      const recent = Number(v.recent ?? 0)
+      const older = Number(v.older ?? 0)
+      if (!recent) return '最近一周没说过话'
+      if (!older) return '还没有七天前的老话可比'
+      const n = Number(v.score)
+      return Number.isFinite(n) ? n.toFixed(2) : '—'
+    }
+
     async function jget(path) {
       const r = await fetch(API + path, { headers: { accept: 'application/json' } })
       const j = await r.json().catch(() => ({}))
@@ -1228,7 +1267,26 @@ window.__ModuleLoader__.load({
       // 用户看见的是英文（2026-10-24：「competence 是什么」）。宿主给的是技术名，
       // 显示层必须翻成人话；没收录的名字原样显示，绝不显示 undefined。
       const GATE_NAME = { trust: '信任', autonomy: '自主', competence: '主动' }
-      const QUALITY_HELP = '判断漂移是三个 0 到 1 的数：稳定 = 少押几条判断会不会变一个人；一致 = 前后说法打不打架；新鲜 = 有没有一直在长新东西。越接近 1 越好。'
+      // 2026-10-26 改（用户 m05785 / m05868）：原来这里写「越接近 1 越好」，那是错的。
+      // 这三个数不是考卷分数，是体检值，各有各的两端：
+      //   稳定 = 抽掉几条她还在拿着的判断，她还是不是她。太低说明那些判断只是记账，
+      //          太高说明她整个人都压在少数几条上，少一条就是另一个人。
+      //   一致 = 前后说法打不打架。高到 1.00 也可能是她一直没长新东西。
+      //   新鲜 = 有没有一直在长新东西。
+      // 2026-10-27 改（用户 m06107「这三个参数分成三行显示，现在排成一行有点拥挤」）：
+      // 原来三个值挤在一条 rowTip 的值里，界面上是一长串；拆成三行，各自带自己的说明。
+      // 「判断漂移」这个名字留在上方的副标题上，免得三行看起来像三个互不相干的数。
+      const QUALITY_TITLE = '判断漂移（三个诊断值，不是分数）'
+      const QUALITY_HELP = '这三个数都是 0 到 1 的体检值，不是越高越好：'
+        + '稳定太低说明那些判断只是记账，太高说明她整个人压在这几条上；'
+        + '一致高到 1.00 也可能是她一直没长新东西；'
+        + '新鲜看她有没有一直在长新东西。'
+        + '样本不够时这里会写一句话，而不是硬给一个 0.00。'
+      const STABILITY_HELP = '少几条她信的事，她还是不是她。太低 = 那些判断只是记账、抽掉也不影响她；'
+        + '太高 = 她整个人都压在少数几条上，少一条就是另一个人。'
+      const CONSISTENCY_HELP = '她前后说法打不打架。跨阶段的话越多这个数越可信；'
+        + '一句都没得比的时候会写「还没有跨阶段的话可比」。'
+      const NOVELTY_HELP = '有没有一直在长新东西：最近七天说的话里，有多少句是以前没出现过的。'
 
       // 页签栏**只放页签**（2026-10-24）。
       // 原来这一行还挂着「现在叫醒大肥鱼」和「保存」两个按钮，都被挪走了：
@@ -1349,7 +1407,16 @@ window.__ModuleLoader__.load({
           rowTip('最近的称呼', s.name ? s.name : '还没想好', '她自己决定怎么称呼你。这个不是设置项，改不了。'),
           rowTip('冷落', s.absenceDays > 0 ? `${s.absenceDays} 天` : '没有', '你多久没说话了。超过门槛她会记下「你不在」。'),
           rowTip('互动计数', `说 ${s.counts.utterance} · 改口 ${s.counts.revise} · 拒绝 ${s.counts.refusal} · 重聚 ${s.counts.reunion}`, '说=她写过几句自己的判断（含留话）；改口=按照规则推翻历史认知并指明改的是哪条；拒绝=她明确登记拒绝过什么；重聚=久别之后她自己写下的感受。'),
-          rowTip('判断漂移', `稳定 ${q2(s.quality && s.quality.stability)} · 一致 ${q2(s.quality && s.quality.consistency)} · 新鲜 ${q2(s.quality && s.quality.novelty)}`, QUALITY_HELP)) : null,
+          s.quality ? h('div', { style: { marginTop: '4px', marginBottom: '2px' } },
+            h('div', {
+              style: { display: 'flex', gap: '8px', alignItems: 'baseline', fontSize: '13px', marginBottom: '5px' },
+            },
+              h('span', { style: { opacity: 0.65, flex: '0 0 auto', minWidth: '84px' } }, '判断漂移'),
+              h('span', { style: { flex: '1', opacity: 0.8 } }, QUALITY_TITLE,
+                h('span', { title: QUALITY_HELP, style: { opacity: 0.45, marginLeft: '5px', cursor: 'help' } }, 'ⓘ'))),
+            rowTip('稳定', qStability(s.quality.stability), STABILITY_HELP),
+            rowTip('一致', qConsistency(s.quality.consistency), CONSISTENCY_HELP),
+            rowTip('新鲜', qNovelty(s.quality.novelty), NOVELTY_HELP)) : null) : null,
 
         // ---- 规则（R3，2026-10-24） ----
         // 这一块**只读 + 裁决**：没有新建、没有编辑。

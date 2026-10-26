@@ -12,7 +12,10 @@
 
 import { readEvents, rootDir, paths, readDaily, listDiary, readOwner } from './store.js'
 import { loadConfig, updateConfig, configFileInfo, dateKey, validateToolNames } from './settings.js'
-import { deriveSelf, stability, consistency, novelty } from './derive.js'
+import { deriveSelf, consistency, novelty } from './derive.js'
+// 「稳定」单独一个文件（2026-10-26）：它要同时看事件流与她的自我描述，
+// 依赖方向必须是 quality → derive + persona，不能反过来塞进 derive（会成环）。
+import { stability, stabilityBand } from './quality.js'
 import { firedLog, CATALOG } from './events.js'
 import { wakeNow } from './scheduler.js'
 import { sayToHer } from './say.js'
@@ -185,7 +188,20 @@ export function registerObserve(ctx, deps = {}) {
           reunion: events.filter((e) => e.type === 'reunion').length,
           total: events.length,
         },
-        quality: { stability: stability(events, { growthDays: config.growthDays }), consistency: consistency(events), novelty: novelty(events) },
+        // 「判断漂移」三个诊断值。都不是 0–1 的评分，别让人拿它调性格。
+        // 稳定（2026-10-26 换尺子）：抽掉 k 条她还在拿着的判断，重算一遍她的自我描述，
+        //   看还是不是她。传的 shown / budget / withBans 与 writeSelfDoc 一致，
+        //   否则量到的那份文本不是她真正读到的那份。
+        quality: (() => {
+          const st = stability(events, { growthDays: config.growthDays }, {
+            shown: config?.memory?.beliefsShown,
+            budget: config?.memory?.docBudget,
+            withBans: m?.persona?.imported !== true,
+          })
+          // band 是给人看的一句判读（「还没攒到判断，测不出来」这种）。
+          // 放在这里算，客户端就不必知道阈值——阈值只该有一处。
+          return { stability: { ...st, band: stabilityBand(st) }, consistency: consistency(events), novelty: novelty(events) }
+        })(),
         // 规则与解锁：她遵守什么、哪些"还不会"、手上有没有一张待裁决的卡。
         // 只给状态与理由，不给任何 0–1 的分（见 rules.js 的 EVIDENCE 注释）。
         rules: ruleStatus(events, m, Date.now()),

@@ -274,11 +274,76 @@ test('quality 是宿主那套 {score} 结构体时也要能渲染（2026-10-23 �
   assert.doesNotThrow(() => { tree = exports.FishSection() }, 'quality 是结构体时不许抛')
   const txt = textOf(tree).join(' ')
   assert.ok(txt.includes('判断漂移'), '质量那行要渲染出来')
-  // 取不到裸分数时给 em dash，而不是 NaN 或崩溃
-  assert.ok(txt.includes('稳定 0.00'), `应当从 score 取到 0.00，实际: ${txt.slice(0, 200)}`)
-  assert.ok(txt.includes('一致 1.00'))
+  // 2026-10-26 改（用户 m05785「为什么剩下两个全是0」）：
+  // 这个形状就是全新一局的样子——0 条判断、0 对可比的话、0 条七天前的老话。
+  // 原来三个数会照默认值印成「0.00 / 1.00 / 0.00」，让人以为她很差、还想把 1.00 当满分。
+  // 现在样本不足一律写人话，数字只在真能测时才印。
+  assert.ok(txt.includes('还没攒到判断，测不出来'), `没有判断时要说测不出来，实际: ${txt.slice(0, 300)}`)
+  assert.ok(txt.includes('还没有跨阶段的话可比'), '说话不足两条时要说还没得比')
+  // 新鲜：这个夹具里最近一周一条没说（recent=0），先说「没说过话」；
+  // 有近期没历史时才说「还没有七天前的老话可比」。两者都不是 0.00。
+  assert.ok(txt.includes('最近一周没说过话'), '最近没说话时要说没说过话')
+  assert.ok(!txt.includes('稳定 0.00'), '样本不足时不许再印 0.00 冒充读数')
   assert.ok(!txt.includes('undefined'), '不许把 undefined 渲染到界面上')
   assert.ok(!txt.includes('NaN'), '不许把 NaN 渲染到界面上')
+})
+
+test('quality 能测出稳定值时，数字和判读一起给（用户 m06350）', async () => {
+  const react = fakeReact({
+    0: {
+      day: 30, growthDays: 30, stage: 2, stageName: '自主', stageForced: false, pendingGate: null,
+      name: '梦尘', beliefCount: 6, absenceDays: 0,
+      counts: { utterance: 40, revise: 3, refusal: 2, reunion: 1, total: 60 },
+      quality: {
+        stability: { score: 0.41, sample: 24, k: 3, beliefs: 6, band: '全压在这几条上，少一条就是另一个人' },
+        consistency: { score: 0.72, pairs: 12 },
+        novelty: { score: 0.35, recent: 9, older: 20 },
+      },
+      config: { window: ['20:00', '23:00'], daily: { events: 1, questions: 1 }, diary: { enabled: true, visible: false }, absenceAfterDays: 2 },
+    },
+  })
+  const { exports } = await loadClient({ react })
+  react.resetCursor()
+  const txt = textOf(exports.FishSection()).join(' ')
+  assert.ok(txt.includes('全压在这几条上'), `band 那句话要显示出来，实际: ${txt.slice(0, 300)}`)
+  assert.ok(txt.includes('0.41'), '能测出数值时，数字必须印出来——只给判读会让人以为没测（用户 m06350）')
+  assert.ok(txt.includes('0.72'), '一致仍然显示数字')
+  assert.ok(txt.includes('0.35'), '新鲜仍然显示数字')
+})
+
+// 2026-10-27（用户 m06107「这三个参数分成三行显示，现在排成一行有点拥挤」）：
+// 三个值原来是拼在同一条 rowTip 的值里，界面上是一长串。现在必须是三个独立的行。
+test('判断漂移的三个值分三行渲染，不挤在一行里（用户 m06107）', async () => {
+  const react = fakeReact({
+    0: {
+      day: 30, growthDays: 30, stage: 2, stageName: '自主', stageForced: false, pendingGate: null,
+      name: '梦尘', beliefCount: 6, absenceDays: 0,
+      counts: { utterance: 40, revise: 3, refusal: 2, reunion: 1, total: 60 },
+      quality: {
+        stability: { score: 0.41, sample: 24, k: 3, beliefs: 6, band: '全压在这几条上，少一条就是另一个人' },
+        consistency: { score: 0.72, pairs: 12 },
+        novelty: { score: 0.35, recent: 9, older: 20 },
+      },
+      config: { window: ['20:00', '23:00'], daily: { events: 1, questions: 1 }, diary: { enabled: true, visible: false }, absenceAfterDays: 2 },
+    },
+  })
+  const { exports } = await loadClient({ react })
+  react.resetCursor()
+  const tree = exports.FishSection()
+  // 三个值各自是一个 rowTip（行名 span 的 minWidth 是 84px 那一种）。
+  // 取所有行名，断言「稳定 / 一致 / 新鲜」各是一个独立的行，而不是拼在一个值里。
+  const labels = []
+  const walk = (n) => {
+    if (!n || typeof n !== 'object') return
+    if (Array.isArray(n)) { n.forEach(walk); return }
+    const st = n.props && n.props.style
+    if (st && st.minWidth === '84px') labels.push(textOf(n).join(''))
+    if (n.children) n.children.forEach(walk)
+  }
+  walk(tree)
+  assert.ok(labels.includes('稳定'), `稳定要单独成一行，实际行名: ${labels.join('/')}`)
+  assert.ok(labels.includes('一致'), `一致要单独成一行，实际行名: ${labels.join('/')}`)
+  assert.ok(labels.includes('新鲜'), `新鲜要单独成一行，实际行名: ${labels.join('/')}`)
 })
 
 test('quality 缺失 / 是裸数字时也都能渲染', async () => {
