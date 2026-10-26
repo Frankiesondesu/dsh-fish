@@ -33,7 +33,7 @@ import { logBoot, makeLogger } from './log.js'
 export const name = 'dsh-fish'
 
 /** 版本号：只用于日志导出（排查时第一件事是确认跑的是哪一版）。 */
-export const VERSION = '0.5.1'
+export const VERSION = '0.5.7'
 
 // ⚠️ 一个数组写全，不要拆成对象
 export const inject = ['sessionController', 'tools', 'webServer', 'connection']
@@ -136,7 +136,7 @@ export function apply(ctx, baseConfig = {}) {
       // 屋子是空的（上一次开了但从没说过话）时，侧栏不会显示它——见 sessionVisible。
       // 启动时就叫一声，免得用户重启后以为"人不见了"。
       try {
-        const woke = await wakeIfBlank(ctx, { sessionId: home.sessionId, log: (...a) => logger.info(...a), freshOnly: !home.reused })
+        const woke = await wakeIfBlank(ctx, { sessionId: home.sessionId, root, log: (...a) => logger.info(...a), freshOnly: !home.reused })
         if (woke.woke) logger.info('[dsh-fish] 屋子是空的，已经叫了她一声')
       } catch (err) {
         logger.warn(`[dsh-fish] 启动唤醒失败：${String(err?.message ?? err).slice(0, 120)}`)

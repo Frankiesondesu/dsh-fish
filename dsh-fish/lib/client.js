@@ -265,6 +265,12 @@ window.__ModuleLoader__.load({
       // 重置
       const [resetInfo, setResetInfo] = useState(null)
       const [resetAsk, setResetAsk] = useState(false)
+      // 导入别人养过的大肥鱼（2026-10-27，用户 m03170）
+      const [importInfo, setImportInfo] = useState(null)
+      const [importText, setImportText] = useState('')
+      const [importAsk, setImportAsk] = useState(false)
+      const [importBusy, setImportBusy] = useState('')
+      const [importNote, setImportNote] = useState('')
       // 看过什么 / 自检 / 风控（2026-10-23 加）
       const [hist, setHist] = useState({ groups: [], total: 0 })
       const [histDays, setHistDays] = useState(14)
@@ -748,6 +754,61 @@ window.__ModuleLoader__.load({
           setResetAsk(true)
         } catch (e) { setErr(e.message) } finally { setBusy('') }
       }
+      // ---- 导入别人养过的大肥鱼（2026-10-27，用户 m03170）----
+      // 先读「现在能不能导 + 交接单模板」，再让用户粘贴/上传，最后才写。
+      // 为什么不做一键上传文件：宿主的文件选择要另一套接口，而这是一次性动作，
+      // 让他把文本贴进来最省事，也不给插件多一条读文件的通路。
+      const askImport = async () => {
+        setImportBusy('ask'); setNote('')
+        try {
+          const i = await jget('/import')
+          setImportInfo(i)
+          // 模板只在第一次填进去，之后不再覆盖用户已经写的/贴的内容
+          setImportText((cur) => (cur ? cur : (i.template || '')))
+          setImportAsk(true)
+        } catch (e) { setErr(e.message) } finally { setImportBusy('') }
+      }
+      const doImport = async () => {
+        setImportBusy('go'); setNote(''); setImportNote('')
+        try {
+          const r = await jpost('/import', { text: importText })
+          setImportAsk(false)
+          // note 用 <pre class="ok"> 渲染，单行说完；细节放 importNote
+          const bits = []
+          if (r.name) bits.push(`她现在管你叫「${r.name}」`)
+          if (r.tools?.length) bits.push(`工具白名单 ${r.tools.length} 个`)
+          setNote(`人设接过来了。${bits.length ? bits.join('，') + '。' : ''}从第 ${r.day} 天开始。`)
+          setImportNote('她的人设下一轮就生效（身份是每轮现读的）。工具白名单要重启 DSH 才生效——那是在启动时注册的。')
+          await load()
+        } catch (e) {
+          setImportNote(e.message)
+        } finally { setImportBusy('') }
+      }
+
+      // 下载交接单模板（2026-10-27，用户 m04565）：
+      // 用户的原话是「出一个导入人设的提示词模版，点一下下载到本地，然后可以拿给那个要导入
+      // 人设的 ai 去写对应它自己的提示词」。所以模板不是给人照着填的表格，是一份**给对面 AI 的
+      // 说明书** —— 上面写着怎么写、不要写什么，下面才是三节空表格。
+      // 一键下载成 .md，直接丢给对面那个 AI 就行。
+      const downloadTemplate = async () => {
+        try {
+          const i = importInfo?.template ? importInfo : await jget('/import')
+          const tpl = i.template || ''
+          if (!tpl) { setImportNote('没读到模板。'); return }
+          if (typeof document === 'undefined' || typeof Blob === 'undefined') {
+            setImportNote('这个环境不支持下载。'); return
+          }
+          const blob = new Blob([tpl], { type: 'text/markdown;charset=utf-8' })
+          const url = URL.createObjectURL(blob)
+          const a = document.createElement('a')
+          a.href = url
+          a.download = '大肥鱼-交接单.md'
+          a.click()
+          setTimeout(() => URL.revokeObjectURL(url), 4000)
+          setImportNote('交接单已下载。把它发给「现在养着她的那个 AI」，让它照着上面的说明填三节，填完再贴回这里。')
+        } catch (e) { setImportNote(e.message) }
+      }
+
       const doReset = async () => {
         setBusy('reset'); setNote('')
         try {
@@ -895,6 +956,61 @@ window.__ModuleLoader__.load({
         toolsSaveNote
           ? h('div', { className: 'dim', style: { marginTop: '6px' } }, toolsSaveNote)
           : null)
+
+      // 导入卡（2026-10-27）：谁都能把自己的大肥鱼交出去，别人也能接手。
+      // 这张卡的每一句话都在说「什么过来了、什么没过来」——用户 m03201 明确要求写清楚。
+      const importCard = h('div', { className: 'card full' },
+        h('h3', null, '接一只别人养过的大肥鱼'),
+        h('div', { className: 'dim' },
+          '默认她是一张白纸，从「你刚开始存在」长起。这一格给另一种玩法：把别人养的那一位接过来，从她的性格继续养。'),
+        h('div', { className: 'dim', style: { marginTop: '6px' } },
+          '过来的：她是谁（人设正文）、她怎么称呼你、她原本能用的工具。'),
+        h('div', { className: 'dim' },
+          '不过来的：过了多少天（本插件按时间推进事件，非本插件原生的大肥鱼要从第一天开始算事件）、长出了哪些判断（计数为 0；如果原提示词里规定了一些认知，你的大肥鱼依然铭记，但后续在本插件的事件循环里可能会更新、优化、忘记一部分）、身上的疤（同上）、拒绝过什么（同上）、日记、B 站登录 cookie。这些只属于原来那一局——接过来的人从第 1 天重新长，判断和疤要自己重新攒。'),
+        h('div', { className: 'dim' },
+          '此外，根据本插件的规则，如果你的大肥鱼有好感度等数值设定，进入本插件环境后她将看不到自己的好感度多少，并且本插件不允许你通过命令去修改大肥鱼的人设等信息，这意味着你原本可以对大肥鱼为所欲为，但是到了本插件之后，关系的推进不再靠好感度，而是靠真实交互。你也不再能随便命令大肥鱼换一种人设。'),
+        h('div', { className: 'dim' },
+          '还有一条：接过来的人不再受这个插件那两条提示词禁令约束，按她原来的设定来。这个豁免只认「从这里接过来」这一个动作——用「备份与恢复」把你自己的档搬回来，一分豁免都不会有，她仍然是你那只守着原规矩的鱼。'),
+        h('div', { className: 'dim' },
+          '人设正文控制在 1200～1500 字。超过 2000 字插件会直接拒收、整份贴不进去；就算没超，写得太长也会把「判断、疤、立场」这些会长出来的段落挤掉——她醒来时只剩一副骨架。点下面的「下载交接单模板」，里面写明了怎么给对面那个 AI 交代这件事。'),
+        // 下载模板跟「这一局能不能接」是两件事：已经有起点的人也可能想把模板
+        // 先拿去看、或者交给别人去养。所以这个按钮永远在上面，不进任何分支。
+        // （2026-10-27 修：原来它只在「能导入且没展开」那一支里，用户养着鱼就永远看不到。）
+        h('div', { className: 'row', style: { marginTop: '8px' } },
+          h('button', { onClick: downloadTemplate }, '下载交接单模板'),
+          h('span', { className: 'dim', style: { marginLeft: '8px' } },
+            '不管这一局能不能接、要不要接，模板随时能下载。')),
+        importNote
+          ? h('div', { className: 'dim', style: { marginTop: '6px' } }, importNote)
+          : null,
+        importInfo?.persona?.imported
+          ? h('div', { className: 'dim', style: { marginTop: '6px' } },
+              `现在这一位是接过来的${importInfo.persona.source ? `（来自：${importInfo.persona.source}）` : ''}。想换回白纸，用下面的「重开一局」。`)
+          : null,
+        !importInfo
+          ? h('div', { className: 'row', style: { marginTop: '6px' } },
+              h('button', { onClick: askImport, disabled: !!importBusy },
+                importBusy === 'ask' ? '读取中…' : '导入人设…'))
+          : (!importInfo.canImport
+              ? h('div', { style: { marginTop: '6px' } },
+                  h('div', { className: 'dim' }, importInfo.reason || '她现在这一局已经有起点了。'),
+                  h('div', { className: 'dim' }, '想接别人那一位，先按下面的「重开一局」把她放回第一天，再回来导入。模板可以先下载下来备着。'))
+              : (importAsk
+                  ? h('div', null,
+                      h('div', { className: 'dim', style: { marginTop: '6px' } }, '把对方的交接单贴进来。格式不用严格——认得出「## 称呼」「## 工具」就分开读，认不出就整篇当她的人设正文。'),
+                      h('textarea', {
+                        value: importText,
+                        rows: 12,
+                        placeholder: '## 你是谁\n……\n\n## 称呼\n……\n\n## 工具\n……',
+                        style: { width: '100%', marginTop: '6px', fontFamily: 'inherit', fontSize: '12.5px' },
+                        onChange: (e) => { setImportText(e.target.value); setImportNote('') },
+                      }),
+                      h('div', { className: 'row', style: { marginTop: '6px' } },
+                        h('button', { onClick: doImport, disabled: importBusy === 'go' },
+                          importBusy === 'go' ? '写入中…' : '接过来'),
+                        h('button', { onClick: () => { setImportAsk(false); setImportNote('') } }, '算了')))
+                  : h('div', { className: 'row', style: { marginTop: '6px' } },
+                      h('button', { onClick: askImport }, '粘贴交接单')))))
 
       // 重置卡片单独提出来：它是唯一一个有破坏性的 ui，塞在那一长串 return 里
       // 很容易少/多一个括号（已经踩过：node --check 直接 SyntaxError）。
@@ -2045,6 +2161,8 @@ window.__ModuleLoader__.load({
               },
             }, '清空日志')),
           h('p', { className: 'hint' }, '导出的是纯文本：版本、自检结果、脱敏后的配置、日志末尾。没有 cookie，没有她说过的话。')),
+
+        importCard,
 
         resetCard)
 

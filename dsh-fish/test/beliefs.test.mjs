@@ -99,6 +99,9 @@ test('客户端：设置项、buildConfig、上限表都在', () => {
 test('观测台与身份文档同源：/memory 用 shownCount 而不是写死的常量', () => {
   const src = fs.readFileSync(new URL('../lib/observe.js', import.meta.url), 'utf8')
   assert.ok(src.includes('shownCount(config?.memory?.beliefsShown ?? BELIEF_SHOWN)'))
-  assert.ok(src.includes('personaBudget(model, { budget, withBans: true, shown: shownCap })'))
+  assert.ok(
+    src.includes('personaBudget(model, { budget, withBans: model?.persona?.imported !== true, shown: shownCap })'),
+    '禁不禁用要跟身份文档同源，并且只认事件流里的导入标记（备份/恢复搬来的 config 不算）',
+  )
   assert.ok(src.includes('Math.min(shownCap, model.beliefs.length)'))
 })

@@ -183,12 +183,27 @@ export async function ensureTalkSession(ctx, { root = rootDir(), wsId, title = T
  * 不会被设成当前会话，于是它一直藏在列表外面：用户点完重置看到的是「没有新会话」，
  * 重启也一样。让它跑一轮（blank 在开跑/成功后清掉）才是唯一能落地显示的办法。
  *
- * 代价：只在她确实空白时叫一次，复用会话里有内容就什么都不做。
+ * 代价：每一条会话只叫一次。这件事记在 `home.json` 的 `wokeFor` 里，不靠猜
+ * （issue #1 报的第二个问题）：插件建的会话永远不是 current，宿主也不把它放进
+ * 可见列表，所以「查不到这一行 → 按空白处理」这条分支会在它身上一直命中，
+ * 每次重启都再叫一次。靠 `list()` 的 blank 判不准，就自己记账。
+ *
+ * 只记**成功送达**的那一次：宿主的 prompt 是「这一轮被收下了」就 resolve，
+ * 收下就一定会跑出内容；抛错（比如漏传 signal）则不写，下次启动还会再试。
  */
-export async function wakeIfBlank(ctx, { sessionId, log, freshOnly = false } = {}) {
+export async function wakeIfBlank(ctx, { sessionId, root = '', log, freshOnly = false } = {}) {
   if (!sessionId) return { woke: false, why: '没有会话 id' }
   const sc = ctx?.get?.('sessionController') ?? ctx?.sessionController
   if (!sc) return { woke: false, why: '宿主没有 sessionController 服务' }
+
+  // ---- 已经叫过这一条了？----
+  // 有标记就直接收手：同一条会话第二次被叫醒，只会在她的对话里多出一句
+  // 没头没尾的「（醒一醒）」，还会白烧一轮。
+  // root 为空就不记账（测试与只读调用不为难）：那等于回到「每次都问宿主」的老行为。
+  const saved = root ? await readJson(homeFile(root), null).catch(() => null) : null
+  if (String(saved?.wokeFor ?? '') === String(sessionId)) {
+    return { woke: false, why: '这一局已经叫过了' }
+  }
 
   let blank = false
   try {
@@ -213,6 +228,9 @@ export async function wakeIfBlank(ctx, { sessionId, log, freshOnly = false } = {
   if (typeof sc.prompt !== 'function') return { woke: false, why: '宿主没有 sessionController.prompt' }
 
   // 不能 await：这一轮要等模型跑完，屋子建好不该被它拖住。
+  // 第二个参数 signal 是宿主必填的：`prompt(request, signal)` 第一句就 signal.throwIfAborted()，
+  // 漏传会抛 `Cannot read properties of undefined (reading 'throwIfAborted')`，这一声叫不醒（issue #1）。
+  // 给一个永不 abort 的 signal——唤醒要等她跑完，不能加超时。
   void sc
     .prompt({
       requestId: `wake-fresh-${Date.now()}`,
@@ -220,9 +238,26 @@ export async function wakeIfBlank(ctx, { sessionId, log, freshOnly = false } = {
       mode: 'queue',
       content: [{ type: 'text', text: WAKE_TRIGGER }],
     }, new AbortController().signal)
+    .then(() => markWoke(root, sessionId))
     .catch((err) => log?.(`新屋子唤醒失败：${String(err?.message ?? err).slice(0, 140)}`))
   log?.('新屋子还是空的，叫了她一声（要等她这一轮动起来，侧栏才会显示）')
   return { woke: true, why: '' }
+}
+
+/**
+ * 记下「这一条会话已经叫过了」。
+ *
+ * 为什么不写文件就活在内存里：进程一重启就忘了，那正是要防的事。
+ * 为什么不用 home.json 里的 sessionId 比对：新建会话和「重置后重建」都会换 id，
+ * 拿 id 比是最直接的语义——同一个 sessionId 只叫一次。
+ * 失败只影响「下次可能多叫一次」，不影响这一次，所以永不抛。
+ */
+async function markWoke(root, sessionId) {
+  if (!root) return
+  try {
+    const saved = (await readJson(homeFile(root), null)) ?? {}
+    await writeAtomic(homeFile(root), JSON.stringify({ ...saved, wokeFor: String(sessionId) }, null, 2))
+  } catch { /* 记不下来就下次多叫一次，没有更坏的后果 */ }
 }
 
 export async function bootstrapHome(ctx, { root = rootDir(), log, preset = '' } = {}) {

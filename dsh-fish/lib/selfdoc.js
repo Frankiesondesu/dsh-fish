@@ -47,7 +47,7 @@ export function legacySelfDocPath(root = rootDir()) {
  * @param {object} model deriveSelf 的结果
  * @returns {string}
  */
-export function renderSelfDoc(model, { budget, carry, browse = true, speak = false, grants = [], shown, diary = true, sleepEveryDays = 0 } = {}) {
+export function renderSelfDoc(model, { budget, carry, browse = true, speak = false, grants = [], shown, diary = true, sleepEveryDays = 0, bansMuted = false } = {}) {
   const head = [
     // 这里**故意不写**「由 dsh-fish 自动生成」这类话。
     // 这个文件会被宿主原样渲染进她的会话——她能看见每一行。
@@ -57,8 +57,12 @@ export function renderSelfDoc(model, { budget, carry, browse = true, speak = fal
   // R3（2026-10-24）：已经解禁的规则要从「你还不会的」里拿掉，换到「你已经可以了」。
   // 这一步只能发生在**文档生成**阶段，不能放在提示词阶段——
   // 因为这是历史：她走过来了，文件才变。反过来（先改文件再等她做到）就是改人设。
-  let identity = personaLine(model, { withBans: true, budget, shown })
-  if (grants.includes('learn-affection')) {
+  // 2026-10-27（用户 m03170）：导进来的这一位，我们那两条提示词禁令不适用。
+  // 用户的原话是「尊重别人的想法……直接忽略我们原本规定的你不能做某事」。
+  // 只关提示词侧（withBans），物理层那两条根本不在提示词里，仍由工具层拦着。
+  let identity = personaLine(model, { withBans: !bansMuted, budget, shown })
+  // 导入的人设不追加「你已经可以了」——那句是我们的成长叙事，对方的人设里没有这一段。
+  if (!bansMuted && grants.includes('learn-affection')) {
     identity = identity
       .replace(/## 你还不会的[^\n]*\n(?:- [^\n]*\n?)*/g, '')
       .trimEnd()
@@ -133,6 +137,10 @@ export async function writeSelfDoc(root = rootDir(), { log } = {}) {
       // 留一句「每天我会记一笔」——那等于给了她一件做不了的事。
       diary: config?.diary?.enabled !== false,
       sleepEveryDays: Number(config?.memory?.sleepEveryDays ?? 0),
+      // 2026-10-27：导进来的这一位跳过我方那两条提示词禁令（用户 m03170 要求）。
+      // 判定只看 model（事件流），**不读 config**——用户 m03769 明确要求
+      // 「备份与恢复搬回来的那一份不算导入，不得获得豁免」。
+      bansMuted: model?.persona?.imported === true,
     })
 
     let prev = null

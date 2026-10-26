@@ -59,14 +59,29 @@ test('revise refuted 会记进 refuted 并把旧信念置为 refuted', () => {
   assert.equal(m.beliefs.filter((b) => b.status === 'active').length, 1)
 })
 
-test('称呼从她的话里提出，且只取第一次', () => {
+test('称呼从她的话里提出，后来的盖掉先前的', () => {
   assert.equal(pickName('我以后称呼你叫阿岸，行吗'), '阿岸')
   const evs = [
     ev('ev_seed', 'seed', 1, '种', { source: 'system' }),
     ev('ev_a', 'utterance', 2, '我以后称呼你叫阿岸。'),
     ev('ev_b', 'utterance', 3, '我叫你老张好了。'),
   ]
-  assert.equal(deriveSelf(evs, { now: T0 + 3 * DAY_MS }).name, '阿岸')
+  // 2026-10-26：原来只认第一次，她后来接受了他给的名字也改不上，状态栏一直停在旧称呼。
+  assert.equal(deriveSelf(evs, { now: T0 + 3 * DAY_MS }).name, '老张')
+})
+
+// 真机原话（2026-10-26 ev_01M5WBQVN82CGCRJKQREQGW3NQ）：她写的是「他给了自己的名字：时梦尘」，
+// 旧规则只认「称呼你/叫你」，一条都没命中，状态栏一直显示「还没想好」。
+test('他主动给的名字、她自己改口的叫法都算称呼', () => {
+  assert.equal(pickName('他给了自己的名字：时梦尘，说他认这个名字。'), '时梦尘')
+  assert.equal(pickName('以后叫他时梦尘。'), '时梦尘')
+  assert.equal(pickName('我想叫他“开灯的”。'), '开灯的')
+  // 她自己的名字不是对他的称呼
+  assert.equal(pickName('他给我起了名字：大肥鱼。'), null)
+  // 被否掉的说法不算（她说的是「他不要我叫……」）
+  assert.equal(pickName('他不要我叫“搭屋的”，也不要“开灯的”。'), null)
+  // 代词不算称呼
+  assert.equal(pickName('以后叫他他吧'), null)
 })
 
 test('needs 只有三个键，且绝不出现好感度类字段', () => {

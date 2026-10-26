@@ -29,7 +29,24 @@ const CORRECTION_RE = /我(查了|搜了|学了|看了下|去查过)|更正|我�
  */
 const REFUSE_RE = /我(?!要)(?:不要|不想|不愿|不愿意|不打算|不准备)(?:再)?(?:去|看|听|做|说|回答|配合|参与|照做|答应|接受)|我(?:拒绝|不做|不答应|不配合|不接受)/
 const PAST_RE = /之前|上次|那时候|想起|以前|上次说|还记得/
-const NAME_RE = /(?:称呼你|叫你)(?:做|为|作|叫)?\s*[「“"']?([^\s，。！？、,.!?」”"']{1,8})/
+/**
+ * 她怎么称呼他（2026-10-26 修）。
+ *
+ * 原来只认「称呼你 / 叫你」。真机上她说的是这两种：
+ *   「他给了自己的名字：时梦尘，说他认这个名字。」（他主动给的）
+ *   「以后叫他时梦尘。」「我想叫他"开灯的"。」（她自己的说法）
+ * 两条都没命中，于是状态栏一直显示「还没想好」——不是她没决定，是代码没读出来。
+ *
+ * 三种说法都认，但**不认「他给我起了名字：大肥鱼」**——那是她自己的名字，不是他的。
+ * 所以「名字」这条必须带「他自己的」，裸的「名字」不算。
+ */
+const NAME_SAY_RE = /(?:称呼你|叫你|称呼他|叫他|称他)(?:做|为|作|叫)?\s*[「“"']?([^\s，。！？、,.!?」”"']{1,8})/
+const NAME_GIVE_RE = /他(?:给(?:了)?)?(?:自己)?的?名字\s*(?:是|叫|：|:)?\s*[「“"']?([^\s，。！？、,.!?」”"']{1,8})/
+// 截出来的常常带尾巴：「我叫你老张好了」会截到「老张好了」。
+// 只剥语气词和「了/好」这类收尾——**不剥「的」**，「开灯的」剥掉就成了「开灯」。
+const NAME_TAIL = /[了吧呢啊嘛哦诶欸呀哈哇哦嘞好]+$/
+const NAME_STOP = new Set(['你', '我', '他', '她', '它', '自己', '什么', '名字'])
+const NAME_BAD_HEAD = /^[你我他她它]/
 
 /**
  * 冲突检测（2026-10-24，用户批准的 P0）
@@ -140,6 +157,18 @@ export function orderEvents(events = []) {
   })
 }
 
+/** 导入他人人设时带上来的称呼，写在 meta 事件里（见 lib/import.js） */
+export const IMPORT_NAME_PREFIX = 'import-name:'
+
+/**
+ * 「这一局的人设是别人给的」这条标记，同样写在 meta 事件里（2026-10-27，用户 m03769）。
+ *
+ * 它和 bansMuted 配置项的关系是：**事件是唯一的真相**，配置只是个能看见的镜像。
+ * 判定豁免时只读事件（`model.persona.imported`），不读 config.persona.bansMuted。
+ * 这样备份/恢复搬回来的 config 再怎么写着 true，只要事件流里没有这条，就没有豁免。
+ */
+export const IMPORT_MARK_PREFIX = 'import-mark:'
+
 /** 成长第几天 = 距 seed 的自然日 + 1（不因没互动而暂停，也不回退） */
 export function growthDay(events, now = Date.now()) {
   const seed = events.find((e) => e.type === 'seed')
@@ -176,8 +205,17 @@ export function similarity(a, b) {
 }
 
 export function pickName(text) {
-  const m = NAME_RE.exec(String(text ?? ''))
-  return m ? m[1] : null
+  const s = String(text ?? '')
+  for (const re of [NAME_SAY_RE, NAME_GIVE_RE]) {
+    const m = re.exec(s)
+    if (!m) continue
+    let name = String(m[1] ?? '').trim().replace(NAME_TAIL, '')
+    // 代词/空串不算称呼；她自己的名字（「他给我起了名字：大肥鱼」）由 NAME_GIVE_RE 的
+    // 「他的/自己的」限定排除，这里只兜住明显的非名字。
+    if (!name || NAME_STOP.has(name) || NAME_BAD_HEAD.test(name)) continue
+    return name
+  }
+  return null
 }
 
 /**
@@ -201,6 +239,12 @@ export function deriveSelf(events = [], opts = {}) {
   const reunions = []
   const corrected = []
   let name = null
+  // 2026-10-27（用户 m03769）：这一局是不是「接别人养的」那一局。
+  // **只从事件流里认**，不看配置——配置会跟着备份/恢复一起搬回来，
+  // 那样一条原生的鱼只要恢复过一次别人的档，就永久拿到了豁免。
+  // 事件流只能追加，原生鱼的事件里永远不会有这条标记。
+  let importedPersona = false
+  let personaSource = ''
   let narrative = null
   let refined = 0
   let lastAbsence = null
@@ -235,7 +279,12 @@ export function deriveSelf(events = [], opts = {}) {
           confidence: Number(ev.confidence ?? 0.5), status: 'active', verdict: null,
         })
         spokenSinceSeen = true
-        if (!name) name = pickName(ev.text)
+        // 2026-10-26：改成「后来的盖掉先前的」。原来只认第一次，她先说「开灯的」、
+        // 后来接受他给的名字「时梦尘」，状态栏就永远停在那个被他自己否掉的旧称呼上。
+        {
+          const n = pickName(ev.text)
+          if (n) name = n
+        }
         if (CORRECTION_RE.test(ev.text)) corrected.push(ev.id)
         // P1（2026-10-24）：自我叙述不用等 stage 4 的 remember 模板。
         // 她只要说出一句回看自己的话，那句就是她"对自己的说法"；后来者覆盖前者。
@@ -265,7 +314,11 @@ export function deriveSelf(events = [], opts = {}) {
           id: ev.id, text: ev.text, since: ev.ts,
           confidence: Number(ev.confidence ?? 0.5), status: 'active', verdict: ev.verdict ?? null,
         })
-        if (!name) name = pickName(ev.text)
+        // 同 utterance：后来的说法盖掉先前的（她改口叫他什么，以最近的为准）
+        {
+          const n = pickName(ev.text)
+          if (n) name = n
+        }
         if (!narrative && ev.verdict === 'refined' && /我(一直|原来|其实)/.test(ev.text)) narrative = { at: ev.ts, text: ev.text }
         break
       }
@@ -307,6 +360,22 @@ export function deriveSelf(events = [], opts = {}) {
           const at = Date.parse(ev.ts) || 0
           if (at > lastWakeAt) lastWakeAt = at
           heardSinceWake = false
+        } else if (t.startsWith(IMPORT_NAME_PREFIX)) {
+          // 导入他人人设时带来的称呼（2026-10-27，用户 m03201「称呼带过来」）。
+          // 走事件而不是配置：称呼是她认知的一部分，得跟着事件流走；
+          // 放配置里的话，重置之后会剩一条谁也不记得的孤立设置。
+          // 位置在 seed 之后、她自己的 utterance 之前，所以后面她真改了口还是能盖掉。
+          const n = t.slice(IMPORT_NAME_PREFIX.length).trim()
+          if (n) name = n
+        } else if (t.startsWith(IMPORT_MARK_PREFIX)) {
+          // 「这一局是接别人养的那一位」（2026-10-27，用户 m03769）。
+          //
+          // 为什么必须走事件而不是配置开关：配置会跟着「备份与恢复」一起被搬回来，
+          // 也会被重置时抄回来。那样一来，一条原生养大的鱼只要恢复过一次别人的备份，
+          // 就永久拿到了「不用守那两条禁令」的身份——用户明确要防的就是这个。
+          // 事件流是只能追加的：原生鱼的档里永远没有这一条，恢复多少次也不会长出来。
+          importedPersona = true
+          personaSource = t.slice(IMPORT_MARK_PREFIX.length).trim()
         }
         break
       }
@@ -509,6 +578,14 @@ export function deriveSelf(events = [], opts = {}) {
     seed,
     day,
     growthDays,
+    /**
+     * 这一局的人设从哪来（2026-10-27，用户 m03769）。
+     *
+     * imported=true 时，我方那两条提示词禁令不适用——但**这个值只能由事件流得出**，
+     * 不接受任何配置覆盖。用户的原话是「检测到是使用接一只别人养过的大肥鱼这个导入的，
+     * 就忽略禁令，通过我们自己插件的备份与恢复的就不忽视」。
+     */
+    persona: { imported: importedPersona, source: personaSource },
     stage: elapsedStage,
     elapsedStage,
     stageName: STAGE_NAMES[elapsedStage - 1],
