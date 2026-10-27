@@ -10,7 +10,7 @@
 
 **修：启动时工具面被收窄成 1 个**（2026-10-27 另一台真机，0.6.0）：日志里是「有 6 个名字宿主还没登记，先按认识的 1 个收窄」——宿主先建了她的 agent、插件的 6 个工具还没登记完，旧实现就把 `allow` 与报错里的已知名单取交集再收窄，交集只剩 1 个。那条会话从此只看得见 1 个工具，她调 `bili_look` 直接 `Error: unknown tool "bili_look"`，于是回答「我没法浏览 B 站」。`restrict` 只能减不能加，收窄错了没有回头路。现在：名字没登记齐就**这一次先不收窄**（兜底 guard 照旧在拦），每 200ms 再看一眼，齐了再收（日志报「收窄延后」）；15 次仍不齐就留到下一次会话，自检显示「暂未收窄」，不再假装成功。工具名快照也改成只增不减，防止 1 个名字覆盖全量名单（`lib/restrict.js`）。
 
-**QQ 接入写进说明、白名单念给她听**（用户 m01371）：设置页「手上能用什么」补了「QQ 接入」一段——装一个社区现成的 QQ 桥接插件（比如 qq-bridge），在上面白名单填 `qq_send_message` / `qq_get_unread_messages` / `qq_reply`；本插件不直接提供 QQ 桥接功能，两个一起装、在这里放行就可以；不知道装的那个插件实际工具名，可以先问大肥鱼。白名单输入框的 placeholder 也给了同样的示例。身份文档改成 `toolBrief(extra)`（`lib/persona.js`），把 `config.tools.allow` 里的名字念给她听——原来她不知道自己多了这几只手，就算放行了也不会用。其余平台同理（Chatbox、Monica、AstrBot 等），也是先找一个能桥过去的社区项目、再把它的工具名填进白名单；不知道用什么项目或工具名，可以问她。
+**QQ 接入写进说明、白名单念给她听**（用户 m01371）：设置页「手上能用什么」补了「QQ 接入」一段——装一个社区现成的 QQ 桥接插件（比如 qq-bridge），在上面白名单填 `qq_send_message` / `qq_get_unread_messages` / `qq_reply`；本插件不直接提供 QQ 桥接功能，两个一起装、在这里放行就可以；不知道装的那个插件实际工具名，可以先问大肥鱼。白名单输入框的 placeholder 也给了同样的示例。身份文档改成 `toolBrief(extra)`（`lib/persona.js`），把 `config.tools.allow` 里的名字念给她听——原来她不知道自己多了这几只手，就算放行了也不会用。
 
 **事件流变长后不再卡住 JS 主线程**（issue #3，bigbigyu-Blue）：`deriveSelf` 的 `mentions` 原来对每条判断遍历全部 utterance 并重建字符串，`detectTensions` 两两比，`stability()` 每次抽样又全量重算——事件流到 500 条时一次派生是秒级，观测台与心跳会一起卡住。现在 `stripNegation` 与字符二元组先算一次复用，`mentions` 与 `detectTensions` 改成倒排索引只算「共享至少一个二元组」的候选对，`stability()` 按「事件流指纹 + 参数」缓存（新增 `clearStabilityCache()` 供测试用）；判定口径、同分顺序与输出都没变。
 
