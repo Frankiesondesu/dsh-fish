@@ -247,6 +247,48 @@ test('candidates：额外关键词会真的去搜（环境性质，不是性格�
   assert.ok(c.calls.some(([k, kw]) => k === 'search' && kw === '纪录片'))
 })
 
+/** 固定随机序列：打散是可测的，但测试不该跟着 Math.random 摇 */
+function seededRand(seed = 7) {
+  let a = seed >>> 0
+  return () => {
+    a = (a + 0x6d2b79f5) >>> 0
+    let t = a
+    t = Math.imul(t ^ (t >>> 15), t | 1)
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61)
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296
+  }
+}
+
+test('阶段 1 不再只吃「入站必刷」：老片 + 热门 + 全站/分区排行都去拉', async () => {
+  const cfg = normalizeConfig({ browse: { topN: 4 } })
+  const c = fakeClient()
+  await candidates(c, { stage: 1 }, cfg, { rand: seededRand() })
+  const names = c.calls.map(([k]) => k)
+  assert.ok(names.includes('precious'), '阶段 1 仍要看老片')
+  assert.ok(names.includes('popular'), '阶段 1 要混热门')
+  const rankArgs = c.calls.filter(([k]) => k === 'ranking')
+  assert.ok(rankArgs.length >= 2, '既要全站排行，也要分区排行')
+  assert.ok(rankArgs.some(([, rid]) => rid === 0), '要有全站排行 rid=0')
+  const tids = rankArgs.map(([, rid]) => rid).filter((x) => x !== 0)
+  assert.ok(tids.length >= 1, '至少要拉一个分区')
+  assert.ok(tids.every((t) => t > 0), `分区 rid 必须是正整数：${tids.join(',')}`)
+  assert.equal(new Set(tids).size, tids.length, '同一轮不重复拉同一个分区')
+})
+
+test('阶段 1 的候选不再固定：分数并列时不会每次都是同样四条入站必刷', async () => {
+  const cfg = normalizeConfig({ browse: { topN: 4 } })
+  const mk = (prefix) => [1, 2, 3, 4].map((i) => v({ bvid: `${prefix}${i}` }))
+  const c = fakeClient({
+    precious: async () => ({ ok: true, data: mk('BVold') }),
+    popular: async () => ({ ok: true, data: mk('BVpop') }),
+    ranking: async () => ({ ok: true, data: mk('BVrank') }),
+  })
+  const list = await candidates(c, { stage: 1 }, cfg, { rand: seededRand() })
+  assert.equal(list.length, 4)
+  const fromOld = list.filter((x) => x.bvid.startsWith('BVold')).length
+  assert.ok(fromOld < 4, `四条不该全来自入站必刷：${list.map((x) => x.bvid).join(',')}`)
+})
+
 // ---------------------------------------------------------------- 她自己看（bili_look）
 
 test('lookOnce：home 能拿到素材', async () => {
