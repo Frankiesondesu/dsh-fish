@@ -105,3 +105,14 @@ test('观测台与身份文档同源：/memory 用 shownCount 而不是写死的
   )
   assert.ok(src.includes('Math.min(shownCap, model.beliefs.length)'))
 })
+
+test('白名单里额外放行的工具要念给她听（0.6.1，用户 m01371）', () => {
+  const base = renderSelfDoc(model(), { budget: 4000 })
+  assert.ok(!base.includes('qq_send_message'), '没放行就不提')
+  const withQq = renderSelfDoc(model(), { budget: 4000, extraTools: ['qq_send_message', 'qq_get_unread_messages', 'qq_reply'] })
+  assert.ok(withQq.includes('qq_send_message'))
+  assert.ok(withQq.includes('qq_get_unread_messages'))
+  assert.ok(withQq.includes('qq_reply'))
+  assert.ok(withQq.includes('也在你手边'), '要说清这是她能用的手，不是权限事故')
+})
+
