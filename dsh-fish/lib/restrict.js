@@ -104,7 +104,7 @@ export function isHerAgent(agent, herDir) {
  * @param {(msg: string, err?: unknown) => void} [opts.log]
  * @param {(info: object) => void} [opts.onResult] 记录"这次真的挂上没有"（给自检用）
  */
-export function registerToolRestrict(ctx, { herDir, extra = [], enabled = true, log, onResult } = {}) {
+export function registerToolRestrict(ctx, { herDir, extra = [], enabled = true, log, onResult, retryMs = 200, retryMax = 15 } = {}) {
   // 无论调用方传不传 onResult，模块级单例都要更新——自检读的是它。
   const __raw = onResult
   onResult = (r) => { report(r); try { __raw?.(r) } catch { /* ignore */ } }
@@ -138,7 +138,11 @@ export function registerToolRestrict(ctx, { herDir, extra = [], enabled = true, 
       }
       if (set && typeof set[Symbol.iterator] === 'function') {
         const names = [...set].map((x) => String(x)).sort()
-        if (names.length) lastKnownTools = names
+        // 快照只能变多不能变少：0.6.0 真机上宿主还没登记完时只有 1 个名字，
+        // 用它覆盖会把白名单校验搞成「大部分真工具都被判未知」。
+        if (names.length && (!lastKnownTools || names.length > lastKnownTools.length)) {
+          lastKnownTools = names
+        }
       }
     } catch { /* 拿不到就算了，界面会退回只查拼写 */ }
     try {
@@ -209,24 +213,54 @@ export function registerToolRestrict(ctx, { herDir, extra = [], enabled = true, 
       try {
         applyRestrict(allow)
         applied += 1
+        say(`[dsh-fish] 工具面收窄：她这条会话只留 ${allow.length} 个工具${guardOk ? '，另有兜底守卫' : ''}`)
+        // 真的挂上了才算数——"注册了"和"生效了"必须分开报，否则自检会说谎。
+        onResult?.({ ok: true, applied, failed, why: 'applied', allow, guard: guardOk })
+        return
       } catch (err) {
-        // 2026-10-25 真机日志里出现过一次「names unknown global tools growth_commit …」：
-        // 宿主先建了她这个 agent，插件自己的工具还没在全局层登记完。
-        // 处理办法不是放弃（放弃 = 那一条会话全开），而是从报错里捡回真名单，
-        // 按交集再收一次——不认识的名字本来也调不到，少收一个不影响安全。
+        // 2026-10-25 真机：宿主先建了她的 agent，插件自己的工具还没在全局层登记完，
+        // restrict 抛 `names unknown global tool "growth_commit"; known global tools: …`。
+        //
+        // 2026-10-27 另一台真机（0.6.0）：旧实现把「从报错里捡回的名单」取交集再收窄，
+        // 交集只有 1 个 —— 那条会话从此只看得见 1 个工具。她调 bili_look 直接
+        // `Error: unknown tool "bili_look"`，于是回答「我没法浏览 B 站」，用户去装
+        // 别的插件了。restrict 只能减不能加，收窄错了没有回头路。
+        //
+        // 所以这里改成：**名字没登记齐就这一次不收窄**（兜底 guard 照旧在拦），
+        // 隔 200ms 再看一眼，齐了就收；等不到就留到下一次会话。宁可多看见几轮，
+        // 也不能让她永久少一只手。
         const msg = String(err?.message ?? err)
-        const healed = adoptKnownFromError(msg)
-        const known = new Set(lastKnownTools ?? [])
-        const usable = allow.filter((n) => known.has(n))
-        if (!healed || usable.length === 0) throw err
-        applyRestrict(usable)
-        applied += 1
-        say(`[dsh-fish] 工具面收窄：有 ${allow.length - usable.length} 个名字宿主还没登记，先按认识的 ${usable.length} 个收窄`)
+        adoptKnownFromError(msg) // 顺手捡回全量名单，重试判断也用得上
+        say(`[dsh-fish] 工具面收窄延后：宿主还没登记完（${msg.slice(0, 120)}）`)
+        let tries = 0
+        const attempt = () => {
+          let set = null
+          try { set = agent?.ctx?.tools?.view?.(agent)?.restrictableNames ?? null } catch { set = null }
+          const have = set instanceof Set ? set : new Set([...(set ?? [])])
+          if (allow.every((n) => have.has(n))) {
+            try {
+              applyRestrict(allow)
+              applied += 1
+              say(`[dsh-fish] 工具面收窄：她这条会话只留 ${allow.length} 个工具${guardOk ? '，另有兜底守卫' : ''}`)
+              onResult?.({ ok: true, applied, failed, why: 'applied-late', allow, guard: guardOk })
+              return
+            } catch (err2) {
+              say(`[dsh-fish] 收窄重试没成：${String(err2?.message ?? err2).slice(0, 160)}`)
+            }
+          }
+          tries += 1
+          if (tries < retryMax) {
+            const t = setTimeout(attempt, retryMs)
+            try { agent?.ctx?.effect?.(() => clearTimeout(t)) } catch { /* ignore */ }
+          } else {
+            say('[dsh-fish] 宿主一直没登记完工具，这次不收窄（只有兜底守卫在拦），下次会话再试')
+            onResult?.({ ok: true, applied: 0, failed, why: 'deferred', allow, guard: guardOk })
+          }
+        }
+        const timer = setTimeout(attempt, retryMs)
+        try { agent?.ctx?.effect?.(() => clearTimeout(timer)) } catch { /* ignore */ }
+        return
       }
-
-      say(`[dsh-fish] 工具面收窄：她这条会话只留 ${allow.length} 个工具${guardOk ? '，另有兜底守卫' : ''}`)
-      // 真的挂上了才算数——"注册了"和"生效了"必须分开报，否则自检会说谎。
-      onResult?.({ ok: true, applied, failed, why: 'applied', allow, guard: guardOk })
     } catch (err) {
       failed = String(err?.message ?? err).slice(0, 300)
       // 宿主的报错里带着「known global tools: a, b, c」全量名单（0.2.1-rc.3 实测）。
@@ -249,9 +283,10 @@ export function registerToolRestrict(ctx, { herDir, extra = [], enabled = true, 
 }
 
 /** 给自检/观测台用的一句话结论。 */
-export function describeRestrict({ applied = 0, failed = '' } = {}) {
+export function describeRestrict({ applied = 0, failed = '', allow, why = '' } = {}) {
   if (failed) return `没挂上：${failed}`
-  if (applied > 0) return `已收窄（${HER_TOOLS.length} 个工具）`
+  if (why === 'deferred') return '暂未收窄（宿主还没登记完工具，兜底守卫在拦）'
+  if (applied > 0) return `已收窄（${allow?.length ?? HER_TOOLS.length} 个工具）`
   return '已注册，等她的会话下一次启动'
 }
 
