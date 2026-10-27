@@ -41,12 +41,20 @@ const ITEM = (r, id) => r.items.find((it) => it.id === id)
 
 test('存过 cookie 之后，自检的「B 站登录」必须是绿的', async () => {
   await withRoot(async (root) => {
-    await writeOwner({ mid: '42', nickname: '测试鱼', cookie: 'SESSDATA=abc; bili_jct=xyz' }, root)
+    await writeOwner({ mid: '42', nickname: '大号', account: { mid: '9', name: '测试鱼' }, cookie: 'SESSDATA=abc; bili_jct=xyz' }, root)
     const r = await runChecks({ root, net: false, host: {}, peers: [] })
     const it = ITEM(r, 'cookie')
     assert.equal(it.ok, true, `应为绿，实际：${it.detail}`)
     assert.match(it.detail, /已存/)
     assert.match(it.detail, /测试鱼/)
+  })
+})
+
+test('自检里显示的是登录账号，不拿领养人昵称冒充', async () => {
+  await withRoot(async (root) => {
+    await writeOwner({ mid: '42', nickname: '大号', cookie: 'SESSDATA=abc; bili_jct=xyz' }, root)
+    const it = ITEM(await runChecks({ root, net: false, host: {}, peers: [] }), 'cookie')
+    assert.equal(it.detail.includes('大号'), false, '领养人昵称不是登录账号')
   })
 })
 
@@ -99,12 +107,13 @@ test('源码守门：三处 readOwner 都必须 await（漏了就是上面那两
   assert.ok(vd.includes('(await readOwner(root))?.cookie'), '看画面取 cookie 也要 await')
 })
 
-test('源码守门：/owner POST 必须把探到的 mid 与昵称存下来', async () => {
+test('源码守门：/owner POST 只认登录账号，不许覆盖领养人', async () => {
   const ob = await readFile(join(ROOT, 'lib', 'observe.js'), 'utf8')
-  // 存了 cookie 却不知道是谁 → 自检看不到名字、评论里的 @ 永远加不上。
-  assert.ok(
-    ob.includes('saveOwner({ mid: String(me.mid), nickname: String(me.uname) }'),
-    '「测试登录」成功时要把 mid 与昵称落盘',
+  assert.ok(ob.includes('await saveAccount(me, root)'), '「测试登录」成功时要记下登录账号')
+  assert.ok(ob.includes('登录的是'), '存 cookie 之后要认一次，并在回执里说登录的是谁')
+  assert.equal(
+    /saveOwner\(\{\s*mid:\s*String\(me\.mid\)/.test(ob),
+    false,
+    '不许再把登录账号写进领养人那两格',
   )
-  assert.ok(ob.includes('认出来了'), '存 cookie 之后要认一次，并在回执里说认出了谁')
 })

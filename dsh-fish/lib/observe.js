@@ -49,7 +49,7 @@ import { validateEvent } from './schema.js'
 import { refreshSelfDoc } from './selfdoc.js'
 import { readPending, markShown } from './notify.js'
 import { deriveStatus } from './status.js'
-import { publicOwner, saveOwner } from './owner.js'
+import { publicOwner, saveOwner, saveAccount } from './owner.js'
 import { createClient } from './bili.js'
 import { historyFromEvents } from './history.js'
 import { runChecks } from './selfcheck.js'
@@ -382,11 +382,11 @@ export function registerObserve(ctx, deps = {}) {
             const c = createClient({ cookie: ow.cookie })
             const me = await c.me()
             if (!me?.isLogin) return send(res, 200, { ok: false, note: '这个 cookie 登不上，可能过期了。' })
-            // 2026-10-25：既然已经问出来了，就顺手存下 mid 与昵称。
-            // 不存的话 owner.json 里这两格永远是空的——自检只显示「已存」看不到是谁，
-            // 评论里的 @ 也永远加不上（mentionPrefix 依赖 nickname）。
-            await saveOwner({ mid: String(me.mid), nickname: String(me.uname) }, root)
-            return send(res, 200, { ok: true, note: `登上了：${me.uname}（uid ${me.mid}）`, mid: String(me.mid), name: String(me.uname), canWrite: Boolean(me.canWrite) })
+            // 2026-10-27：这里只记「这份 cookie 登的是哪个账号」（只读 account），
+            // 不再覆盖 mid / nickname —— 那两格是领养人，用户手填的大号。
+            // 以前自动填进去，导致拿小号 cookie 时 @ 到小号自己。
+            const owner = await saveAccount(me, root)
+            return send(res, 200, { ok: true, note: `登上了：${me.uname}（uid ${me.mid}）`, mid: String(me.mid), name: String(me.uname), account: owner.account, canWrite: Boolean(me.canWrite) })
           } catch (err) {
             return send(res, 200, { ok: false, note: `连不上：${String(err?.message ?? err).slice(0, 60)}` })
           }
@@ -399,16 +399,16 @@ export function registerObserve(ctx, deps = {}) {
         if (body.nickname !== undefined) patch.nickname = body.nickname
         if (body.cookie !== undefined) patch.cookie = body.cookie
         const r = Object.keys(patch).length ? await saveOwner(patch, root) : { ok: true, note: '存下了。', owner: publicOwner(await readOwner(root)) }
-        // 2026-10-25：存了 cookie 却不知道是谁 —— 自检里只显示「已存」没有名字，
-        // 评论里的 @ 也永远加不上。这里认一次，认出来就连 mid/昵称一起存；
+        // 2026-10-27：存了 cookie 就认一次「登的是谁」，只写只读的 account；
+        // 领养人那两格（mid / nickname）原样保留，用户填的是要 @ 的大号。
         // 认不出来不影响「cookie 已经存好了」这件事。
-        if (r.ok && patch.cookie && !patch.nickname) {
+        if (r.ok && patch.cookie) {
           try {
             const probe = createClient({ cookie: (await readOwner(root))?.cookie || '' })
             const me = await probe.me()
             if (me?.isLogin && me.uname) {
-              const r2 = await saveOwner({ mid: String(me.mid), nickname: String(me.uname) }, root)
-              if (r2.ok) return send(res, 200, { ...r2, note: `${r.note || '存下了。'} 认出来了：${me.uname}（uid ${me.mid}）` })
+              const r2 = await saveAccount(me, root)
+              if (r2) return send(res, 200, { ...r, owner: r2, note: `${r.note || '存下了。'} 登录的是：${me.uname}（uid ${me.mid}）` })
             }
           } catch { /* 认不出来就算了，cookie 已经存下 */ }
         }

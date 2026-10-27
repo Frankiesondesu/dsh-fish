@@ -122,7 +122,7 @@ export async function scanReplies(o = {}) {
   const events = o.events ?? (await readEvents(root)).events
   const dk = o.dateKey ?? dateKey()
   const seen = seenReplies(events, dk)
-  const mine = await ownerMid(root)
+  const mine = await loginMid(root)
   const out = []
 
   for (const c of herCommentsRecent(events, REPLY_LOOKBACK_DAYS).slice(0, MAX_SCAN_ROOTS)) {
@@ -143,10 +143,17 @@ export async function scanReplies(o = {}) {
   return out.sort((a, b) => a.ctime - b.ctime)
 }
 
-async function ownerMid(root) {
+/**
+ * 「她自己」是哪个 mid。
+ * 2026-10-27：优先只读的登录账号（owner.account，跟着 cookie 走），
+ * 没有才退回领养人（owner.mid）。拆开之后领养人可以是大号，
+ * 拿小号 cookie 说话时，判断「哪条是她自己补的」必须用小号。
+ */
+export async function loginMid(root) {
   try {
     const ow = await readOwner(root)
-    return Number(ow?.mid) || 0
+    const acct = Number(ow?.account?.mid) || 0
+    return acct || Number(ow?.mid) || 0
   } catch {
     return 0
   }

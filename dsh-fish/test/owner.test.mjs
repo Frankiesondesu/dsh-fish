@@ -17,9 +17,10 @@ import { join } from 'node:path'
 import { Readable } from 'node:stream'
 
 import { looksLikeLeak, screenOutgoing } from '../lib/guard.js'
-import { parseCookieInput, mentionPrefix, publicOwner, saveOwner } from '../lib/owner.js'
+import { parseCookieInput, mentionPrefix, publicOwner, saveOwner, saveAccount } from '../lib/owner.js'
 import { readOwner } from '../lib/store.js'
 import { registerObserve } from '../lib/observe.js'
+import { loginMid } from '../lib/comment.js'
 
 test('隐私红线：本机路径与状态库文件名一律拦下', () => {
   for (const s of [
@@ -199,6 +200,51 @@ test('/owner 路由：POST 能存 uid 与昵称', async () => {
     const ow = await readOwner(root)
     assert.equal(ow.mid, '777')
     assert.equal(ow.nickname, '主人')
+  } finally {
+    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
+  }
+})
+
+// ---- 2026-10-27：领养人与 cookie 账号拆开（owner.mid 是大号，account 是登录的小号） ----
+
+test('publicOwner 带只读登录账号，且仍不含 cookie', () => {
+  const p = publicOwner({ mid: '42', nickname: '大号', account: { mid: '9', name: '小号' }, cookie: 'SESSDATA=s1; bili_jct=j1' })
+  assert.equal(p.mid, '42')
+  assert.deepEqual(p.account, { mid: '9', name: '小号' })
+  assert.equal(JSON.stringify(p).includes('SESSDATA'), false)
+})
+
+test('publicOwner 没有 account 时给空账号，不报错', () => {
+  assert.deepEqual(publicOwner({ mid: '42' }).account, { mid: '', name: '' })
+})
+
+test('saveAccount 只记登录账号，不覆盖领养人', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'fish-ow5-'))
+  try {
+    await saveOwner({ mid: '42', nickname: '大号', cookie: 'SESSDATA=s1; bili_jct=j1' }, root)
+    const p = await saveAccount({ mid: 777, uname: '小号' }, root)
+    assert.deepEqual(p.account, { mid: '777', name: '小号' })
+    const ow = await readOwner(root)
+    assert.equal(ow.mid, '42', '领养人 uid 不许被登录账号冲掉')
+    assert.equal(ow.nickname, '大号', '领养人昵称不许被登录账号冲掉')
+    assert.equal(ow.account.mid, '777')
+    assert.equal(ow.account.name, '小号')
+    assert.ok(ow.account.savedAt)
+    // 反向：改领养人也不动登录账号
+    await saveOwner({ nickname: '改个名' }, root)
+    assert.equal((await readOwner(root)).account.mid, '777')
+  } finally {
+    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
+  }
+})
+
+test('loginMid：认登录账号，没有才退回领养人', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'fish-ow6-'))
+  try {
+    await saveOwner({ mid: '42', nickname: '大号' }, root)
+    assert.equal(await loginMid(root), 42, '没存过账号时用领养人（兼容老数据）')
+    await saveAccount({ mid: 777, uname: '小号' }, root)
+    assert.equal(await loginMid(root), 777, '存过账号后，判断「她自己」要用小号')
   } finally {
     await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
   }

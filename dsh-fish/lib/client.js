@@ -715,7 +715,8 @@ window.__ModuleLoader__.load({
         try {
           const r = await jpost('/owner', { test: true })
           setOwNote(r.note || (r.ok ? '可以说话。' : '还不行。'))
-          if (r.ok && r.mid) { setOwMid(String(r.mid)); setOwName(String(r.name || '')) }
+          // 2026-10-27：测试只认「这份 cookie 登的是谁」，不再回填领养人输入框。
+          // 以前这里会把 owMid / owName 改成小号，用户手填的大号当场被冲掉。
           await load()
         } catch (e) { setOwNote(e.message) } finally { setBusy('') }
       }
@@ -1671,19 +1672,19 @@ window.__ModuleLoader__.load({
             `今天：发了 ${cm.usedToday}/${cm.perDay} 条，回了 ${cm.replyUsedToday}/${cm.replyPerDay} 条。`,
             cm.waitingCount ? ` 有 ${cm.waitingCount} 条没回。` : ' 没人回。') : null),
         group('领养人验证',
-          '如果你想要在大肥鱼评论的时候艾特你，设置此项。',
+          '这是要 @ 的账号，一般填你自己的大号。它和下面登录用的 cookie 是两个账号，互不影响——存 cookie、点测试都不会改这两格。',
           h('div', { className: 'grid2' },
-            Text({ label: '你的 B 站 uid', value: owMid, onChange: setOwMid, placeholder: '数字，比如 12345678', wide: true,
+            Text({ label: '要 @ 的 B 站 uid', value: owMid, onChange: setOwMid, placeholder: '数字，比如 12345678', wide: true,
               hint: '就是 B 站个人主页地址里那串数字。' }),
-            Text({ label: '你的 B 站昵称', value: owName, onChange: setOwName, placeholder: '评论里 @ 的就是这个名字', wide: true,
+            Text({ label: '要 @ 的 B 站昵称', value: owName, onChange: setOwName, placeholder: '评论里 @ 的就是这个名字', wide: true,
               hint: '没填昵称就 @ 不出来——空的 @ 只是一串没人认领的字符。' }),
             Toggle({ label: '发评论时在最前面 @ 你', on: atOwner, onChange: setAtOwner,
               hint: '关掉就不 @，评论会显得更像自言自语。' }))),
         group('B 站登录（cookie）',
-          '没存也能看视频，只是不能说话。cookie设置完毕后为隐私考虑，不会再次显示，即设置完毕该项也为空白。',
+          '她刷视频、发评论用的账号，建议放一个小号。没存也能看视频，只是不能说话。cookie设置完毕后为隐私考虑，不会再次显示，即设置完毕该项也为空白。',
           h('div', { className: 'dim', style: { marginBottom: '8px' } },
             ow?.hasCookie
-              ? `已存${ow.hasCsrf ? '' : '，但少了 bili_jct（不能发评论）'}。换一份就重新贴。`
+              ? `已存${ow?.account?.name ? `，登录账号：${ow.account.name}${ow.account.mid ? `（uid ${ow.account.mid}）` : ''}` : '（点「测试能不能说话」认一下是哪个账号）'}${ow.hasCsrf ? '' : '，但少了 bili_jct（不能发评论）'}。换一份就重新贴。`
               : '还没存。'),
           h('textarea', {
             rows: 3,

@@ -16,13 +16,39 @@ const COOKIE_NAMES = ['SESSDATA', 'bili_jct', 'buvid3', 'DedeUserID', 'DedeUserI
 /** 给外面看的样子：永远不含 cookie 原文 */
 export function publicOwner(ow) {
   const o = ow ?? {}
+  const acct = o.account ?? {}
   return {
     mid: String(o.mid ?? o.uid ?? ''),
     name: String(o.nickname ?? o.name ?? ''),
+    // 登录账号是「拿这份 cookie 登录的是谁」：只读，保存 cookie 或点测试时自动认，
+    // 和上面的领养人（要 @ 的人）是两件事。2026-10-27 拆开。
+    account: {
+      mid: String(acct.mid ?? ''),
+      name: String(acct.name ?? ''),
+    },
     hasCookie: Boolean(o.cookie && String(o.cookie).length > 0),
     hasCsrf: Boolean(o.cookie && /bili_jct=/.test(String(o.cookie))),
     savedAt: String(o.savedAt ?? ''),
   }
+}
+
+/**
+ * 记下「这份 cookie 登的是哪个账号」。
+ * 只写 account，**绝不碰 mid / nickname**——那两格是领养人，用户手填的。
+ * @param {{mid?:number|string, uname?:string, name?:string}} me client.me() 的返回
+ */
+export async function saveAccount(me, root = rootDir()) {
+  const cur = (await readOwner(root)) ?? {}
+  const next = {
+    ...cur,
+    account: {
+      mid: String(me?.mid ?? ''),
+      name: String(me?.uname ?? me?.name ?? ''),
+      savedAt: new Date().toISOString(),
+    },
+  }
+  await writeOwner(next, root)
+  return publicOwner(next)
 }
 
 /**
