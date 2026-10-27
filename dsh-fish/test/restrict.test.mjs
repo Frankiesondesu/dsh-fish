@@ -143,18 +143,21 @@ test('宿主不认 restrict 时必须报红，不许静默降级成“全部工�
   assert.match(seen.failed, /restrict/)
 })
 
-test('restrict 抛错（名字不存在/作用域不对）也要记下来', () => {
+test('restrict 抛错（名字不存在/作用域不对）不会硬清空工具面：先延后、最终如实报 deferred', async () => {
   const ctx = fakeCtx()
   let seen = null
-  registerToolRestrict(ctx, { herDir: 'C:\\h', onResult: (r) => { seen = r }, log: () => {} })
+  registerToolRestrict(ctx, { herDir: 'C:\\h', onResult: (r) => { seen = r }, log: () => {}, retryMs: 5, retryMax: 2 })
 
   const bad = fakeAgent('C:\\h')
   bad.agent.ctx.tools.restrict = () => { throw new Error('unknown tool: growth_commit') }
   ctx.emit('agent/created', { agent: bad.agent })
 
-  assert.equal(seen.ok, false)
-  assert.match(seen.failed, /unknown tool/)
+  // 0.6.1 起：restrict 抛错不再进「失败」也不按交集硬收，而是先挂着 guard、延后重试。
+  assert.equal(seen.why, 'registered', '注册阶段的回执')
+  await new Promise((r) => setTimeout(r, 40))
+  assert.equal(seen.why, 'deferred', '一直收不上就如实报 deferred，不能假装成功')
   assert.equal(seen.applied, 0)
+  assert.equal(bad.guards.length, 1, '兜底守卫必须已经挂上')
 })
 
 test('关掉开关就一个都不动', () => {
@@ -229,27 +232,31 @@ test('guard 自己抛错也不许把 restrict 判成失败', () => {
   assert.equal(seen.guard, false)
 })
 
-test('restrict 因为「名字还没登记」抛错时：按交集再收一次，别整段放弃', () => {
-  // 真机 2026-10-25 23:00 出现过一次：宿主先建了她的 agent，插件自己的工具
-  // 还没在全局层登记完 → restrict 抛 `names unknown global tools growth_commit …`。
-  // 旧实现整段进 catch，那一条会话全开。现在要求：捡回名单、按交集再收。
+test('restrict 因「名字还没登记」抛错时：先不收窄，等登记齐了再收（0.6.1）', async () => {
+  // 2026-10-27 另一台真机（0.6.0）：宿主还没登记她的 6 个工具，旧实现拿报错里的
+  // 已知名单取交集、只收窄了 1 个 —— 那条会话从此调 bili_look 报 unknown tool，
+  // 她回答「我没法浏览 B 站」。restrict 只能减不能加，所以名字没齐时必须先不收。
   const ctx = fakeCtx()
   const say = []
-  registerToolRestrict(ctx, { herDir: 'C:\h', log: (m) => say.push(m) })
+  registerToolRestrict(ctx, { herDir: 'C:\\h', log: (m) => say.push(m), retryMs: 5, retryMax: 5 })
 
   const calls = []
   let first = true
   const guards = []
+  let names = new Set(['read_image']) // 宿主此刻只认得 1 个
   const agent = {
-    session: { header: { cwd: 'C:\h' } },
+    session: { header: { cwd: 'C:\\h' } },
     ctx: {
       effect: () => {},
       tools: {
+        view: () => ({ restrictableNames: names }),
         restrict: (filter) => {
           calls.push(filter)
           if (first) {
             first = false
-            throw new Error('tools.restrict() names unknown global tool "growth_commit"; known global tools: read, write, read_image, web_search')
+            if (filter.allow.some((n) => !names.has(n))) {
+              throw new Error('tools.restrict() names unknown global tool "growth_commit"; known global tools: read_image')
+            }
           }
           return () => {}
         },
@@ -258,24 +265,28 @@ test('restrict 因为「名字还没登记」抛错时：按交集再收一次�
     },
   }
   ctx.emit('agent/created', { agent })
+  assert.equal(calls.length, 1, '第一次先按完整清单试一把')
+  assert.equal(guards.length, 1, '兜底守卫要先挂上（不依赖名字表）')
+  assert.ok(say.some((m) => m.includes('延后')), '要如实说这次先不收窄')
 
-  assert.equal(calls.length, 2, '第一次失败后应该重试一次')
-  assert.ok(calls[0].allow.includes('growth_commit'), '第一次用的还是完整清单')
-  assert.deepEqual(calls[1].allow, ['read_image'], '第二次只用宿主真认识的名字')
-  assert.equal(guards.length, 1, '兜底守卫要在（先挂的，不受 restrict 失败影响）')
-  assert.ok(say.some((m) => m.includes('先按认识的 1 个收窄')), '要如实说出这次少收了几个')
+  // 宿主随后把她的工具登记齐了
+  names = new Set([...HER_TOOLS])
+  await new Promise((r) => setTimeout(r, 40))
+  assert.equal(calls.length, 2, '登记齐之后应该再收一次')
+  assert.deepEqual(calls[1].allow, [...HER_TOOLS], '收窄用的是完整清单，不是交集')
 })
 
-test('restrict 一直失败时，兜底守卫仍然挂着（挡住 subagent 的那条路）', () => {
+test('工具名一直登记不齐：不收窄，但兜底守卫仍然在（挡住 subagent）', async () => {
   const ctx = fakeCtx()
   const seen = []
-  registerToolRestrict(ctx, { herDir: 'C:\h', log: () => {}, onResult: (r) => seen.push(r) })
+  registerToolRestrict(ctx, { herDir: 'C:\\h', log: () => {}, onResult: (r) => seen.push(r), retryMs: 5, retryMax: 2 })
   const guards = []
   const agent = {
-    session: { header: { cwd: 'C:\h' } },
+    session: { header: { cwd: 'C:\\h' } },
     ctx: {
       effect: () => {},
       tools: {
+        view: () => ({ restrictableNames: new Set(['read_image']) }),
         restrict: () => { throw new Error('boom') },
         guard: (fn) => { guards.push(fn); return () => {} },
       },
@@ -285,5 +296,7 @@ test('restrict 一直失败时，兜底守卫仍然挂着（挡住 subagent 的�
   assert.equal(guards.length, 1, 'restrict 挂了，guard 也必须在')
   assert.equal(guards[0]({ name: 'subagent' }), '这件事我做不到。', '挡不住名字就靠执行时拦')
   assert.equal(guards[0]({ name: 'her_recall' }), undefined)
-  assert.equal(seen.at(-1).why, 'failed', '如实报失败，不能假装成功')
+  await new Promise((r) => setTimeout(r, 40))
+  assert.equal(seen.at(-1).why, 'deferred', '如实报「这次没挂上」，不能假装成功')
+  assert.equal(seen.at(-1).applied, 0)
 })
