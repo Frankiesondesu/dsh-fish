@@ -152,7 +152,7 @@ export async function runChecks(o = {}) {
     const csrf = /(?:^|;\s*)bili_jct=/.test(String(ow?.cookie ?? ''))
     push('cookie', 'B 站登录', has
       ? (csrf
-        ? { ok: true, detail: `已存${ow?.nickname ? `（${ow.nickname}）` : ''}` }
+        ? { ok: true, detail: `已存${ow?.account?.name ? `（登录账号：${ow.account.name}）` : ''}` }
         : { ok: false, detail: '有 SESSDATA，但缺 bili_jct', fix: '重新粘一次完整 cookie；发评论必须有 bili_jct。' })
       : { ok: false, detail: '还没存', fix: '到设置页「B 站登录」粘一次 cookie——不粘就只能看，不能说。' })
   } catch (err) {
