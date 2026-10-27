@@ -8,7 +8,7 @@ import { apply, name, inject } from '../lib/index.js'
 import { readEvents, paths, writeConfig, appendEvent } from '../lib/store.js'
 import { normalizeConfig } from '../lib/settings.js'
 import { deriveSelf } from '../lib/derive.js'
-import { startScheduler, wakeNow } from '../lib/scheduler.js'
+import { startScheduler, wakeNow, wakeTimeLine } from '../lib/scheduler.js'
 import { rememberKnownTools } from '../lib/restrict.js'
 import { dateKey } from '../lib/settings.js'
 import { writeSelfDoc } from '../lib/selfdoc.js'
@@ -382,6 +382,10 @@ test('唤醒消息只剩一句触发语，处境走 system prompt 段不进对�
     assert.ok(wake.length > 0, '这次唤醒的处境不能为空')
     assert.ok(wake.includes('第 1 天') || wake.includes('醒'), '处境正文要在 wake 段里')
     assert.ok(wake.length < 1200, `处境段过长：${wake.length} 字`)
+    // 2026-10-27 用户反馈：她第一次醒来时自己猜「大概不是我的时段」，还以为是权限问题。
+    // 手动叫醒必须把「现在几点、是谁让醒的」说清楚，不让她猜。
+    assert.match(wake, /现在是 \d{2}:\d{2}/, '唤醒段要给出当前时间')
+    assert.match(wake, /有人刚按了叫醒/, '手动唤醒要说清是谁让醒的')
 
     // 身份必须还在落盘副本里（真通道是 systemPrompt 段，见 test/identity.test.mjs）
     await writeSelfDoc(root)
@@ -592,4 +596,22 @@ test('工具面白名单：拼错的名字不许保存，合法名字按全角�
 
     h.dispose?.()
   })
+})
+
+// 2026-10-27 用户反馈（m00974）：她第一次醒来时自己猜「大概不是我的时段」，
+// 用户还以为是自己没给权限。叫醒先把「几点、谁让醒」说清楚，别留给她猜。
+test('叫醒的时间行：手动的说清谁按的，定时的说清是她自己醒的', () => {
+  const at = (h, m) => new Date(2026, 9, 27, h, m)
+  assert.equal(
+    wakeTimeLine(at(16, 6), { manual: true, insideWindow: false }),
+    '现在是 16:06。有人刚按了叫醒——这个点不在你平时的时段，是有人要你现在醒。',
+  )
+  assert.equal(
+    wakeTimeLine(at(20, 43), { manual: true, insideWindow: true }),
+    '现在是 20:43。有人刚按了叫醒，要你现在醒。',
+  )
+  assert.equal(
+    wakeTimeLine(at(20, 43), { manual: false }),
+    '现在是 20:43，这一次是你自己醒的。',
+  )
 })

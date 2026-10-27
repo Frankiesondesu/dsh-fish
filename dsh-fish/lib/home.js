@@ -26,7 +26,7 @@ import { promises as fs } from 'node:fs'
 import { join } from 'node:path'
 import { rootDir, paths, readJson, writeAtomic } from './store.js'
 import { recentExchanges, renderCarry } from './talkmem.js'
-import { WAKE_TRIGGER } from './wakeconst.js'
+import { freshWakeText } from './wakeconst.js'
 
 const TITLE_WORKSPACE = '大肥鱼的家'
 const TITLE_SESSION = '跟大肥鱼说话'
@@ -236,7 +236,7 @@ export async function wakeIfBlank(ctx, { sessionId, root = '', log, freshOnly = 
       requestId: `wake-fresh-${Date.now()}`,
       sessionId,
       mode: 'queue',
-      content: [{ type: 'text', text: WAKE_TRIGGER }],
+      content: [{ type: 'text', text: freshWakeText() }],
     }, new AbortController().signal)
     .then(() => markWoke(root, sessionId))
     .catch((err) => log?.(`新屋子唤醒失败：${String(err?.message ?? err).slice(0, 140)}`))

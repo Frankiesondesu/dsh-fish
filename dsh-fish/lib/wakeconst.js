@@ -16,3 +16,17 @@
  * 让她明确知道这条括号短句是叫醒信号、不用回应、也不用猜。
  */
 export const WAKE_TRIGGER = '（醒一醒）'
+
+/**
+ * 空白屋子第一次醒来时的触发语（2026-10-27 用户反馈）。
+ *
+ * 这条路径（`wakeIfBlank`，启动时发现会话还是空的）不经过 `wake()`，
+ * 没有 `fish:wake` 段可写处境——她只看见「（醒一醒）」，于是自己猜
+ * 「大概不是我的时段」，还以为权限出了问题。把时间与缘由直接写进这一句：
+ * 仍然是旁白、不是剧本，只是把「发生了什么事」说完整。
+ */
+export function freshWakeText(now = new Date()) {
+  const d = now instanceof Date ? now : new Date(now)
+  const t = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+  return `（醒一醒。现在是 ${t}，屋子刚建好，有人叫了你一声。）`
+}

@@ -47,6 +47,22 @@ test('空白会话：叫一声，形状和 scheduler 的唤醒一致', async () 
   assert.ok(calls[0].requestId.startsWith('wake-fresh-'))
 })
 
+// 2026-10-27 用户反馈：屋子刚建好那天 16:06 她被叫醒，第一句是「大概不是我的时段」，
+// 用户以为是自己没给权限。这条路径没有 fish:wake 段，时间与缘由只能写进触发语本身。
+test('空白会话第一次醒：触发语带上时间与缘由，不让她猜', async () => {
+  const calls = []
+  const sc = {
+    list: async () => ({ items: [{ sessionId: 's1', blank: true }] }),
+    prompt: async (req) => { calls.push(req) },
+  }
+  await wakeIfBlank(ctxWith(sc), { sessionId: 's1' })
+  await tick()
+  const text = calls[0].content[0].text
+  assert.match(text, /现在是 \d{2}:\d{2}/, '要给出当前时间')
+  assert.match(text, /屋子刚建好/, '要说清这是一次叫醒，不是她自己的时段')
+  assert.match(text, /^（.*）$/, '仍然是括号旁白，不是一句需要她接的话')
+})
+
 test('已经有内容的会话：一个字都不说', async () => {
   let called = 0
   const sc = {
