@@ -194,3 +194,16 @@ test('personaLine 对空状态给"起点"而不是空白', () => {
   const text = personaLine(model({ beliefCount: 0, beliefs: [] }))
   assert.ok(text.includes('起点'))
 })
+
+// 2026-10-27（issue #4）：素材不一定取得到（不在时段 / 今日次数用完 / 风控冷却 /
+// 网络失败），提示词不能先在模板里承诺「下面附素材」——那是空头支票。
+test('三条事件模板不承诺附素材（issue #4）', () => {
+  const at = (id) => model(id === 'test_first'
+    ? { beliefCount: 1, beliefs: [{ id: 'b1', text: '我觉得被记住比被理解容易。', since: '2026-10-23T00:00:00Z' }] }
+    : {})
+  for (const id of ['first_bet', 'test_first', 'why_say']) {
+    const t = CATALOG.find((x) => x.id === id)
+    const text = t.prompt(at(id))
+    assert.ok(!/附素材|下面附/.test(text), `${id} 还在承诺素材：${text}`)
+  }
+})
