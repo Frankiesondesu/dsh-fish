@@ -82,6 +82,24 @@ node --test
 
 CI 也跑同一套（`.github/workflows/test.yml`，Node 20 / 22 / 24 各跑一遍）。
 
+## 7. QQ 桥接不内置，靠白名单放行
+
+社区想把大肥鱼接到 QQ 上（0.6.1 起写进设置页说明）。**不要把 QQ 协议、登录、收发塞进这个插件**——已经有现成的桥（如 `Derpyu520/qq-bridge`，独立进程 + 自己按 QQ 会话建 DSH 会话），两个一起装即可。本插件只负责一件事：在 `config.tools.allow`（设置页「插件能力白名单」）里放行桥暴露的工具名。
+
+qq-bridge 默认要放行的是：
+
+```
+qq_send_message, qq_get_unread_messages, qq_reply
+```
+
+三条约束：
+
+- **工具名必须对得上真实 registry**。桥升级改名、用户填错，她就会答「我没法在 QQ 上说话」——这不是插件坏了，是名字没对上。
+- **放行之后要念给她听**。身份文档「我手上有什么」由 `lib/persona.js` 的 `toolBrief(extra)` 生成、`lib/selfdoc.js` 把 `config.tools.allow` 作为 `extraTools` 传进去。看不见一只手，她就不会用。
+- **白名单只做加法**。`config.tools.allow` 与 `HER_TOOLS` 取并集，不要用它去减工具；收窄只走 `lib/restrict.js` 那一套。
+
+`test/beliefs.test.mjs` 有一条「白名单里额外放行的工具要念给她听」盯着这段，改之前先跑它。
+
 ---
 
 ## 提 PR / 提交前自检
