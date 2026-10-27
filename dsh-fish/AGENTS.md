@@ -100,6 +100,8 @@ qq_send_message, qq_get_unread_messages, qq_reply
 
 `test/beliefs.test.mjs` 有一条「白名单里额外放行的工具要念给她听」盯着这段，改之前先跑它。
 
+**其余平台同理**：Chatbox、Monica、AstrBot 这些客户端/框架也走「社区桥 + 白名单」这条路——不要把它们的协议塞进本插件，先找能桥过去的项目，再把工具名填进 `config.tools.allow`。不知道用什么项目、工具叫什么，就让她自己去查（前提是宿主放行了她能用的搜索/阅读工具）。
+
 ---
 
 ## 提 PR / 提交前自检

@@ -984,7 +984,8 @@ window.__ModuleLoader__.load({
             h('div', { style: { fontWeight: 600, marginBottom: '4px' } }, 'QQ 接入'),
             '想让她在 QQ 上说话，装一个社区现成的 QQ 桥接插件（比如 qq-bridge），然后在上面填：qq_send_message, qq_get_unread_messages, qq_reply。',
             '本插件不直接提供 QQ 桥接功能——社区已经有很多成熟的项目，两个一起装、在这里放行就可以。',
-            '如果你不知道装的那个 QQ 插件实际工具名是什么，可以先问一问你的大肥鱼；有哪些项目可以桥接 QQ，也可以问她。')),
+            '如果你不知道装的那个 QQ 插件实际工具名是什么，可以先问一问你的大肥鱼；有哪些项目可以桥接 QQ，也可以问她。',
+            '其余平台同理：Chatbox、Monica、AstrBot 这些也一样——想让她在那里说话，先找一个能桥过去的社区项目，再把它的工具名填到这里；不知道用什么项目、工具叫什么，都可以直接问她。')),
         h('div', { className: 'row', style: { gap: '8px', marginTop: '6px' } },
           h('input', {
             type: 'text',
