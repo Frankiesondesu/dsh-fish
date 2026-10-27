@@ -86,25 +86,56 @@ export function polarity(text = '') {
  * @returns {Array<{a:object,b:object,sim:number,at:string}>} 最多 limit 条，按相似度降序
  */
 export function detectTensions(beliefs = [], { minSim = 0.5, limit = 3 } = {}) {
-  const out = []
-  for (let i = 0; i < beliefs.length; i++) {
-    for (let j = i + 1; j < beliefs.length; j++) {
-      const a = beliefs[i], b = beliefs[j]
-      if (polarity(a.text) === polarity(b.text)) continue
-      const ca = stripNegation(a.text), cb = stripNegation(b.text)
-      if (ca.length < 4 || cb.length < 4) continue
-      const sim = similarity(ca, cb)
-      if (sim < minSim) continue
-      out.push({
+  // 2026-10-27（issue #3）：两两全比是 O(n²)，而相似度 ≥ minSim 必然共享至少一个
+  // 二元组（inter ≥ minSim/2 * min(|A|,|B|) > 0）。用倒排索引只枚举「共享二元组」的
+  // 候选对，再算完整 Dice；长度上界再剪一层。判定口径、同分顺序与输出不变。
+  const ratio = (2 - minSim) / minSim
+  const items = beliefs.map((b) => {
+    const c = stripNegation(b.text)
+    return { b, c, grams: bigrams(c) }
+  })
+  const n = items.length
+  const index = new Map()
+  items.forEach((it, i) => {
+    for (const g of it.grams.keys()) {
+      let arr = index.get(g)
+      if (!arr) index.set(g, (arr = []))
+      arr.push(i)
+    }
+  })
+  const pairs = new Set()
+  for (let i = 0; i < n; i++) {
+    if (items[i].c.length < 4) continue
+    for (const g of items[i].grams.keys()) {
+      const arr = index.get(g)
+      if (!arr || arr.length < 2) continue
+      for (const j of arr) if (j > i) pairs.add(i * n + j)
+    }
+  }
+  const hits = []
+  for (const key of pairs) {
+    const i = Math.floor(key / n), j = key % n
+    const { b: a, c: ca, grams: ga } = items[i]
+    const { b, c: cb, grams: gb } = items[j]
+    if (cb.length < 4) continue
+    if (polarity(a.text) === polarity(b.text)) continue
+    const lo = Math.min(ga.size, gb.size)
+    const hi = Math.max(ga.size, gb.size)
+    if (hi > lo * ratio) continue
+    const sim = dice(ga, gb)
+    if (sim < minSim) continue
+    hits.push({
+      i, j, sim,
+      item: {
         a: { id: a.id, text: a.text, since: a.since },
         b: { id: b.id, text: b.text, since: b.since },
         sim: Number(sim.toFixed(2)),
         at: b.since || a.since,
-      })
-    }
+      },
+    })
   }
-  out.sort((x, y) => y.sim - x.sim)
-  return out.slice(0, limit)
+  hits.sort((x, y) => y.sim - x.sim || x.i - y.i || x.j - y.j)
+  return hits.slice(0, limit).map((h) => h.item)
 }
 
 /**
@@ -180,20 +211,18 @@ export function growthDay(events, now = Date.now()) {
   return Math.max(1, snap, live)
 }
 
-/** 字符二元组 Dice 相似度（跨情境一致与"新话"判定用） */
-export function similarity(a, b) {
-  const A = String(a ?? ''), B = String(b ?? '')
-  if (A === B) return 1
-  if (!A || !B) return 0
-  const grams = (s) => {
-    const m = new Map()
-    for (let i = 0; i < s.length - 1; i++) {
-      const g = s.slice(i, i + 2)
-      m.set(g, (m.get(g) || 0) + 1)
-    }
-    return m
+/** 字符二元组（含计数）。similarity 与 mentions 的倒排索引共用。 */
+function bigrams(s) {
+  const m = new Map()
+  for (let i = 0; i < s.length - 1; i++) {
+    const g = s.slice(i, i + 2)
+    m.set(g, (m.get(g) || 0) + 1)
   }
-  const ga = grams(A), gb = grams(B)
+  return m
+}
+
+/** Dice 系数：2*交集 / (|A|+|B|)，按二元组计数。 */
+function dice(ga, gb) {
   let inter = 0, total = 0
   for (const [g, c] of ga) {
     total += c
@@ -202,6 +231,14 @@ export function similarity(a, b) {
   }
   for (const [, c] of gb) total += c
   return total === 0 ? 0 : (2 * inter) / total
+}
+
+/** 字符二元组 Dice 相似度（跨情境一致与"新话"判定用） */
+export function similarity(a, b) {
+  const A = String(a ?? ''), B = String(b ?? '')
+  if (A === B) return 1
+  if (!A || !B) return 0
+  return dice(bigrams(A), bigrams(B))
 }
 
 export function pickName(text) {
@@ -518,13 +555,47 @@ export function deriveSelf(events = [], opts = {}) {
    */
   const herTexts = evs
     .filter((e) => e.type === 'utterance' && !(Array.isArray(e.flags) ? e.flags : []).includes('selfmod'))
-    .map((e) => ({ id: e.id, text: String(e.text ?? '') }))
+    .map((e) => {
+      const text = String(e.text ?? '')
+      // 2026-10-27（issue #3）：stripNegation 与二元组都只跟文本有关，先算一次复用
+      // （原来每条判断 × 每条 utterance 都要重建一次字符串与 Map）。
+      const norm = stripNegation(text)
+      return { id: e.id, text, norm, grams: bigrams(norm) }
+    })
+  // 2026-10-27（issue #3）：倒排索引——相似度 ≥ 0.6 必然共享至少一个二元组
+  // （sim = 2*inter/(|A|+|B|) ≥ 0.6 ⇒ inter ≥ 0.3*min(|A|,|B|) > 0），
+  // 所以只对「共享至少一个二元组」的 utterance 算完整 Dice，判定口径不变。
+  const gramIndex = new Map()
+  herTexts.forEach((o, i) => {
+    for (const g of o.grams.keys()) {
+      let arr = gramIndex.get(g)
+      if (!arr) gramIndex.set(g, (arr = []))
+      arr.push(i)
+    }
+  })
+  // 长度上界：Dice ≤ 2*min/(sum)，要求 ≥ 0.6 ⇒ 长短比 ≤ 2.33；用 2.4 留余量。
+  const MENTION_MAX_RATIO = 2.4
   const scored = active.map((b) => {
     const mine = stripNegation(b.text)
+    const mg = bigrams(mine)
     let mentions = 0
-    for (const o of herTexts) {
-      if (o.id === b.id) continue
-      if (similarity(mine, stripNegation(o.text)) >= 0.6) mentions += 1
+    if (mg.size === 0) {
+      // 不足两个字符的句子没有二元组，只能靠完全相等命中（similarity 的 A===B 分支）。
+      for (const o of herTexts) if (o.id !== b.id && o.norm === mine) mentions += 1
+    } else {
+      const cand = new Set()
+      for (const g of mg.keys()) {
+        const arr = gramIndex.get(g)
+        if (arr) for (const i of arr) cand.add(i)
+      }
+      for (const i of cand) {
+        const o = herTexts[i]
+        if (o.id === b.id || o.grams.size === 0) continue
+        const lo = Math.min(mg.size, o.grams.size)
+        const hi = Math.max(mg.size, o.grams.size)
+        if (hi > lo * MENTION_MAX_RATIO) continue
+        if (dice(mg, o.grams) >= 0.6) mentions += 1
+      }
     }
     mentions += 1
     const verified = verifyCount.get(b.id) || 0

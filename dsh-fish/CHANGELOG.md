@@ -12,6 +12,10 @@
 
 **QQ 接入写进说明、白名单念给她听**（用户 m01371）：设置页「手上能用什么」补了「QQ 接入」一段——装一个社区现成的 QQ 桥接插件（比如 qq-bridge），在上面白名单填 `qq_send_message` / `qq_get_unread_messages` / `qq_reply`；本插件不直接提供 QQ 桥接功能，两个一起装、在这里放行就可以；不知道装的那个插件实际工具名，可以先问大肥鱼。白名单输入框的 placeholder 也给了同样的示例。身份文档改成 `toolBrief(extra)`（`lib/persona.js`），把 `config.tools.allow` 里的名字念给她听——原来她不知道自己多了这几只手，就算放行了也不会用。
 
+**事件流变长后不再卡住 JS 主线程**（issue #3，bigbigyu-Blue）：`deriveSelf` 的 `mentions` 原来对每条判断遍历全部 utterance 并重建字符串，`detectTensions` 两两比，`stability()` 每次抽样又全量重算——事件流到 500 条时一次派生是秒级，观测台与心跳会一起卡住。现在 `stripNegation` 与字符二元组先算一次复用，`mentions` 与 `detectTensions` 改成倒排索引只算「共享至少一个二元组」的候选对，`stability()` 按「事件流指纹 + 参数」缓存（新增 `clearStabilityCache()` 供测试用）；判定口径、同分顺序与输出都没变。
+
+**提示词不再承诺取不到的素材**（issue #4，同一作者）：`first_bet` / `test_first` / `why_say` 三条模板里写死了「（下面附素材）」，但不在上网时段、今日次数用完、风控冷却、网络失败时素材本来就没有——她会收到一句「下面附素材」，下面什么都没有。现在模板只描述处境（「今天可能有点东西摆在你面前，也可能什么都没有」），真取到素材时仍由 look 段自己说明。
+
 ## 0.6.0 — 2026-10-27
 
 **领养人和登录账号拆成两个人**（用户 m00551：「导入 cookie 的时候会顺带把账号名自动填入『领养人认证』，而且不允许更改，能否让 cookie 归 cookie、领养人单独填写——这样我可以用小号放 cookie，大号接收艾特」）。

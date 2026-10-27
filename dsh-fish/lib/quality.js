@@ -60,6 +60,33 @@ function variableSelfText(model, opts = {}) {
   return kept.join('\n')
 }
 
+// 2026-10-27（issue #3）：stability 的抽样要跑 24 次全量 deriveSelf，而 /state
+// 与心跳在事件流不变时会重复问同一件事。缓存键只认「长度 + 末条 id + 参数」：
+// 事件流只追加，长度和末条 id 一起变了才是新流；重置后 id 不会复用。
+const STABILITY_CACHE_LIMIT = 8
+const stabilityCache = new Map()
+
+function stabilityKey(events, opts, ablate) {
+  const last = events.length ? events[events.length - 1] : null
+  return [
+    events.length,
+    last?.id ?? '',
+    opts?.growthDays ?? '',
+    opts?.now ?? '',
+    ablate?.k ?? '',
+    ablate?.trials ?? '',
+    ablate?.seed ?? '',
+    ablate?.shown ?? '',
+    ablate?.budget ?? '',
+    ablate?.withBans === false ? 0 : 1,
+  ].join('|')
+}
+
+/** 清掉缓存（测试用：多个用例之间不想互相命中）。 */
+export function clearStabilityCache() {
+  stabilityCache.clear()
+}
+
 /**
  * 稳定（承重度）：抽掉 k 条她还在拿着的判断，看她还是不是她。
  *
@@ -74,6 +101,12 @@ function variableSelfText(model, opts = {}) {
  *   beliefs= 参与抽样的判断条数（0 表示她还没有判断，测不出来）
  */
 export function stability(events = [], opts = {}, ablate = {}) {
+  // 2026-10-27（issue #3）：/state 每次请求和心跳都会重跑这份 24 次抽样，
+  // 而事件流在同一秒内不会变。按「事件流指纹 + 参数」缓存，指纹只认长度与末条 id
+  // （事件流只追加，这两项变了才算新流）。
+  const key = stabilityKey(events, opts, ablate)
+  const hit = stabilityCache.get(key)
+  if (hit) return hit
   const k = clampInt(ablate.k ?? 3, 1, 10, 3)
   const trials = clampInt(ablate.trials ?? 24, 1, 200, 24)
   const seed = Number.isFinite(ablate.seed) ? ablate.seed : 42
@@ -111,13 +144,18 @@ export function stability(events = [], opts = {}, ablate = {}) {
     sample++
   }
 
-  return {
+  const result = {
     score: sample ? sum / sample : 0,
     worst,
     sample,
     k: take,
     beliefs: beliefIds.length,
   }
+  stabilityCache.set(key, result)
+  if (stabilityCache.size > STABILITY_CACHE_LIMIT) {
+    stabilityCache.delete(stabilityCache.keys().next().value)
+  }
+  return result
 }
 
 /**

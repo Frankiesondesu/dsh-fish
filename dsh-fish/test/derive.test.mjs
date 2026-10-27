@@ -6,7 +6,7 @@ import {
 } from '../lib/derive.js'
 // 2026-10-26：stability 从 derive.js 搬到 quality.js（它要用到 persona 的渲染，
 // 留在 derive 里会绕出 quality → persona → derive → quality 的环）。
-import { stability, stabilityBand } from '../lib/quality.js'
+import { stability, stabilityBand, clearStabilityCache } from '../lib/quality.js'
 
 const T0 = Date.parse('2026-10-01T00:00:00Z')
 
@@ -188,4 +188,63 @@ test('events 乱序传入也能算对（按 id 时间排序）', () => {
   const m1 = deriveSelf([a, b], { now: T0 + 2 * DAY_MS })
   const m2 = deriveSelf([b, a], { now: T0 + 2 * DAY_MS })
   assert.deepEqual(m1.beliefs, m2.beliefs)
+})
+
+// 2026-10-27（issue #3）：事件流变长后 deriveSelf 曾是 O(n²)——mentions 对每条判断
+// 遍历全部 utterance、detectTensions 两两比、stability 每次全量重算。
+// 这里只验证「不该是二次增长」：4 倍事件不该涨到 16 倍。取 3 次最小值压抖动。
+// 合成句子用伪随机汉字串（不用固定模板），避免所有句子共享同一批二元组——
+// 那样倒排候选会退化成全集，测出来的就不是真实分布。
+const CHARS = '的一是了我不人在他有这个上们来到时大地为子中你说生国年着就那和要她出也得里后自以会家可下而过天去能对小多然于心学么之都好看起发当没成只如事把还用第样道想作种开美总从无情己面最女但现前些所同日手又行意动方期它头经长儿回位分爱老因很给名法间斯知世什两次使身者被高已亲其进此话常与活正感'
+
+function mulberry(a) {
+  return function next() {
+    a |= 0
+    a = (a + 0x6D2B79F5) | 0
+    let t = Math.imul(a ^ (a >>> 15), 1 | a)
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296
+  }
+}
+
+function synthetic(n) {
+  const out = []
+  for (let i = 0; i < n; i++) {
+    const rnd = mulberry(i + 7)
+    const len = 10 + Math.floor(rnd() * 30)
+    let text = ''
+    for (let k = 0; k < len; k++) text += CHARS[Math.floor(rnd() * CHARS.length)]
+    out.push(ev(`01J${String(i).padStart(23, '0')}`, 'utterance', 1 + (i % 20), text))
+  }
+  return out
+}
+
+function best(events, runs = 3) {
+  let b = Infinity
+  for (let i = 0; i < runs; i++) {
+    const t0 = performance.now()
+    deriveSelf(events, { growthDays: 30, now: T0 + 400 * DAY_MS })
+    b = Math.min(b, performance.now() - t0)
+  }
+  return b
+}
+
+test('事件流变长后 deriveSelf 不是二次增长（issue #3）', () => {
+  const small = synthetic(200)
+  const big = synthetic(800)
+  assert.ok(deriveSelf(small, { growthDays: 30 }).beliefs.length > 0, '合成数据要真长出判断，否则测不到热点')
+  best(small, 1)
+  best(big, 1) // 预热
+  const t1 = best(small)
+  const t2 = best(big)
+  assert.ok(t2 < t1 * 8 + 50, `200 条 ${t1.toFixed(1)}ms → 800 条 ${t2.toFixed(1)}ms，增长超过线性`)
+})
+
+test('stability 对同一批事件只算一次（issue #3 缓存）', () => {
+  clearStabilityCache()
+  const events = synthetic(120)
+  const a = stability(events, { growthDays: 30 })
+  const b = stability(events, { growthDays: 30 })
+  assert.deepEqual(a, b)
+  assert.ok(a.sample > 0, '有判断时应该真的抽过样')
 })
