@@ -27,7 +27,7 @@ import { join } from 'node:path'
 import { rootDir, paths, readEvents, readJson, writeAtomic } from './store.js'
 import { loadConfig } from './settings.js'
 import { deriveSelf } from './derive.js'
-import { personaLine, TOOL_BRIEF, RECALL_BRIEF, SPEAK_BRIEF, LETTER_BRIEF, DIARY_BRIEF, SLEEP_BRIEF } from './persona.js'
+import { personaLine, toolBrief, RECALL_BRIEF, SPEAK_BRIEF, LETTER_BRIEF, DIARY_BRIEF, SLEEP_BRIEF } from './persona.js'
 import { LOOK_BRIEF, WATCH_RULE } from './browse.js'
 import { activeCarry } from './home.js'
 import { activeGrants } from './unlock.js'
@@ -47,7 +47,7 @@ export function legacySelfDocPath(root = rootDir()) {
  * @param {object} model deriveSelf 的结果
  * @returns {string}
  */
-export function renderSelfDoc(model, { budget, carry, browse = true, speak = false, grants = [], shown, diary = true, sleepEveryDays = 0, bansMuted = false } = {}) {
+export function renderSelfDoc(model, { budget, carry, browse = true, speak = false, grants = [], shown, diary = true, sleepEveryDays = 0, bansMuted = false, extraTools = [] } = {}) {
   const head = [
     // 这里**故意不写**「由 dsh-fish 自动生成」这类话。
     // 这个文件会被宿主原样渲染进她的会话——她能看见每一行。
@@ -72,7 +72,7 @@ export function renderSelfDoc(model, { budget, carry, browse = true, speak = fal
     identity,
     '',
     '## 我手上有什么',
-    TOOL_BRIEF,
+    toolBrief(extraTools),
     '',
     RECALL_BRIEF,
     '',
@@ -141,6 +141,9 @@ export async function writeSelfDoc(root = rootDir(), { log } = {}) {
       // 判定只看 model（事件流），**不读 config**——用户 m03769 明确要求
       // 「备份与恢复搬回来的那一份不算导入，不得获得豁免」。
       bansMuted: model?.persona?.imported === true,
+      // 2026-10-27（用户 m01371）：白名单里额外放行的工具要念给她听，
+      // 否则「能不能在 QQ 上说话」她只能回一句不知道。
+      extraTools: config?.tools?.allow ?? [],
     })
 
     let prev = null

@@ -977,12 +977,19 @@ window.__ModuleLoader__.load({
         h('div', { className: 'dim', style: { marginTop: '8px' } },
           '插件能力白名单（逗号分隔，留空 = 不额外给）。填的是工具名称，不是插件名称，也不是技能名称。',
           '想要技能生效就得填 skill——代价是 DSH 会把所有技能的说明一次性塞进她的上下文，暂不支持只启用某几个技能。',
-          '名字必须和宿主里的完全一致。填错一个，整条收窄会当场失效（她退回能看到全部工具的状态），所以拼错的名字不允许保存。'),
+          '名字必须和宿主里的完全一致。填错一个，整条收窄会当场失效（她退回能看到全部工具的状态），所以拼错的名字不允许保存。',
+          // 2026-10-27（用户 m01371）：把 QQ 桥接写进说明——不写，用户只能对着「白名单」
+          // 三个字干猜该填什么；它本来就是个跨插件用法，不是本插件自己的开关。
+          h('div', { style: { marginTop: '10px' } },
+            h('div', { style: { fontWeight: 600, marginBottom: '4px' } }, 'QQ 接入'),
+            '想让她在 QQ 上说话，装一个社区现成的 QQ 桥接插件（比如 qq-bridge），然后在上面填：qq_send_message, qq_get_unread_messages, qq_reply。',
+            '本插件不直接提供 QQ 桥接功能——社区已经有很多成熟的项目，两个一起装、在这里放行就可以。',
+            '如果你不知道装的那个 QQ 插件实际工具名是什么，可以先问一问你的大肥鱼；有哪些项目可以桥接 QQ，也可以问她。')),
         h('div', { className: 'row', style: { gap: '8px', marginTop: '6px' } },
           h('input', {
             type: 'text',
             value: toolsAllowText,
-            placeholder: '例如：skill, web_search, read_image',
+            placeholder: '例如：skill, web_search, read_image；接了 QQ 桥就填 qq_send_message, qq_get_unread_messages, qq_reply',
             onChange: (e) => { setToolsAllowText(e.target.value); setToolsSaveNote(''); setToolsSaveErr('') },
           }),
           h('button', {
