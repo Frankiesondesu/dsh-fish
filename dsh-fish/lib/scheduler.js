@@ -275,6 +275,26 @@ export async function lookBeforeWake(root, model, config, dk, deps, log) {
   }
 }
 
+/**
+ * 唤醒那一刻的时间与缘由（2026-10-27 用户反馈）。
+ *
+ * 她在会话里第一次醒来时，只看到「（醒一醒）」，然后自己猜「大概不是我的时段」，
+ * 还以为是权限出了问题。与其让她猜，不如把事实摆给她：现在几点、这一次是谁让醒的。
+ *
+ * `manual` = 有人按了叫醒（观测台按钮 / 首次建屋），否则是定时醒来；
+ * `insideWindow` = 这一刻在不在她平时的活动时段里（跨零点窗口也交给 inWindow 判）。
+ */
+export function wakeTimeLine(now, { manual = false, insideWindow = true } = {}) {
+  const d = now instanceof Date ? now : new Date(now)
+  const hh = String(d.getHours()).padStart(2, '0')
+  const mm = String(d.getMinutes()).padStart(2, '0')
+  const t = `${hh}:${mm}`
+  if (!manual) return `现在是 ${t}，这一次是你自己醒的。`
+  return insideWindow
+    ? `现在是 ${t}。有人刚按了叫醒，要你现在醒。`
+    : `现在是 ${t}。有人刚按了叫醒——这个点不在你平时的时段，是有人要你现在醒。`
+}
+
 async function wake(ctx, root, model, config, decision, dk, log, deps = {}) {
   const sc = ctx.sessionController
   if (!sc) { log('no sessionController'); return }
@@ -290,7 +310,13 @@ async function wake(ctx, root, model, config, decision, dk, log, deps = {}) {
   // 旧 AGENTS.md。所以现在身份与处境是两条互不重复的路：
   //   system prompt（每轮现读同一个文件）＝ 她是谁；这条唤醒消息 ＝ 她此刻遇到什么。
   // 唤醒消息里任何"你是谁/你能做什么"的复述都是重复，交给身份文档。
-  const parts = [decision.prompt]
+  // 先给时间与缘由，再给处境：她至少不会把自己醒着这件事解释成「出了错」。
+  const now = deps.now instanceof Date ? deps.now : new Date()
+  const parts = [
+    wakeTimeLine(now, { manual: deps.manual === true, insideWindow: inWindow(config, now) }),
+    '',
+    decision.prompt,
+  ]
 
   // ---- P2：醒之前先让她"看见点东西" ----
   // 顺序是刻意的：先看，再想。如果先出事件提示再塞素材，
@@ -579,7 +605,7 @@ export async function wakeNow(ctx, deps = {}) {
       log(`屋子没接上，这次手动唤醒用独立会话（会落进「未分组」）：${sessionId}`)
     }
   }
-  await wake(ctx, root, model, config, decision, dk, log, { ...deps, sessionId })
+  await wake(ctx, root, model, config, decision, dk, log, { ...deps, sessionId, manual: true })
   return { ok: true, template: decision.template?.id, sessionId }}
 
 /**
