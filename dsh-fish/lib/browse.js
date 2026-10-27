@@ -19,12 +19,46 @@ import { dateKey } from './settings.js'
 // 评论区里别人的话（2026-10-24，用户 m02454）：一轮浏览最多留 1 条给她读。
 import { recordVoice } from './voices.js'
 
-/** 每阶段从哪拿东西：早期看老片（时间感），后期看热门/排行（世界的动静） */
+/**
+ * 每阶段从哪拿东西：早期看老片（时间感），后期看热门/排行（世界的动静）。
+ *
+ * 2026-10-27（用户 m00763）：阶段 1 不再只吃「入站必刷」那一份固定片单。
+ * 重置会清空事件流，seen 变空、阶段回到 1，而「入站必刷」是 98 条全站老片的
+ * 固定榜——只吃它，每次重置首批都是同样四条。改成老片 + 热门 + 全站排行 +
+ * 轮换的分区排行多路混，候选再打散，并列分数不再按接口顺序固定。
+ */
 const SOURCES = {
-  1: ['precious'],
+  1: ['precious', 'popular', 'ranking', 'ranking-tid'],
   2: ['popular'],
   3: ['popular', 'ranking'],
   4: ['ranking', 'popular'],
+}
+
+/**
+ * 可轮换的分区（B 站分区 rid）。刻意避开鬼畜(119)这类容易被黑名单扫掉的区，
+ * 也避开番剧/影视这种拿不到正片的区——拿回来全是遮挡广告没有意义。
+ */
+const RANKING_TIDS = [1, 3, 4, 5, 36, 129, 160, 181, 188, 211]
+
+/** 从池子里不重复抽 n 个分区（rand 可注入，测试才稳定） */
+function pickTids(rand, n) {
+  const pool = [...RANKING_TIDS]
+  const out = []
+  for (let i = 0; i < n && pool.length; i++) {
+    out.push(pool.splice(Math.floor(rand() * pool.length), 1)[0])
+  }
+  return out
+}
+
+/** Fisher-Yates。并列分数的先后由它决定，所以并列不再固定成接口顺序。 */
+function shuffle(list, rand) {
+  for (let i = list.length - 1; i > 0; i--) {
+    const j = Math.floor(rand() * (i + 1))
+    const t = list[i]
+    list[i] = list[j]
+    list[j] = t
+  }
+  return list
 }
 
 /** 素材总长上限：超过就砍（防止一次唤醒吃掉几千 token） */
@@ -301,15 +335,29 @@ export async function candidates(client, model, cfg, o = {}) {
   const sources = o.sources ?? SOURCES[stage] ?? SOURCES[1]
   const seen = o.seen ?? new Set()
   const want = Math.max(1, Math.min(20, Number(cfg?.browse?.topN ?? 5)))
+  // 随机源可注入：真跑用 Math.random，测试给固定序列才稳。
+  const rand = typeof o.rand === 'function' ? o.rand : Math.random
+
+  // 分区榜每次轮换几个不同的区：同样一次重置，也不再撞上同一批分区榜。
+  const nTid = Math.max(0, Math.min(4, Number(cfg?.browse?.rankingTids ?? 2)))
+  const tids = pickTids(rand, nTid)
+  const expanded = []
+  for (const src of sources) {
+    if (src === 'ranking-tid') {
+      for (const tid of tids) expanded.push(`tid:${tid}`)
+    } else expanded.push(src)
+  }
 
   const lists = []
-  for (const src of sources) {
+  for (const src of expanded) {
     try {
       const r = src === 'popular'
         ? await client.popular(want * 3)
         : src === 'ranking'
           ? await client.ranking(0, 'all')
-          : await client.precious(want * 3)
+          : src.startsWith('tid:')
+            ? await client.ranking(Number(src.slice(4)), 'all')
+            : await client.precious(want * 3)
       if (r?.ok && Array.isArray(r.data)) lists.push(...r.data)
     } catch { /* 单路失败忽略 */ }
   }
@@ -322,7 +370,8 @@ export async function candidates(client, model, cfg, o = {}) {
     } catch { /* ignore */ }
   }
 
-  return rankVideos(lists, cfg, { seen, limit: want })
+  // 先打散再排序：分数不同的照旧按分数，并列的先后不再固定成接口顺序。
+  return rankVideos(shuffle(lists, rand), cfg, { seen, limit: want })
 }
 
 /**
