@@ -17,9 +17,18 @@ import { WAKE_TRIGGER } from '../lib/wakeconst.js'
 
 async function withRoot(fn) {
   const root = await mkdtemp(join(tmpdir(), 'fish-boot-'))
+  // 2026-10-29：不隔离的话 apply() 里的 noteRoot 会往**真实**的家谱
+  // （~/.dsh-fish-homes.json）写临时家。那天全量测试灌进去 20 个
+  // Temp\fish-boot-*，之后每次真启动都把最后一条临时家当成「上次的家」，
+  // 于是每次启动都记一条假「家换了」，还往她的事件流里写假 meta。
+  // 用例自己带一本账，finally 一定还回去（并发跑别的用例时也不串）。
+  const oldHomes = process.env.DSH_FISH_HOMES
+  process.env.DSH_FISH_HOMES = join(root, 'homes.json')
   try {
     return await fn(root)
   } finally {
+    if (oldHomes === undefined) delete process.env.DSH_FISH_HOMES
+    else process.env.DSH_FISH_HOMES = oldHomes
     // Windows 上插件里的定时器/写盘可能在用例结束的瞬间还没收尾，直接 rm 会
     // 撞 ENOTEMPTY（CI 的 windows-latest 就是这么红的）。maxRetries 让 Node 在
     // EBUSY / ENOTEMPTY / EPERM 上线性退避重试，断言本身一条没放松。

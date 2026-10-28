@@ -19,6 +19,7 @@ import { closeSync, openSync, readFileSync, readSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 
 import { readJson, writeAtomic } from './store.js'
+import { tsMs } from './schema.js'
 
 export const OUTING_SCHEMA = 1
 
@@ -61,7 +62,9 @@ export async function readOutings(root) {
       endedAt: o.endedAt ? Number(o.endedAt) : 0,
       status: String(o.status ?? 'active'),
       baseline: o.baseline && typeof o.baseline === 'object' ? o.baseline : null,
-      kept: o.kept === undefined ? null : Boolean(o.kept),
+      // 0.6.32：null 表示「还没结算」（被拒收、等复核），不能被读成 false——
+      // false 是「这趟不算数」的主动结论，两者不是一回事。
+      kept: o.kept === undefined || o.kept === null ? null : Boolean(o.kept),
       identity: String(o.identity ?? ''),
     }))
     .sort((a, b) => a.startedAt - b.startedAt)
@@ -269,11 +272,13 @@ export async function bindOutingSession(root, { sessionId = '', now = Date.now()
  * 建会话失败时把这条空壳记录撤掉——否则她会「挂在门外」，家里调度也一直暂停。
  * 只删还没绑定会话、且还在 active 的那条；已经绑定了的不动（那不是空壳）。
  */
-export async function abortOuting(root) {
+export async function abortOuting(root, { force = false } = {}) {
   const data = await readOutings(root)
   const cur = activeOf(data)
   if (!cur) return { ok: false, why: '没有正在进行的出门' }
-  if (cur.sessionId) return { ok: false, why: '这条已经绑了会话，不能当空壳撤掉', outing: cur }
+  // force：接回上次那趟时，记录一写就带着 sessionId，装配到一半失败也必须能撤，
+  // 否则留下「台账说她在外面、其实什么都没挂上」的幽灵出门（2026-10-29 真机）。
+  if (cur.sessionId && !force) return { ok: false, why: '这条已经绑了会话，不能当空壳撤掉', outing: cur }
   data.outings = data.outings.filter((o) => o !== cur)
   await writeOutings(root, data)
   return { ok: true, removed: true }
@@ -286,7 +291,10 @@ export async function abortOuting(root) {
  * - `null`  入口不表态（审查卡之前不替人做决定）
  *
  * `status` 只允许 `'done'` / `'rejected'` 两种终态；事件流被动过时先走 `'pending'`
- * （默认拒收、她留在外面等确认，见方案 3.5 第④层）。
+ * （默认拒收，这趟先不算数，见方案 3.5 第④层）。
+ *
+ * 0.6.32 起：pending 不是死路——她本人当场就回家了（装备也拆了），只是这趟没结算；
+ * 文件还原后由人点一次「复核」，`settlePending()` 把它收下。
  */
 export async function endOuting(root, { sessionId = '', status = 'done', kept = null, now = Date.now() } = {}) {
   const data = await readOutings(root)
@@ -298,6 +306,32 @@ export async function endOuting(root, { sessionId = '', status = 'done', kept = 
   cur.status = String(status)
   cur.endedAt = Number(now) || Date.now()
   cur.kept = kept === null ? null : Boolean(kept)
+  await writeOutings(root, data)
+  return { ok: true, outing: cur }
+}
+
+/** 最近一趟「等复核」的：事件流被动过、还没结算的那趟；没有就 null。 */
+export function pendingOf({ outings = [] } = {}) {
+  for (let i = outings.length - 1; i >= 0; i -= 1) {
+    if (outings[i]?.status === 'pending') return outings[i]
+  }
+  return null
+}
+
+/**
+ * 复核通过后把 last pending 那趟收下（0.6.32，用户 2026-10-29 真机要求）。
+ * 只改台账，不改事件流；`endedAt` 保留她真正回家的那一刻。
+ */
+export async function settlePending(root, { status = 'done', kept = true, sessionId = '', now = Date.now() } = {}) {
+  const data = await readOutings(root)
+  const cur = pendingOf(data)
+  if (!cur) return { ok: false, why: '没有等复核的那趟' }
+  if (sessionId && cur.sessionId !== String(sessionId)) {
+    return { ok: false, why: '等复核的不是这一趟', outing: cur }
+  }
+  cur.status = String(status)
+  cur.kept = Boolean(kept)
+  cur.endedAt = Number(cur.endedAt) || Number(now) || Date.now()
   await writeOutings(root, data)
   return { ok: true, outing: cur }
 }
@@ -366,12 +400,12 @@ export function eventsSince(file, since, { limit = 300 } = {}) {
     if (!line.trim()) continue
     let ev = null
     try { ev = JSON.parse(line) } catch { continue }
-    if (!ev || !(Number(ev.ts) >= at)) continue
+    if (!ev || !(tsMs(ev) >= at)) continue
     // 审查标记本身不是她做的事，不进列表。
     if (ev.type === 'meta' && /^outing-(reject|keep):/.test(String(ev.text ?? ''))) continue
     items.push({
       id: String(ev.id ?? ''),
-      ts: Number(ev.ts) || 0,
+      ts: tsMs(ev),
       type: String(ev.type ?? ''),
       verdict: ev.verdict ?? null,
       // 「顶回来的那条」：她明确拒绝过什么，或者把自己原来那句判成被推翻。
@@ -414,4 +448,86 @@ export function awayLine(away, { now = Date.now() } = {}) {
   }
   const where = away.possession?.title || '一条对话'
   return `此刻在替人说话：${where} · 已 ${dur}`
+}
+
+/** 比对目录：反斜杠、大小写、尾斜杠都抹平（只比对，不访问盘）。 */
+function samePath(a, b) {
+  const f = (p) => String(p ?? '').split(String.fromCharCode(92)).join('/').replace(/\/+$/, '').toLowerCase()
+  const x = f(a)
+  return Boolean(x) && x === f(b)
+}
+
+/**
+ * 这一趟出去待了几天（向上取整：出门 5 分钟也算「今天出门了」）。
+ * 「想念天数」用的就是这个口径——不写情绪，只给事实。
+ */
+export function tripDays(o, { now = Date.now() } = {}) {
+  const start = Number(o?.startedAt) || 0
+  if (!start) return 0
+  const end = Number(o?.endedAt) || Number(now) || start
+  return Math.max(0, Math.floor(Math.max(0, end - start) / 86400000))
+}
+
+/**
+ * 同一个工作区、上一次已经结束的那趟（带会话 id 才有复用价值）。
+ * 「复用同一趟」＝再开一条 active 记录指向同一个 sessionId，
+ * 不是把旧记录改回 active——台账只追加，历史那趟仍然留着。
+ */
+export function lastOutingForCwd({ outings } = {}, cwd) {
+  const list = Array.isArray(outings) ? outings : []
+  for (let i = list.length - 1; i >= 0; i -= 1) {
+    const o = list[i]
+    if (!o || o.status === 'active') continue
+    if (!o.sessionId) continue
+    if (!samePath(o.cwd, cwd)) continue
+    return { sessionId: String(o.sessionId), startedAt: Number(o.startedAt) || 0, endedAt: Number(o.endedAt) || 0, tripDays: tripDays(o) }
+  }
+  return null
+}
+
+/** 这条会话一共出去过几趟（含正在进行的这趟）。 */
+export function outingsOfSession({ outings } = {}, sessionId) {
+  const sid = String(sessionId ?? '')
+  if (!sid) return []
+  return (Array.isArray(outings) ? outings : []).filter((o) => o && String(o.sessionId ?? '') === sid)
+}
+
+/**
+ * 这条会话的这趟是第几趟（1 起）。界面要写清「接回的是第几趟」，
+ * 光说「接回上次那趟」看不出到底接没接上（2026-10-29 用户 m03194）。
+ */
+export function tripNoOf({ outings } = {}, sessionId, startedAt = 0) {
+  const list = outingsOfSession({ outings }, sessionId)
+  if (!list.length) return 0
+  const at = Number(startedAt) || 0
+  if (!at) return list.length
+  const idx = list.findIndex((o) => Number(o.startedAt) === at)
+  return idx >= 0 ? idx + 1 : list.length
+}
+
+/**
+ * 「这趟我不认这几条」的原话（0.6.16，用户 m01613 第①条）。
+ *
+ * 设计 §3.7 要求驳回要**讲给她听**：不是「你没去过」，而是「那部分我不认，
+ * 它不算你」。所以句子只否定那几条，不否定整趟，也不带惩罚口吻。
+ * @returns {string} 没有条目时返回空串（调用方据此决定写不写）
+ */
+export function rejectNoteText({ items = [], total = 0 } = {}) {
+  const list = (Array.isArray(items) ? items : [])
+    .map((it) => String(it?.text ?? '').replace(/\s+/g, ' ').trim().slice(0, 60))
+    .filter(Boolean)
+  if (!list.length) return ''
+  const head = total && total > list.length ? `这趟里我不认这几条（一共 ${total} 条，挑出这几条说）：` : '这趟里我不认这几条：'
+  return [
+    head + list.map((t) => `「${t}」`).join(''),
+    '它们不算你，别的算。这不是说你这趟白去了，是那几句我不收。',
+  ].join('\n')
+}
+
+/**
+ * 「回家那一刻要拆的东西」需要知道：这条会话现在还算不算她的。
+ * 只有台账里有 active 记录指向它才算——重启后没有 active 记录就是普通会话。
+ */
+export function sessionIsHers({ outings } = {}, sessionId) {
+  return outingsOfSession({ outings }, sessionId).some((o) => o.status === 'active')
 }

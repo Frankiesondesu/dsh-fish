@@ -254,6 +254,8 @@ window.__ModuleLoader__.load({
       // 点「保存设置」才写盘——否则敲一半就被页面其它地方的保存带上去，拼错一个字母整条收窄失效。
       const [toolsAllowSaved, setToolsAllowSaved] = useState([])
       const [toolsKnown, setToolsKnown] = useState(null)
+      // 看得见、但收窄挡不住的那些（own 层，比如 dsh-ops 的 ops_*）。白名单放行 = 守卫放行。
+      const [toolsOwnLayer, setToolsOwnLayer] = useState([])
       const [toolsSaveNote, setToolsSaveNote] = useState('')
       const [toolsSaveErr, setToolsSaveErr] = useState('')
       // 运行日志（2026-10-24）：只在点开时才读，不参与 30 秒轮询。
@@ -365,6 +367,18 @@ window.__ModuleLoader__.load({
       const [avatarNote, setAvatarNote] = useState('')
       // 自动保存（2026-10-24 用户）：设置项改完就生效，不再需要滚到底点保存。
       const [autoNote, setAutoNote] = useState('')
+      // 保存回执和保存失败是两件事，不许挤成一行（2026-10-29 用户：这两句没有联系，
+      // 也不属于同类型的提示）。回执只是「存到了」的一句确认，两秒半自己消失；
+      // 失败是一个要处理的状态，放在页签栏上方，一句人话 + 一行技术信息，自己点掉。
+      // 尤其不能让失败去占「改完就生效」那条说明的位置——两句摆在一起自相矛盾。
+      const [saveFail, setSaveFail] = useState('')
+      const savedTimer = useRef(null)
+      const flashSaved = () => {
+        setAutoNote(`已保存 ${new Date().toTimeString().slice(0, 8)}`)
+        setSaveFail('')
+        clearTimeout(savedTimer.current)
+        savedTimer.current = setTimeout(() => setAutoNote(''), 2500)
+      }
       // 首屏载入完先把基线记下来，否则一打开页面就会把刚读到的配置又写回去一遍。
       const baselinePending = useRef(true)
       const lastSaved = useRef('')
@@ -384,6 +398,9 @@ window.__ModuleLoader__.load({
       // 只有点按钮才查，不自动轮询——她运行期不该操心自己是几号版本。
       const [upd, setUpd] = useState(null)
       const [updBusy, setUpdBusy] = useState(false)
+      // 自带升级（2026-10-29 用户 m00203）：null=没在升，{phase,bytes,total,error,...}=在升。
+      // 下载和安装都必须是你点过确认才发生，所以这里没有"自动开始"的路径。
+      const [dl, setDl] = useState(null)
       // 日记翻页（2026-10-26 用户 m01201）：一天一页、日期多于一天才出翻页按钮。
       // 正文按天取（`/diary?day=…`），翻过的缓存进 ref，来回翻不重复请求。
       const [diaryDay, setDiaryDay] = useState(0)
@@ -683,10 +700,10 @@ window.__ModuleLoader__.load({
         if (!silent) { setBusy('save'); setNote('') }
         try {
           await jpost('/config', buildConfig())
-          if (silent) setAutoNote(`已保存 ${new Date().toTimeString().slice(0, 8)}`)
+          if (silent) flashSaved()
           else { setNote('已保存。下一轮 tick 生效。'); await load() }
         } catch (e) {
-          if (silent) setAutoNote(`没保存：${e.message}`)
+          if (silent) setSaveFail(e.message)
           else setErr(e.message)
         } finally { if (!silent) setBusy('') }
       }
@@ -700,8 +717,8 @@ window.__ModuleLoader__.load({
         diaryPending.current += 1
         try {
           await jpost('/config', { diary: patch })
-          setAutoNote(`已保存 ${new Date().toTimeString().slice(0, 8)}`)
-        } catch (e) { setAutoNote(`没保存：${e.message}`) } finally { diaryPending.current -= 1 }
+          flashSaved()
+        } catch (e) { setSaveFail(e.message) } finally { diaryPending.current -= 1 }
       }
 
       // 改完就生效：任何一项变了，停手 700ms 就写盘（连点加减号也只写一次）。
@@ -711,13 +728,13 @@ window.__ModuleLoader__.load({
         if (baselinePending.current) { baselinePending.current = false; lastSaved.current = cfgSig; return }
         if (cfgSig === lastSaved.current) return
         const bad = badNumber()
-        if (bad) { setAutoNote(`还没保存：${bad} 不在允许范围内。`); return }
+        if (bad) { setSaveFail(`「${bad}」这个数不在允许范围里，所以没有写进去。`); return }
         const t = setTimeout(async () => {
           try {
             await jpost('/config', buildConfig())
             lastSaved.current = cfgSig
-            setAutoNote(`已保存 ${new Date().toTimeString().slice(0, 8)}`)
-          } catch (e) { setAutoNote(`没保存：${e.message}`) }
+            flashSaved()
+          } catch (e) { setSaveFail(e.message) }
         }, 700)
         return () => clearTimeout(t)
       }, [cfgSig, state])
@@ -726,13 +743,16 @@ window.__ModuleLoader__.load({
         setBusy('tools'); setToolsSaveNote(''); setToolsSaveErr('')
         try {
           let known = toolsKnown
-          if (!known) {
-            try {
-              const r = await jget('/tools')
-              known = Array.isArray(r?.known) ? r.known : null
-              setToolsKnown(known)
-            } catch { known = null }
-          }
+          let own = toolsOwnLayer
+          // 2026-10-29：每次保存都问一次宿主，顺带拿回 own 层名单。
+          // 以前只在 known 为空时问，于是「哪些名字收窄挡不住」永远是空的。
+          try {
+            const r = await jget('/tools')
+            const names = Array.isArray(r?.known) ? r.known : null
+            if (names && names.length) { known = names; setToolsKnown(names) }
+            own = Array.isArray(r?.ownLayer) ? r.ownLayer : []
+            setToolsOwnLayer(own)
+          } catch { /* 拿不到就沿用旧名单，只查拼写 */ }
           const check = checkToolNames(toolsAllowText, known)
           if (!check.ok) {
             setToolsSaveErr(`这些名字不对：${check.unknown.join('、')}。没保存。`)
@@ -750,6 +770,10 @@ window.__ModuleLoader__.load({
           else if (delta > 0) setToolsSaveNote(`存好了。重启之后她会多看见 ${delta} 个工具（名单一共 ${check.names.length} 个）。`)
           else if (delta < 0) setToolsSaveNote(`存好了。重启之后她会少看见 ${-delta} 个工具（名单一共 ${check.names.length} 个）。`)
           else setToolsSaveNote(`存好了。名单没变，还是 ${check.names.length} 个。`)
+          const ownPicked = check.names.filter((n) => own.includes(n))
+          if (ownPicked.length) {
+            setToolsSaveNote((n) => `${n} 其中 ${ownPicked.join('、')} 是她本来就看得见的（插件把她自己的工具注册进她那一层，收窄挡不住）：加进白名单只是让兜底守卫放行它。`)
+          }
           if (onlyShape && check.names.length) {
             setToolsSaveNote((n) => `${n} 这次只核对了拼写——她还没开过会话，宿主那边还给不出工具名单。名字必须一字不差。`)
           }
@@ -1056,7 +1080,7 @@ window.__ModuleLoader__.load({
         h('div', { className: 'dim', style: { marginTop: '8px' } },
           '插件能力白名单（逗号分隔，留空 = 不额外给）。填的是工具名称，不是插件名称，也不是技能名称。',
           '想要技能生效就得填 skill——代价是 DSH 会把所有技能的说明一次性塞进她的上下文，暂不支持只启用某几个技能。',
-          '名字必须和宿主里的完全一致。填错一个，整条收窄会当场失效（她退回能看到全部工具的状态），所以拼错的名字不允许保存。',
+          '名字必须和宿主里的完全一致：拼错的名字不让保存。有些工具是插件按会话注册进她自己那一层的（ops_*、team_* 之类），她本来就看得见、收窄也挡不住——把名字加进来只是让兜底守卫放行它。',
           // 2026-10-27（用户 m01371）：把 QQ 桥接写进说明——不写，用户只能对着「白名单」
           // 三个字干猜该填什么；它本来就是个跨插件用法，不是本插件自己的开关。
           h('div', { style: { marginTop: '10px' } },
@@ -1148,6 +1172,8 @@ window.__ModuleLoader__.load({
             h('div', { className: 'dim' },
               '你在侧栏把「跟大肥鱼说话」归档了。从 0.6.8 起，插件不会自己偷偷再开一局——'
               + '收起来就该是收起来。要一局新的，点下面这个；状态、日记、记忆都不动。'),
+            h('div', { className: 'dim' },
+              '如果你只是把侧栏里的归档取消了，那不用点这里：下一次叫醒（或重启）就会自己认回来（0.6.29 起）。'),
             h('div', { className: 'row' },
               h('button', { onClick: doRebuild, disabled: !!busy },
                 busy === 'rebuild' ? '搭屋中…' : '重新搭一间')))
@@ -1155,6 +1181,8 @@ window.__ModuleLoader__.load({
 
       const resetCard = h('div', { className: 'card full' },
         h('h3', null, '重置大肥鱼'),
+        h('div', { className: 'dim' },
+          '这跟上面那张「重新搭一间」不是一回事：那个只换一条对话，数据一条不动；这个是真的重开一局。'),
         h('div', { className: 'dim' },
           '旧的一切不会删——整个状态库会被改名搬到同级的 dsh-fish-backups 里，想找回来整包搬回去就行。',
           '重开后是第一天，会重新从「你刚开始存在」开始。',
@@ -1303,6 +1331,14 @@ window.__ModuleLoader__.load({
               ? h('div', { className: 'dim', style: { marginTop: '6px', fontSize: '12px', lineHeight: '1.75' } },
                   ...st.timeline.map((t, i) => h('div', { key: 'tl' + i }, t.text)))
               : h('div', { className: 'dim', style: { marginTop: '6px' } }, '今天还没有动静。'))
+          : null,
+        // 此刻在外面（0.6.16，用户 m01613）：一行话，在哪、多久。请神单独标出来，
+        // 因为那期间回你话的不是原来的那个人。
+        st?.away?.line
+          ? h('div', {
+              className: 'dim',
+              style: { marginTop: '6px', fontSize: '12px', fontWeight: st.away.kind === 'possession' ? 600 : 400 },
+            }, `${st.away.line}${st.away.kind === 'possession' ? '（这条对话此刻是她）' : ''}`)
           : null)
       // ================================================================
       // 设置界面 2.0（2026-10-24 重做）
@@ -1349,9 +1385,9 @@ window.__ModuleLoader__.load({
       const TAB_HELP = {
         now: '现在是什么状态、走了多远、在守什么规矩，以及你不在的时候发生了什么。',
         grow: '怎么长大：时间尺度、每天经历多少、日记、隔几天回头想一次。改这些只会让她变快变慢，不会改变她是什么样。',
-        home: '住在哪：工作区、会话、身份文件，以及一键自检。',
+        home: '住在哪：工作区、会话、身份文件、日记、她留下的小纸条，以及一键自检。',
         bili: '上网：能不能出门、看多少、看画面、避开什么，以及在评论区说话和登录。',
-        memory: '记忆：一次能背多少、多少条判断被挤出视野，还有信箱。',
+        memory: '记忆：一次能背多少、多少条判断被挤出视野。',
         env: '插件：别的插件能往她上下文里塞什么工具，以及为什么默认只放她自己那几个。',
         principle: '原理：两张图讲清她怎么长大、记忆怎么被筛；每条设计从哪条理论来，以及这一套能用在什么场景。',
         data: '数据：都存在哪、每日报告、运行日志，以及重置（有破坏性的操作放在这一页最下面）。',
@@ -1628,6 +1664,26 @@ window.__ModuleLoader__.load({
               hint: '超出后最早的折进「更早以前」，不删。' }))),
         )
 
+      // 她写的小纸条（2026-10-29 用户 m02105：原记忆页的「信箱」卡改名字、改描述，
+      // 并搬到住所页——放在日记下面、插件自检上面）。内容只放 `letter=true` 的行：
+      // 她在对话框里说的话本来就在对话里，值得单列出来看的只有「特意留的那几句」。
+      const inboxCard = groupFull('她写的小纸条',
+        '特意留给你的话。某种意义上代表她当前的状态，可能含有关键信息。',
+        h('div', { className: 'row', style: { marginBottom: '8px' } },
+          inbox && inbox.unread ? h('span', { className: 'badge', title: '有话留给你' }, `未读 ${inbox.unread}`) : null),
+        !inbox ? h('p', { className: 'empty' }, '读取中…')
+          : !inbox.rows.length ? h('p', { className: 'empty' }, '还没有留话。她想起你的时候会留一句。')
+          : h('div', null,
+              h('div', { className: 'row', style: { marginBottom: '8px' } },
+                h('button', { onClick: markInbox, disabled: busy === 'inbox' || !inbox.unread },
+                  inbox.unread ? '都看过了' : '已全部看过'),
+                h('span', { className: 'dim' }, `共 ${inbox.total} 张 · 未读 ${inbox.unread} 张 · 也存了一份 ~/.dsh-fish/inbox.md`)),
+              inbox.rows.slice(0, 20).map((r) => h('div', { key: r.id, style: { marginTop: '10px' } },
+                h('p', { className: 'dim' },
+                  `${String(r.ts || '').slice(0, 16).replace('T', ' ')}${r.unread ? ' · 未读' : ''}`),
+                h('div', { className: 'said' }, esc(r.text))))),
+      )
+
       // ---------------------------- 住所 ----------------------------
       // 这一页回答的是「东西都在哪」，不是「怎么调她」。
       const homePage = h('div', { className: 'page' },
@@ -1687,6 +1743,8 @@ window.__ModuleLoader__.load({
                 diaryCache.current[diaryCur] === undefined
                   ? h('p', { className: 'empty' }, '读取中…')
                   : h('pre', null, esc(diaryCache.current[diaryCur])))),
+
+        inboxCard,
 
         group('本插件工作自检',
           '这个插件没有要安装的依赖（只用 Node 自带的东西，外加可选的 ffmpeg）。真会坏的是别的：状态库写不进去、cookie 过期、宿主没给接口、B 站风控。',
@@ -1979,26 +2037,8 @@ window.__ModuleLoader__.load({
                 h('p', { className: 'dim', style: { marginTop: '6px' } },
                   '为什么这样做？1.节省token成本2.全量记忆等于提示词污染/强调，会让人格的改变无从发生3.在遗忘发生时，什么能够留下来才是更显珍贵的。'))),
 
-        // ---- 信箱（P3-2，2026-10-24 改成只放留话） ----
-        // 用户的原话：她在对话框里说的话本来就能在对话里看到，全量搬一遍只是重复；
-        // 一个只能看、不能回、又不参与成长的列表，价值只在「特意留的那几句」。
-        // 所以这里只显示 `letter=true` 的行，后端 readInbox 默认就只给留话。
-        groupFull('信箱',
-          '特意写给你的信。某种意义上代表她当前的状态，可能含有关键信息。',
-          h('div', { className: 'row', style: { marginBottom: '8px' } },
-            inbox && inbox.unread ? h('span', { className: 'badge', title: '有话留给你' }, `未读 ${inbox.unread}`) : null),
-          !inbox ? h('p', { className: 'empty' }, '读取中…')
-            : !inbox.rows.length ? h('p', { className: 'empty' }, '还没有留话。她想起你的时候会留一句。')
-            : h('div', null,
-                h('div', { className: 'row', style: { marginBottom: '8px' } },
-                  h('button', { onClick: markInbox, disabled: busy === 'inbox' || !inbox.unread },
-                    inbox.unread ? '都看过了' : '已全部看过'),
-                  h('span', { className: 'dim' }, `共 ${inbox.total} 封 · 未读 ${inbox.unread} 封 · 也存了一份 ${'~/.dsh-fish/inbox.md'}`)),
-                inbox.rows.slice(0, 20).map((r) => h('div', { key: r.id, style: { marginTop: '10px' } },
-                  h('p', { className: 'dim' },
-                    `${String(r.ts || '').slice(0, 16).replace('T', ' ')}${r.unread ? ' · 未读' : ''}`),
-                  h('div', { className: 'said' }, esc(r.text)))))),
-        )
+        // ---- 原来这里的「信箱」卡 2026-10-29（用户 m02105）搬到住所页，改名「她写的小纸条」----
+      )
 
       // 原理页（2026-10-25 用户要求）：两张自制 SVG 讲流程 + 每条设计的理论出处。
       // 图不放客户端（bundle 已经十多万字节），走服务端 `/media/<文件名>.svg` 白名单出图。
@@ -2181,10 +2221,85 @@ window.__ModuleLoader__.load({
         try {
           const r = await jget('/update?ms=8000')
           setUpd(r)
+          // 有新版时顺手问一句"这台装的是不是能被升级的那种安装"。
+          // 开发版（link: 源码目录）不能走自动升级——那会用下载包把源码覆盖掉。
+          if (r?.ok && r.hasUpdate) {
+            try {
+              const st = await jget('/update/status')
+              setUpd({ ...r, managed: st.managed, kind: st.kind, local: st.kind === 'local' })
+            } catch { /* 状态读不到不影响"有新版"这件事本身 */ }
+          }
         } catch (e) {
           setUpd({ ok: false, error: e.message })
         } finally {
           setUpdBusy(false)
+        }
+      }
+
+      // 升级（2026-10-29 用户 m00203）：市场索引要等半天到一天，所以插件自己带一条通道。
+      // 三步都由你点：检查 → 下载（confirm 一次）→ 安装（再 confirm 一次，写明会关应用）。
+      const describeDl = (st) => {
+        if (!st) return ''
+        const pct = st.total > 0 ? Math.min(100, Math.round((st.bytes / st.total) * 100)) : 0
+        if (st.phase === 'downloading') {
+          return st.total > 0 ? `正在下载 v${st.version}… ${pct}%` : `正在下载 v${st.version}…（这个源没报大小）`
+        }
+        if (st.phase === 'prepared') {
+          return `v${st.version} 已经下好，解开来验过版本号与入口文件（${Math.max(1, Math.round((st.bytes || 0) / 1024))} KB，来自${st.source || '镜像'}）。`
+        }
+        if (st.phase === 'installing') return st.note || '正在关闭应用，装完会自动重开。'
+        if (st.phase === 'failed') return st.error || '出错了，可以重试。'
+        return ''
+      }
+
+      // 下载是服务端异步跑的，界面靠轮询看百分比。到终态就停，不无限问下去。
+      const pollDl = async () => {
+        for (let i = 0; i < 200; i += 1) {
+          let st = null
+          try {
+            st = await jget('/update/status')
+          } catch (e) {
+            setDl({ phase: 'failed', error: `读不到进度（${e.message}）。可以再试一次。` })
+            return
+          }
+          setDl(st)
+          if (st.phase === 'prepared' || st.phase === 'failed' || st.phase === 'installing' || st.phase === 'idle') return
+          await new Promise((r) => setTimeout(r, 700))
+        }
+        setDl({ phase: 'failed', error: '等太久还没下完，先按失败处理——网络好一点时可以重试。' })
+      }
+
+      const startDownload = async (version) => {
+        if (!version) return
+        if (!window.confirm(`要下载 v${version} 到本地并校验，这一步不会重启应用。继续？`)) return
+        setDl({ phase: 'downloading', version, bytes: 0, total: 0 })
+        try {
+          const r = await jpost('/update/download', { version })
+          if (!r.ok) {
+            setDl({ phase: 'failed', version, error: r.error || '下载没能开始。', local: Boolean(r.local) })
+            return
+          }
+          pollDl()
+        } catch (e) {
+          setDl({ phase: 'failed', version, error: `下载没能开始：${e.message}` })
+        }
+      }
+
+      const startInstall = async (version) => {
+        const v = version || dl?.version
+        if (!v) return
+        if (!window.confirm(`安装会先关掉 DeepSeek Harness，再由后台脚本替换插件、装完自动重开。没发出去的话先发完。现在装 v${v}？`)) return
+        setDl({ ...dl, version: v, phase: 'installing', note: '正在准备安装…' })
+        try {
+          const r = await jpost('/update/install', { version: v })
+          if (!r.ok) {
+            setDl({ ...dl, version: v, phase: 'failed', error: r.error || '安装没能开始。' })
+            return
+          }
+          setDl({ ...dl, version: v, phase: 'installing', note: r.note || '正在关闭应用…' })
+        } catch {
+          // 应用可能在响应发回来之前就退了——这时候报"失败"是错的。
+          setDl({ ...dl, version: v, phase: 'installing', note: '正在关闭应用…' })
         }
       }
 
@@ -2209,11 +2324,20 @@ window.__ModuleLoader__.load({
           h('div', { style: { display: 'flex', gap: '10px', alignItems: 'center', flexWrap: 'wrap', marginTop: '10px' } },
             h('button', { disabled: updBusy, onClick: checkUpdate },
               updBusy ? '正在查……' : '检查更新'),
+            upd && upd.ok && upd.hasUpdate && upd.managed !== false
+              ? h('button', {
+                  disabled: Boolean(dl && (dl.phase === 'downloading' || dl.phase === 'installing')),
+                  onClick: () => startDownload(upd.latest),
+                }, dl && dl.phase === 'downloading' ? '正在下载……' : `下载 v${upd.latest}`)
+              : null,
+            dl && dl.phase === 'prepared'
+              ? h('button', { onClick: () => startInstall(dl.version) }, `现在重启并安装 v${dl.version}`)
+              : null,
             upd && upd.ok && upd.hasUpdate
               ? h('a', {
                   href: upd.url || 'https://github.com/ssamurias/dsh-fish/releases',
                   target: '_blank', rel: 'noopener noreferrer', className: 'ghlink',
-                }, `有新版本 ${upd.latest}，去下载`)
+                }, '或去 GitHub 手动下载')
               : null),
           // 结果只写一句人话。失败不吓人：国内 GitHub 时通时不通是常态。
           // 第三种情况单独处理：查到了最新版、但读不到自己装的是哪版——
@@ -2222,11 +2346,36 @@ window.__ModuleLoader__.load({
             ? h('p', { className: upd.ok ? (upd.hasUpdate ? 'ok' : 'hint') : 'warn', style: { margin: '8px 0 0' } },
                 upd.ok
                   ? (upd.hasUpdate
-                      ? `GitHub 上已经是 ${upd.latest} 了（你现在是 ${upd.current || curVer}）。点上面的链接去下载新版，装法跟第一次一样。`
+                      ? (upd.local
+                          ? `GitHub 上已经是 ${upd.latest} 了（你这台装的是开发版 ${upd.current || curVer}）。开发版不走自动升级，点右边的链接手动下载。`
+                          : `GitHub 上已经是 ${upd.latest} 了（你现在是 ${upd.current || curVer}）。点「下载」就能在这儿升级，不想用也可以去 GitHub 手动下。`)
                       : upd.known === false
                         ? `GitHub 上最新是 ${upd.latest}。这台机器上读不到自己装的版本号，所以不好替你判断是不是最新的——差得远就下载一次。`
                         : `已经是最新的（${upd.latest}）。`)
                   : (upd.error || '查不到，过一会儿再试。'))
+            : null,
+          // 升级过程的状态：下载百分比 / 失败原因 / 就绪提示 / 安装中。
+          // 失败时给「重试」，不用让人重新检查一遍。
+          dl
+            ? h('div', { style: { marginTop: '8px' } },
+                h('p', { className: dl.phase === 'failed' ? 'warn' : (dl.phase === 'prepared' ? 'ok' : 'hint'), style: { margin: 0 } },
+                  describeDl(dl)),
+                dl.local
+                  ? h('p', { className: 'hint', style: { margin: '4px 0 0' } },
+                      '这台机器上装的是开发版（依赖指向源码目录），自动升级会用下载包覆盖源码，所以没走这条路。')
+                  : null,
+                dl.phase === 'failed' && dl.version
+                  ? h('button', { style: { marginTop: '8px' }, onClick: () => startDownload(dl.version) }, '重试下载')
+                  : null,
+                (dl.phase === 'prepared' || dl.phase === 'failed') && dl.log
+                  ? h('pre', {
+                      style: {
+                        marginTop: '8px', maxHeight: '140px', overflow: 'auto', fontSize: '11px',
+                        lineHeight: '1.5', padding: '8px', borderRadius: '6px',
+                        background: 'var(--dsw-alias-bg-l1)', whiteSpace: 'pre-wrap',
+                      },
+                    }, dl.log)
+                  : null)
             : null,
           // 来源写出来，省得用户以为"查过=一定准"——镜像有缓存时会滞后。
           upd && upd.ok && upd.source
@@ -2319,6 +2468,8 @@ window.__ModuleLoader__.load({
       const [outingEndAsk, setOutingEndAsk] = useState(false)
       // 回家卡上被取消勾选的条目 id（默认全勾 = 空数组）
       const [outingDrop, setOutingDrop] = useState([])
+      // 复用同一趟（0.6.16，用户 m01613）：接着这个工作区上次那条会话。
+      const [outingReuse, setOutingReuse] = useState(false)
 
       async function doStartOuting() {
         const ws = outingPick || outing?.workspaces?.[0]?.id || ''
@@ -2326,9 +2477,12 @@ window.__ModuleLoader__.load({
         setOutingBusy(true)
         setOutingMsg('正在开门……')
         try {
-          await jpost('/outing', { action: 'start', workspaceId: ws })
-          setOuting(await jget('/outing'))
-          setOutingMsg('她已经出门了，正在那个工作区里。')
+          const row = (outing?.workspaces ?? []).find((w) => w.id === ws)
+          const reuseSession = outingReuse && row?.last?.sessionId ? row.last.sessionId : ''
+          await jpost('/outing', { action: 'start', workspaceId: ws, sessionId: reuseSession })
+          const next = await jget('/outing')
+          setOuting(next)
+          setOutingMsg(reuseSession ? '她回到上次那条会话了，接着做。' : '她已经出门了，正在那个工作区里。')
         } catch (e) {
           setOutingMsg(`派活失败：${e.message}`)
         } finally {
@@ -2353,6 +2507,25 @@ window.__ModuleLoader__.load({
         }
       }
 
+      // 纪念品（0.6.17）：她问「这件能带回去吗」，这里点头或摇头。
+      async function doDecideKeepsake(id, yes) {
+        setOutingBusy(true)
+        setOutingMsg(yes ? '正在把东西拿回来……' : '正在回绝……')
+        try {
+          const r = await jpost('/outing', { action: 'keepsake', id, yes })
+          setOuting(await jget('/outing').catch(() => outing))
+          setOutingMsg(
+            yes
+              ? (r?.ok ? '带回来了。东西放在她家的纪念品目录里。' : `没带成：${r?.note ?? '不知道哪一步没成'}`)
+              : '没带。她那边会知道这一件不算。',
+          )
+        } catch (e) {
+          setOutingMsg(`没处理成：${e.message}`)
+        } finally {
+          setOutingBusy(false)
+        }
+      }
+
       async function doEndOuting(keep, drop = []) {
         setOutingBusy(true)
         setOutingMsg('正在叫她回来……')
@@ -2361,7 +2534,7 @@ window.__ModuleLoader__.load({
           setOuting(await jget('/outing'))
           setOutingMsg(
             r?.status === 'pending'
-              ? '这趟的事件流被动过，先不收——她留在外面，等你确认过再说。'
+              ? '这趟的文件对不上，先没结算。她本人已经回家了（装备也拆了）；把文件还原，再点下面「复核一次」就能收下。'
               : keep === false
                 ? '叫回来了。这趟不算数，那部分判断会被跳过。'
                 : drop.length
@@ -2371,6 +2544,21 @@ window.__ModuleLoader__.load({
           setOutingEndAsk(false)
         } catch (e) {
           setOutingMsg(`叫不回来：${e.message}`)
+        } finally {
+          setOutingBusy(false)
+        }
+      }
+
+      // 复核上一次被拒收的那趟（0.6.32）：文件还原后重新比对，通过就当场收下。
+      async function doReviewPending() {
+        setOutingBusy(true)
+        setOutingMsg('正在重新比对……')
+        try {
+          const r = await jpost('/outing', { action: 'review' })
+          setOuting(await jget('/outing'))
+          setOutingMsg(r?.ok ? '复核通过，这趟收下了。' : '还是对不上，没收。')
+        } catch (e) {
+          setOutingMsg(`复核没过：${e.message}`)
         } finally {
           setOutingBusy(false)
         }
@@ -2408,10 +2596,13 @@ window.__ModuleLoader__.load({
         setPossessBusy(true)
         setPossessMsg('正在请她回去……')
         try {
-          await jpost('/possession', { action: 'end' })
+          const r = await jpost('/possession', { action: 'end' })
           await loadPossess()
           setOuting(await jget('/outing').catch(() => outing))
-          setPossessMsg('回去了。那条对话恢复成原来的样子。')
+          // 交接句写不进去不算失败：请神本身已经结束了，只是那条对话少了一句提示。
+          setPossessMsg(r?.note?.ok
+            ? '回去了。那条对话里留下了一句「已经还给你了」，下一轮它会看到。'
+            : `回去了。那条对话恢复成原来的样子${r?.note?.why ? `（没能留下交接句：${r.note.why}）` : ''}。`)
         } catch (e) {
           setPossessMsg(`请不回去：${e.message}`)
         } finally {
@@ -2422,6 +2613,21 @@ window.__ModuleLoader__.load({
       const possessActive = possess?.active ?? null
       const possessSessions = possess?.sessions ?? []
       const possessTarget = possessPick || possessSessions[0]?.sessionId || ''
+      // 下拉里要显示「对话框的名字」，不是会话 id 尾巴（2026-10-29 用户 m00761）：
+      // 名字由服务端从 session/title 事件里读出来；重名时补上工作区目录名区分，
+      // 还没起名字的给一句人话，不再把 id 甩给人看。
+      const possessWhere = (p) => String(p ?? '').split(/[\\/]/).filter(Boolean).pop() || ''
+      const possessNameCount = new Map()
+      for (const s of possessSessions) {
+        const k = String(s?.title ?? '')
+        possessNameCount.set(k, (possessNameCount.get(k) || 0) + 1)
+      }
+      const possessName = (s) => {
+        const t = String(s?.title ?? '').trim() || '还没起名字的对话'
+        const dup = (possessNameCount.get(String(s?.title ?? '')) || 0) > 1
+        const w = dup ? possessWhere(s?.cwd) : ''
+        return w ? `${t} · ${w}` : t
+      }
 
       const awayNowUI = outing?.away ?? null
       const isOut = awayNowUI?.kind === 'outing'
@@ -2442,13 +2648,16 @@ window.__ModuleLoader__.load({
         o.status === 'active'
           ? '还在外面'
           : o.status === 'pending'
-            ? '等确认'
+            ? '等复核'
             : o.status === 'rejected'
               ? '没算数'
               : '已收下'
       const outingRows = recentOutings.map((o) =>
         h('div', { style: { display: 'flex', gap: '10px', justifyContent: 'space-between' } },
-          h('span', null, o.workspaceName || o.workspaceId || '别的工作区'),
+          h('span', null,
+            o.workspaceName || o.workspaceId || '别的工作区',
+            o.diaries ? h('span', { className: 'hint', style: { marginLeft: '6px' } }, `· 日记 ${o.diaries} 篇`) : null,
+            o.keepsakes ? h('span', { className: 'hint', style: { marginLeft: '6px' } }, `· 带回来 ${o.keepsakes} 件`) : null),
           h('span', { className: 'hint', style: { margin: 0 } },
             `${outingStatusText(o)} · ${new Date(o.startedAt).toLocaleDateString()}`)))
 
@@ -2459,17 +2668,54 @@ window.__ModuleLoader__.load({
             ? h('div', null,
                 h('p', { style: { margin: '0 0 6px', fontWeight: 600 } },
                   awayNowUI.line || '此刻在外面'),
+                // 写清是哪条对话（0.6.26，用户 m03194）：工作区 + 会话名字/短号 + 第几趟。
+                // 0.6.25 真机上出现过「台账说在外面、其实一段装备都没挂」的幽灵出门，
+                // 所以这里连「装备挂上没有」也如实写出来，不能只写一句「在外面」。
+                h('p', { className: 'hint', style: { margin: '0 0 4px' } },
+                  [
+                    `在「${awayNowUI.outing?.workspaceName || '那个工作区'}」那条对话里`,
+                    awayNowUI.sessionTitle ? `（名字：${awayNowUI.sessionTitle}）` : '（这条还没起名字）',
+                    awayNowUI.sessionShort ? ` · 会话 ${awayNowUI.sessionShort}` : '',
+                    awayNowUI.tripNo ? ` · 第 ${awayNowUI.tripNo} 趟` : '',
+                  ].join('')),
+                awayNowUI.warning
+                  ? h('p', { style: { margin: '0 0 4px', color: '#e5534b', fontWeight: 600 } }, awayNowUI.warning)
+                  : null,
                 h('p', { className: 'hint' },
-                  '这趟不自动收下：回来时先比对事件流。如果有人在后面动过她那份记录，默认拒收，她留在外面等你确认。'),
+                  '这趟不自动收下：回来时先比对事件流。如果有人在后面动过她那份记录，这趟先不算数——她本人照样回家、装备也拆，只是等你复核。'),
                 h('p', { className: 'hint' },
                   verifyText(awayNowUI.verify),
                   outing?.identityFrozen ? ' 她带的是出门那一刻的身份快照，家里之后改了什么，这一趟不会变成她。' : ''),
+                // 想念天数（0.6.16，用户 m01677）：只写事实——第几天，不替她抒情。
+                awayNowUI.tripDays > 0
+                  ? h('p', { className: 'hint' }, `这趟已经第 ${awayNowUI.tripDays + 1} 天。`)
+                  : null,
+                // 留话：这趟出门里她以 user 身份写进自己事件流的那几句。
+                (outing?.letters ?? []).length
+                  ? h('div', { style: { marginTop: '8px', fontSize: '13px', lineHeight: '1.8' } },
+                      h('p', { className: 'hint', style: { margin: '0 0 4px' } }, '这趟她留给你的话：'),
+                      ...(outing?.letters ?? []).map((l) => h('div', { key: l.id }, l.text)))
+                  : null,
+                // 纪念品（0.6.17）：她问「这件能带回去吗」，只有这里点头才会真的复制。
+                (outing?.keepsakes?.pending ?? []).map((k) =>
+                  h('div', { key: k.id, style: { marginTop: '8px', padding: '8px', border: '1px solid var(--border, #333)', borderRadius: '8px', fontSize: '13px' } },
+                    h('p', { style: { margin: '0 0 4px' } },
+                      '她想带这个回来：',
+                      h('strong', null, k.rel),
+                      h('span', { className: 'hint', style: { marginLeft: '6px' } },
+                        `${Math.max(1, Math.round(Number(k.size || 0) / 1024))} KB`)),
+                    k.why ? h('p', { className: 'hint', style: { margin: '0 0 6px' } }, k.why) : null,
+                    h('div', { className: 'row' },
+                      h('button', { disabled: outingBusy, onClick: () => doDecideKeepsake(k.id, true) }, '准了'),
+                      h('button', { disabled: outingBusy, className: 'ghost', onClick: () => doDecideKeepsake(k.id, false) }, '算了')))),
                 outingEndAsk
                   ? h('div', null,
                       h('p', { className: 'hint', style: { marginTop: '8px' } },
                         (awayNowUI.outing?.workspaceName || '').includes('口袋')
                           ? '她这趟在口袋里，你这边没有她可用的工具，所以自己家的账上不会多出东西——清单空着是正常的，不代表这趟没做事。算不算，你说了算。'
-                          : '这趟多出 ' + (awayNowUI.since?.total ?? 0) + ' 条。默认全收下；不想留下的那条取消勾选。她顶回来的会单独标出来——只收下说得漂亮的，等于把这趟教坏。'),
+                          : (awayNowUI.since?.total ?? 0) === 0
+                            ? '这趟她自己的事件流里没有新增，所以没有可以取消勾选的条目——只跟你说话不算事件。想验驳回，在那条出门会话里让她用 growth_commit 写一条（或留话、写日记、评视频），回家这里才会冒出那一行。'
+                            : '这趟多出 ' + (awayNowUI.since?.total ?? 0) + ' 条。默认全收下；不想留下的那条取消勾选。她顶回来的会单独标出来——只收下说得漂亮的，等于把这趟教坏。'),
                       h('div', { style: { display: 'flex', flexDirection: 'column', gap: '6px', marginTop: '6px', maxHeight: '260px', overflow: 'auto' } },
                         ...(awayNowUI.since?.items ?? []).map((it) => {
                           const on = !outingDrop.includes(it.id)
@@ -2490,10 +2736,41 @@ window.__ModuleLoader__.load({
                         h('button', { disabled: outingBusy, className: 'ghost', onClick: () => { setOutingEndAsk(false); setOutingMsg('') } }, '再等等')))
                   : h('div', { className: 'row', style: { marginTop: '8px' } },
                       h('button', { disabled: outingBusy, onClick: () => { setOutingDrop([]); setOutingEndAsk(true) } }, '叫她回家…')))
-            : h('p', { className: 'dim', style: { margin: 0 } },
-                awayNowUI?.kind === 'possession' ? '此刻在替人说话。' : '在家。'),
+            : awayNowUI?.kind === 'possession'
+              ? h('div', null,
+                  h('p', { style: { margin: '0 0 6px', fontWeight: 600 } },
+                    awayNowUI.line || '此刻在替人说话'),
+                  h('p', { className: 'hint' },
+                    '这段时间那条对话里回你话的是她，不再是原来的那个人；守卫也分不出谁在说话，会连你一起拦。只能由你来结束。'),
+                  h('p', { className: 'hint' },
+                    '请神期间她说过的话会留在那条对话的历史里——结束时会补一条「我回去了」，想完全干净请新开一条对话。'))
+              : h('p', { className: 'dim', style: { margin: 0 } }, '在家。'),
 
-          outingMsg ? h('p', { className: 'hint', style: { marginTop: '10px' } }, outingMsg) : null),
+          outingMsg ? h('p', { className: 'hint', style: { marginTop: '10px' } }, outingMsg) : null,
+
+          // 上一趟被拒收的那趟（0.6.32，用户 2026-10-29 真机要求）：
+          // 以前 pending 只剩「等确认」三个字，没有原因、也没有下一步，
+          // 结果人和文件都在，却是死路。这里把原因和复核按钮一起摆出来。
+          (outing?.pendingReview ?? null)
+            ? h('div', { style: { marginTop: '10px', padding: '8px', border: '1px solid var(--border, #333)', borderRadius: '8px', fontSize: '13px' } },
+                h('p', { style: { margin: '0 0 4px', fontWeight: 600 } }, '上一趟没结算：文件对不上'),
+                h('p', { className: 'hint', style: { margin: '0 0 4px' } },
+                  `${outing.pendingReview.workspaceName || '那个工作区'} · 会话 ${outing.pendingReview.sessionShort || '—'} · ${outing.pendingReview.reason || '对不上'}`),
+                h('p', { className: 'hint', style: { margin: '0 0 6px' } },
+                  outing.pendingReview.okNow
+                    ? '现在这份文件已经能对上了。点「复核一次」，这一趟就收下。'
+                    : '她本人已经回家了（装备也拆了），只是这趟还没算数。把文件还原成出门时的样子，再来点「复核一次」。'),
+                h('div', { className: 'row' },
+                  h('button', { disabled: outingBusy || !outing.pendingReview.okNow, onClick: () => doReviewPending() }, '复核一次'),
+                  outing.pendingReview.okNow ? null : h('span', { className: 'hint', style: { margin: 0 } }, '还没还原')))
+            : null,
+
+          // 最近几趟并进这张卡（0.6.16，用户 m01613：信息与台账重复，合并）。
+          recentOutings.length
+            ? h('div', { style: { marginTop: '12px', fontSize: '13px', lineHeight: '1.9' } },
+                h('p', { className: 'hint', style: { margin: '0 0 4px' } }, '最近几趟：'),
+                ...outingRows)
+            : null),
 
         groupFull('出门口袋（干活模式）',
           '一个空的工作区：没有这里的白板，也没有这十几天的账。她带过去的只有出门那一刻的自己。',
@@ -2509,7 +2786,9 @@ window.__ModuleLoader__.load({
                     onClick: doStartPocket,
                   }, outingBusy ? '正在开门……' : '送她去口袋')),
                 h('p', { className: 'hint', style: { marginTop: '8px' } },
-                  '她在口袋里写不进 02-我的项目 / 03-我的文档 / 04-小工具 这几个目录——沙箱的写权限跟着工作区走。要交付的东西，等她回来再搬。'))),
+                  '她在口袋里写不进 02-我的项目 / 03-我的文档 / 04-小工具 这几个目录——沙箱的写权限跟着工作区走。要交付的东西，等她回来再搬。'),
+                h('p', { className: 'hint', style: { marginTop: '8px', fontWeight: 600 } },
+                  '别把她送到有插件源码的工作区——她在那边能读到自己不该看的文件（禁令清单就在源码里）。只是想让她去干活，用口袋最稳。'))),
 
         groupFull('送她出门',
           '选一个工作区，在那边开一条新会话。她继承那个工作区本来的权限和工具，不套家里那套收窄过的名单。',
@@ -2528,9 +2807,22 @@ window.__ModuleLoader__.load({
                       disabled: outingDisabled || outingBusy || !outPick,
                       onClick: doStartOuting,
                     }, outingBusy ? '正在开门……' : '让她去这里')),
-                  outPickRow?.risky
-                    ? h('p', { className: 'hint', style: { marginTop: '8px', fontWeight: 600 } },
-                        '这个工作区里有插件源码。她在那边能读到自己不该看的文件（禁令清单就在源码里），换个地方更稳。')
+                  // 复用同一趟（0.6.16，用户 m01613）：这个工作区上次那条会话还在，
+                  // 就可以接着做，而不是每趟从白纸开始。
+                  outPickRow?.last?.sessionId
+                    ? h('label', { style: { display: 'flex', gap: '8px', alignItems: 'flex-start', marginTop: '8px', fontSize: '13px', lineHeight: '1.6' } },
+                        h('input', {
+                          type: 'checkbox',
+                          checked: outingReuse,
+                          disabled: outingDisabled || outingBusy,
+                          onChange: (e) => setOutingReuse(e.target.checked),
+                        }),
+                        h('span', null,
+                          '接着上次那趟（同一个工作区，回到那条会话里做）',
+                          h('span', { className: 'hint', style: { display: 'block', margin: '2px 0 0' } },
+                            '上次是 ' + new Date(outPickRow.last.startedAt).toLocaleDateString() +
+                            ' 走的 · 会话 ' + String(outPickRow.last.sessionId).replace(/^session-/, '').slice(0, 8) +
+                            '。不勾就是新开一条。')))
                     : null,
                   h('p', { className: 'hint', style: { marginTop: '8px' } },
                     '出门期间：家里不叫她、不刷 B 站、不写日记。回家那一刻才结算这趟算不算数。'),
@@ -2545,9 +2837,11 @@ window.__ModuleLoader__.load({
           possessActive
             ? h('div', null,
                 h('p', { className: 'hint', style: { margin: 0, fontWeight: 600 } },
-                  `现在上身：${possessActive.title || possessActive.sessionId}`),
+                  `现在上身：${possessActive.title || '还没起名字的对话'}${possessWhere(possessActive.cwd) ? ` · ${possessWhere(possessActive.cwd)}` : ''}`),
                 h('p', { className: 'hint', style: { marginTop: '8px' } },
                   '这段时间那条对话的守卫分不出谁在说话，会连你一起拦；它也不再是原来的那个人。'),
+                h('p', { className: 'hint', style: { marginTop: '6px' } },
+                  '请神期间她说过的话会留在这条对话的历史里——结束时会补一条「我回去了」进去，想完全干净请新开一条对话。'),
                 h('button', {
                   disabled: possessBusy,
                   onClick: doEndPossess,
@@ -2560,20 +2854,14 @@ window.__ModuleLoader__.load({
                     value: possessTarget,
                     disabled: possessBusy || possessSessions.length === 0,
                     onChange: (e) => setPossessPick(e.target.value),
-                  }, ...possessSessions.map((s) => h('option', { value: s.sessionId }, s.title || s.sessionId.slice(-8)))),
+                  }, ...possessSessions.map((s) => h('option', { value: s.sessionId }, possessName(s)))),
                   h('button', {
                     disabled: possessBusy || !possessTarget,
                     onClick: doStartPossess,
                   }, possessBusy ? '正在请……' : '请她上身')),
                 h('p', { className: 'hint', style: { marginTop: '8px', fontWeight: 600 } },
-                  '注意：同一个对话分不出谁在说话——请神期间那条对话的工具面对你也不可用，守卫也会连你一起拦。只能由你结束。')),
-          possessMsg ? h('p', { className: 'hint', style: { margin: '8px 0 0' } }, possessMsg) : null),
-
-        recentOutings.length === 0
-          ? null
-          : groupFull('最近几趟',
-              '只留最近几条。去哪、什么时候走的、最后算没算数。',
-              h('div', { style: { fontSize: '13px', lineHeight: '1.9' } }, ...outingRows)))
+                  '注意：这段时间那条对话的守卫分不出谁在说话，会连你一起拦；它也不再是原来的那个人。只能由你结束。')),
+          possessMsg ? h('p', { className: 'hint', style: { margin: '8px 0 0' } }, possessMsg) : null))
 
       const envPage = h('div', { className: 'page' },
         toolsCard,
@@ -2824,6 +3112,17 @@ window.__ModuleLoader__.load({
           s ? `第 ${s.day} / ${s.growthDays} 天 · ${s.stageName} · 事件 ${s.counts.total} 条` : '读取中…'),
         err ? h('pre', { className: 'err' }, err) : null,
         note ? h('pre', { className: 'ok' }, note) : null,
+        // 保存回执只是确认「存到了」，不占页签里的说明位（2026-10-29 用户）。
+        autoNote ? h('p', { className: 'ok', style: { margin: '0 0 8px' } }, autoNote) : null,
+        // 保存失败是一个要处理的状态，不是提示：一句人话先说清「不是你填错了」，
+        // 技术信息另起一行留给开发者，自己点掉。放在页签栏上方，不混进设置项里。
+        saveFail
+          ? h('div', { className: 'err', style: { margin: '0 0 10px' } },
+              h('div', null, '这一项没存上。可能是插件这一版还没接上它——不是你填错了，改别的照样会存；重启应用再试一次。'),
+              h('div', { className: 'dim', style: { marginTop: '4px' } }, `技术信息：${saveFail}`),
+              h('div', { className: 'row', style: { marginTop: '6px' } },
+                h('button', { onClick: () => setSaveFail('') }, '知道了')))
+          : null,
         // 说了话、但系统通知弹不出来时，退到这里。点一下才收起来。
         bubble ? h('div', { className: 'card', style: { borderLeft: '3px solid currentColor' } },
           h('div', { className: 'dim' }, '大肥鱼跟你说话'),
@@ -2833,7 +3132,6 @@ window.__ModuleLoader__.load({
 
         tabBar,
         AUTO_SAVE_TABS.has(tab) ? h('p', { className: 'hint', style: { margin: '0 0 8px' } }, '这里的改动改完就生效，不需要点保存。') : null,
-        AUTO_SAVE_TABS.has(tab) && autoNote ? h('p', { className: 'hint' }, autoNote) : null,
 
         showTab('now') ? nowPage : null,
         showTab('grow') ? growPage : null,

@@ -20,6 +20,7 @@ import { registerRecall } from './recall.js'
 import { registerHerDiary } from './herdiary.js'
 import { registerWatch } from './watch.js'
 import { registerLetter } from './letter.js'
+import { registerBringBack } from './keep.js'
 import { registerObserve } from './observe.js'
 import { startScheduler } from './scheduler.js'
 import { registerTurns } from './turns.js'
@@ -38,7 +39,7 @@ import { logBoot, makeLogger } from './log.js'
 export const name = 'dsh-fish'
 
 /** 版本号：只用于日志导出（排查时第一件事是确认跑的是哪一版）。 */
-export const VERSION = '0.6.11'
+export const VERSION = '0.7.0'
 
 // ⚠️ 一个数组写全，不要拆成对象
 export const inject = ['sessionController', 'tools', 'webServer', 'connection']
@@ -252,6 +253,8 @@ export function apply(ctx, baseConfig = {}) {
         () => registerWatch(ctx, { root }),
         // R4：留话（不审批）。和 growth_commit 一样是纯追加，但收件人明确。
         () => registerLetter(ctx, { root, tenant: tenancy }),
+        // 0.6.17：纪念品。她只能「问」，真带回去要那个人在出门页点头。
+        () => registerBringBack(ctx, { root, tenant: tenancy }),
       ]) {
         try {
           const d = reg()

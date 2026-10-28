@@ -22,6 +22,8 @@ import { join } from 'node:path'
 import {
   IDENTITY_ORDER,
   IDENTITY_SECTION,
+  TOOLS_ORDER,
+  TOOLS_SECTION,
   WAKE_ORDER,
   WAKE_SECTION,
   attachIdentity,
@@ -69,7 +71,7 @@ test('identityText：读到文件内容，改文件后（mtime 变）能拿到�
   assert.equal(identityText(root), '第二版身份')
 })
 
-test('attachIdentity：挂两段——身份 + 这一次的处境（后者平时是空）', () => {
+test('attachIdentity：挂三段——身份 + 这一次的处境（平时空）+ 手边有什么', () => {
   resetIdentityCache()
   clearWakeSection()
   const root = tmp()
@@ -80,7 +82,7 @@ test('attachIdentity：挂两段——身份 + 这一次的处境（后者平时
   const agent = { ctx: { systemPrompt: { section: (o) => calls.push(o) } } }
   const r = attachIdentity(agent, root)
   assert.equal(r.ok, true)
-  assert.equal(calls.length, 2, '身份一段 + 处境一段')
+  assert.equal(calls.length, 3, '身份一段 + 处境一段 + 手边一段')
   const sec = calls[0]
   assert.equal(sec.name, IDENTITY_SECTION)
   assert.equal(sec.order, IDENTITY_ORDER)
@@ -97,6 +99,16 @@ test('attachIdentity：挂两段——身份 + 这一次的处境（后者平时
   assert.equal(wake.text(), '第 1 天，你醒了。')
   clearWakeSection()
   assert.equal(wake.text(), '')
+
+  // 第三段：手边有什么（2026-10-29，用户 m01276）。收不窄的工具靠这段说清。
+  const tools = calls[2]
+  assert.equal(tools.name, TOOLS_SECTION)
+  assert.equal(tools.order, TOOLS_ORDER)
+  assert.equal(typeof tools.text, 'function', '白名单变了下一轮就要生效')
+  const txt = tools.text()
+  assert.match(txt, /growth_commit/, '要把真放行的工具念出来')
+  assert.match(txt, /ops_/, '要点名那些挡不掉、会混进工具表的')
+  assert.match(txt, /这件事我做不到/, '和兜底守卫同一句话术')
 })
 
 test('attachIdentity：没有 systemPrompt 时返回 ok:false，不抛', () => {
@@ -126,7 +138,7 @@ test('registerIdentity：只给她那个 agent 挂（按 cwd 判），别人不�
   handler({ agent: { session: { header: { cwd: join(root, 'other') } }, ctx: { systemPrompt: { section: (o) => others.push(o) } } } })
   handler({ agent: { session: { header: { cwd: '' } }, ctx: { systemPrompt: { section: (o) => others.push(o) } } } })
 
-  assert.equal(mine.length, 2, '她那条会话必须挂上（身份 + 处境两段）')
+  assert.equal(mine.length, 3, '她那条会话必须挂上（身份 + 处境 + 手边三段）')
   assert.equal(others.length, 0, '用户自己的会话不许挂')
 })
 

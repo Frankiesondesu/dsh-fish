@@ -93,3 +93,22 @@ test('homesFile 默认在数据目录之外（可被 env 覆盖）', () => {
     else process.env.DSH_FISH_HOMES = old
   }
 })
+
+test('临时目录里的家不写进真实家谱（2026-10-29：全量测试灌了 20 个 fish-boot-*）', async () => {
+  // 事故：test/boot.test.mjs 用 mkdtemp 造 root 再 apply()，apply 里的 noteRoot 写的是
+  // 默认账本 → 之后每次真启动都把最后一条临时家当「上次的家」，记假「家换了」。
+  const old = process.env.DSH_FISH_HOMES
+  try {
+    delete process.env.DSH_FISH_HOMES
+    const dir = await mkdtemp(join(tmpdir(), 'fish-scratch-'))
+    try {
+      const r = await noteRoot(join(dir, 'home'))
+      assert.equal(r.ok, true)
+      assert.equal(r.skipped, 'temp', '临时家应当被跳过，不写默认账本')
+      assert.equal(r.changed, false)
+    } finally { await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) }
+  } finally {
+    if (old === undefined) delete process.env.DSH_FISH_HOMES
+    else process.env.DSH_FISH_HOMES = old
+  }
+})

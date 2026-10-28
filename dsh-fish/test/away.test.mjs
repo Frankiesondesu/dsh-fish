@@ -6,7 +6,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { attachIdentity, attachAwayGuard, awayBlockedPaths, flatPath } from '../lib/identity.js'
+import { attachIdentity, attachAwayGuard, awayBlockedPaths, flatPath, detachOutside, mountedCount } from '../lib/identity.js'
 import { startOuting, endOuting, readOutings } from '../lib/outing.js'
 import { registerIdentity } from '../lib/identity.js'
 
@@ -152,7 +152,7 @@ test('出门那条会话：身份用走时快照、并挂上兜底守卫；家�
         effect: (fn) => fn,
       },
     } })
-    assert.equal(sections.length, 2, '外面那条要挂上身份与处境两段')
+    assert.equal(sections.length, 3, "外面那条要挂上身份、处境与手边三段")
     assert.equal(sections[0].text(), '走时的我', '外面读到的是出门那一刻的身份')
 
     // 家里那条：正常挂身份，但不挂兜底守卫（自己家不需要拦自己）
@@ -162,7 +162,7 @@ test('出门那条会话：身份用走时快照、并挂上兜底守卫；家�
       session: { header: { cwd: herDir } },
       ctx: { systemPrompt: { section: (o) => homeSections.push(o) }, tools: { guard: () => { homeGuarded = true; return () => {} } } },
     } })
-    assert.equal(homeSections.length, 2)
+    assert.equal(homeSections.length, 3)
     assert.equal(homeGuarded, false)
 
     // 无关的人：一段都不挂
@@ -199,7 +199,7 @@ test('先记账再建会话：会话还没有 cwd 也认得出是出门，并把
         effect: (fn) => fn,
       },
     } })
-    assert.equal(sections.length, 2, '这种情况也要挂身份与处境两段')
+    assert.equal(sections.length, 3, "这种情况也要挂身份、处境与手边三段")
     assert.equal(guarded, true, '兜底守卫也要挂上')
 
     // bind 是异步写的，等一拍再看台账
@@ -223,7 +223,7 @@ test('台账记了 id、会话 header 没 cwd 时，靠 id 也认得出', async 
     registerIdentity({ on: (e, fn) => { handler = fn; return () => {} } }, { root, herDir, log: () => {} })
     const sections = []
     handler({ agent: { session: { header: { id: 'session-out-2' } }, ctx: { systemPrompt: { section: (o) => sections.push(o) }, tools: { guard: () => () => {} }, effect: (fn) => fn } } })
-    assert.equal(sections.length, 2)
+    assert.equal(sections.length, 3)
   } finally {
     rmSync(root, { recursive: true, force: true })
   }
@@ -244,6 +244,110 @@ test('认不出来时留一行日志，不静默跳过', async () => {
     handler({ agent: { session: { header: { id: 'session-other', cwd: join(root, 'somebody') } }, ctx: { systemPrompt: { section: (o) => sections.push(o) } } } })
     assert.equal(sections.length, 0)
     assert.ok(lines.some((l) => l.includes('没对上')), '要有可排查的那一行')
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+// ------------------------------------------------------------------
+// 0.6.16：回家那一刻把外面的装备拆掉（不再等进程退出）
+// ------------------------------------------------------------------
+
+function fakeAgent() {
+  const sections = []
+  let guardDisposed = 0
+  const agent = {
+    ctx: {
+      systemPrompt: { section: (s) => { sections.push(s); return () => { sections.pop() } } },
+      tools: { guard: () => () => { guardDisposed += 1 } },
+      effect: (fn) => fn,
+    },
+  }
+  return { agent, sections, guardDisposed: () => guardDisposed }
+}
+
+test('出门时挂了几段，回家就能拆几段：身份段 + 处境段 + 守卫', () => {
+  const root = tmpRoot()
+  try {
+    const { agent, sections, guardDisposed } = fakeAgent()
+    assert.equal(attachIdentity(agent, root, { frozen: '走的时候的我' }).ok, true)
+    assert.equal(attachAwayGuard(agent, { root, herDir: join(root, 'home'), log: () => {} }).ok, true)
+    assert.equal(mountedCount(agent), 4, '身份段 + 处境段 + 手边段 + 守卫')
+    assert.equal(sections.length, 3)
+
+    const r = detachOutside(agent)
+    assert.equal(r.ok, true)
+    assert.equal(r.removed, 4)
+    assert.equal(mountedCount(agent), 0, '拆完不能留着')
+    assert.equal(sections.length, 0, '段要从 system prompt 上注销')
+    assert.equal(guardDisposed(), 1, '守卫也要卸掉')
+    assert.equal(detachOutside(agent).ok, false, '没挂过的再拆一次要如实说')
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('没挂过装备的会话（家里那条）不该被当成出门会话乱拆', () => {
+  const r = detachOutside({ ctx: {} })
+  assert.equal(r.ok, false)
+  assert.equal(r.removed, 0)
+  assert.ok(String(r.why ?? '').includes('没挂过'), '要说人话')
+})
+
+test('台账已经绑了会话 id 时，同一个工作区里别的会话不该被当成她（2026-10-29 真机：主会话被挂上她的身份和守卫）', () => {
+  const root = tmpRoot()
+  try {
+    const ws = join(root, 'ws')
+    mkdirSync(ws, { recursive: true })
+    const at = Date.now() - 60_000
+    writeFileSync(join(root, 'outings.json'), JSON.stringify({
+      version: 1,
+      outings: [{
+        sessionId: 'session-out',
+        workspaceId: 'w1',
+        workspaceName: '素材',
+        cwd: ws,
+        startedAt: at,
+        status: 'active',
+        baseline: { size: 0, tailSha256: '', at },
+        identity: '走的时候的我',
+      }],
+    }, null, 2))
+
+    let handler = null
+    const ctx = {
+      on: (name, fn) => {
+        if (name === 'agent/created') handler = fn
+        return () => {}
+      },
+      get: () => undefined,
+      effect: (fn) => fn,
+    }
+    registerIdentity(ctx, { root, herDir: join(root, 'home'), log: () => {} })
+    assert.equal(typeof handler, 'function')
+
+    const mk = (id) => {
+      const sections = []
+      const agent = {
+        session: { header: { id, cwd: ws } },
+        ctx: {
+          systemPrompt: { section: (s) => { sections.push(s); return () => {} } },
+          tools: { guard: () => () => {} },
+          effect: (fn) => fn,
+        },
+      }
+      return { agent, sections }
+    }
+
+    const mine = mk('session-mine')
+    handler({ agent: mine.agent })
+    assert.equal(mine.sections.length, 0, '同一个工作区里你自己的会话不该被挂上她的身份段')
+    assert.equal(mountedCount(mine.agent), 0, '也不该挂守卫')
+
+    const hers = mk('session-out')
+    handler({ agent: hers.agent })
+    assert.ok(hers.sections.length >= 2, '真正那条出门会话还是要挂身份段')
+    assert.ok(mountedCount(hers.agent) >= 3, '身份、处境、手边、守卫都要在')
   } finally {
     rmSync(root, { recursive: true, force: true })
   }

@@ -3,7 +3,7 @@
 
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -13,6 +13,9 @@ import {
   possessionText,
   registerPossession,
   activePossessionSync,
+  releaseNoteText,
+  appendReleaseNote,
+  releasePossession,
   PERSONA_PREFIX_SECTION,
   POSSESS_SECTION,
 } from '../lib/possess.js'
@@ -146,4 +149,74 @@ test('请神与出门不能同时开（出门那条占着就不能请）', async
   assert.equal(r.ok, false)
   assert.ok(r.why.includes('出门'))
   rmSync(root, { recursive: true, force: true })
+})
+
+// 2026-10-29 用户 m00924 真机发现：请走之后那条对话还自称是大肥鱼。
+// 根因不是提示词污染（请神段确实撤了），而是历史 append-only——她说过的话留在里面。
+// 对策：结束的瞬间往那条对话补一条可见的「已经还给你了」，让下一轮读到交接事实。
+test('交接句说清楚她已经回去，并明说历史留在上面', () => {
+  const plain = releaseNoteText()
+  assert.ok(plain.includes('大肥鱼回去了，这条对话还给你。'))
+  assert.ok(plain.includes('想完全干净'))
+  // 2026-10-29 用户 m02381：不再接受「临走留言」参数，交接句只有固定两句。
+  assert.equal(plain, '（大肥鱼回去了，这条对话还给你。）\n请神期间她说过的话仍留在上面的历史里；想完全干净，开一条新对话最稳。')
+})
+
+test('交接句是一条合法的 user/message（带 surfaceOp:append，宿主才收）', () => {
+  const written = []
+  const agent = {
+    session: { append: (type, data, opts) => written.push({ type, data, opts }) },
+  }
+  const r = appendReleaseNote(agent)
+  assert.equal(r.ok, true)
+  assert.equal(written.length, 1)
+  const ev = written[0]
+  assert.equal(ev.type, 'user/message')
+  assert.equal(ev.data.role, 'user')
+  assert.equal(ev.data.source.kind, 'user')
+  assert.ok(ev.data.id && ev.data.id.startsWith('fish-release-'))
+  assert.equal(ev.data.content[0].type, 'text')
+  assert.ok(ev.data.content[0].text.includes('这条对话还给你'))
+  assert.equal(ev.opts.surfaceOp, 'append')
+})
+
+test('写不进去不抛：那条对话收起来了，请神照样算结束', () => {
+  const r = appendReleaseNote({})
+  assert.equal(r.ok, false)
+  assert.ok(r.why.includes('写不进去'))
+  const broken = appendReleaseNote({ session: { append: () => { throw new Error('session closed') } } })
+  assert.equal(broken.ok, false)
+  assert.ok(broken.why.includes('session closed'))
+})
+
+test('releasePossession 先撤挂载，再补交接句，两件事互不连坐', async () => {
+  const root = tmpRoot()
+  await startPossession(root, { sessionId: 's9', title: '一个对话', identity: '我' })
+  const written = []
+  const agent = { session: { append: (type, data, opts) => written.push({ type, data, opts }) } }
+  const r = await releasePossession(root, { sessionId: 's9', agent })
+  assert.equal(r.ok, true)
+  assert.equal(r.possession.status, 'done')
+  assert.equal(r.note.ok, true)
+  assert.equal(written.length, 1)
+  assert.ok(written[0].data.content[0].text.includes('这条对话还给你'))
+  // 没有活 agent 时照旧结束，只是 note 说明写不进去
+  await startPossession(root, { sessionId: 's10', title: '另一条' })
+  const r2 = await releasePossession(root, { sessionId: 's10' })
+  assert.equal(r2.ok, true)
+  assert.equal(r2.note.ok, false)
+  assert.ok(r2.note.why.includes('没开着'))
+  rmSync(root, { recursive: true, force: true })
+})
+
+test('结束请神只补标准交接句：路由不传 farewell，界面也没有那句输入框', () => {
+  const src = readFileSync(new URL('../lib/observe.js', import.meta.url), 'utf8')
+  assert.ok(!src.includes('farewell'))
+  assert.ok(src.includes('note: r.note'))
+  assert.ok(src.includes("ctx.get?.('agents')"))
+  const client = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')
+  assert.ok(!client.includes('possessFarewell'))
+  assert.ok(!client.includes('临走留一句'))
+  assert.ok(client.includes('想完全干净'))
+  assert.ok(client.includes("{ action: 'end' }"))
 })

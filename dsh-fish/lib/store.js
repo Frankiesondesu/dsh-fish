@@ -224,39 +224,36 @@ export async function writeConfig(cfg, root = rootDir()) {
  * 日记 / 报告落盘。
  *
  * issue #7（2026-10-28）：日记按日期命名，同一天写第二次原来是**整篇覆盖**，
- * 前一版永久丢失，而界面只显示「有日记」，主人在界面上完全无感。
+ * 前一版永久丢失，而界面只显示「有日记」，主人在界面上完全无感。当时的修法是
+ * 覆盖前把旧稿归档到 `diary/archive/`——但归档版界面上看不到，用户仍然觉得
+ * 「被盖掉了」（0.6.28 的反馈，用户 m01952）。
  *
- * 现在的规则：覆盖前，如果目标文件已存在且内容不同，先把旧版本存到
- * `diary/archive/YYYY-MM-DD-HHmmss.md`，再写新的。
- *   - 「一天一篇」的语义不变：客户端按日期分页，不用改；
- *   - archive 是**子目录**，listDiary 的正则只认顶层 `YYYY-MM-DD.md`，
- *     不会把归档版当成第三篇日记显示出来；
- *   - 内容相同不归档（重写同一篇是幂等的，不该每天堆垃圾）；
- *   - 归档失败**不阻断**主写入：丢一版旧稿也好过今天写不成。
- * 报告（out/）不归档：它是派生品，随时能由事件流重算。
+ * 2026-10-29 起改成**同日追加**（方案 B）：
+ *   - 同一天再写一次，不再覆盖，而是在当天文件末尾接一段，中间一行 `---` 隔开；
+ *     旧稿原样留在文件里，不用再去 archive 里找；
+ *   - 内容与最后一版完全一样时不追加（重写同一篇仍幂等）；
+ *   - 「一天一篇」的语义不变：客户端按日期分页，listDiary 只认顶层
+ *     `YYYY-MM-DD.md`，**跨天**才出现翻页键；
+ *   - 老归档（archive/）不动也不清：那是 0.6.4–0.6.27 留下的历史。
+ * 报告（out/）仍然整篇覆盖：它是派生品，随时能由事件流重算。
  */
+export const DAILY_JOIN = '\n\n---\n\n'
+
 export async function writeDaily(dirName, dateKey, text, root = rootDir()) {
   const dir = paths(root)[dirName]
   const file = join(dir, `${dateKey}.md`)
   if (dirName === 'diaryDir') {
     const prev = await readDaily(dirName, dateKey, root).catch(() => null)
-    if (prev !== null && prev !== text) {
-      try {
-        await fs.mkdir(join(dir, 'archive'), { recursive: true })
-        await writeAtomic(join(dir, 'archive', `${dateKey}-${stampLocal()}.md`), prev)
-      } catch {
-        /* 归档失败不影响本次写入 */
-      }
+    if (prev !== null) {
+      const old = String(prev).replace(/\r\n/g, '\n').trimEnd()
+      const body = String(text).replace(/\r\n/g, '\n').trim()
+      if (old === body) return file
+      await writeAtomic(file, `${old}${DAILY_JOIN}${body}\n`)
+      return file
     }
   }
   await writeAtomic(file, text)
   return file
-}
-
-/** 日记归档用的时间戳：本地时间，人看得懂（UTC 会在半夜差一天） */
-function stampLocal(d = new Date()) {
-  const p = (n) => String(n).padStart(2, '0')
-  return `${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`
 }
 
 export async function readDaily(dirName, dateKey, root = rootDir()) {

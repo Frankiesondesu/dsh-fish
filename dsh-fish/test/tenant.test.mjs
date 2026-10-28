@@ -81,6 +81,39 @@ test('checkCaller：cwd 在 root 里放行；在外面拒绝并说清楚', () =>
   assert.equal(sys.sessionId, '')
 })
 
+test('checkCaller：出门那条会话 cwd 在别人家，写事件仍放行；身份文件不放行', async () => {
+  const root = await tmpRoot()
+  // 关键：工作区在**她家外面**（真机出门就是这样），不是 root 的子目录
+  const ws = await fs.mkdtemp(join(tmpdir(), `fish-outside-${process.pid}-`))
+  made.push(ws)
+  await fs.writeFile(
+    join(root, 'outings.json'),
+    JSON.stringify({
+      version: 1,
+      outings: [
+        { sessionId: 'session-out', workspaceId: 'w1', workspaceName: '素材', cwd: ws, startedAt: Date.now(), status: 'active' },
+      ],
+    }),
+    'utf8',
+  )
+  const exec = { session: { header: { id: 'session-out', cwd: ws } } }
+
+  // 出门这一条：写回自己家的事件照收（2026-10-29 bring_back 真机 bug 的同一条根因）
+  const out = checkCaller(root, exec)
+  assert.equal(out.ok, true)
+  assert.equal(out.outside, true)
+  assert.equal(out.sessionId, 'session-out')
+
+  // 身份文件显式关掉这个例外：出门会话改不了自己的身份
+  const idres = checkCaller(root, exec, { herDir: join(root, 'home'), tool: '身份文件', outsideOk: false })
+  assert.equal(idres.ok, false)
+
+  // 不是当前那趟出门的会话（别人的窗口）仍然拒
+  const other = checkCaller(root, { session: { header: { id: 'session-other', cwd: ws } } })
+  assert.equal(other.ok, false)
+  assert.match(other.why, /另一个家/)
+})
+
 test('claimRoot：先来的占住，后来的认出「这个家已经有人住」且不抢', async () => {
   const root = await tmpRoot()
   const first = await claimRoot(root, { version: '0.6.6', instanceId: 'A' })

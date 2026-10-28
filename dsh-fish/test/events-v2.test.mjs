@@ -2,7 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { CATALOG, findTemplate } from '../lib/events.js'
 import { pick, topicEcho } from '../lib/generator.js'
-import { todayCounts } from '../lib/scheduler.js'
+import { todayCounts, isLastWakeOfDay } from '../lib/scheduler.js'
 import { normalizeConfig, DEFAULTS } from '../lib/settings.js'
 import { deriveSelf } from '../lib/derive.js'
 import { newId } from '../lib/schema.js'
@@ -157,4 +157,24 @@ test('consistency 按判断条数换问法（≥6 条要求指明哪一步变的
   assert.ok(deep.includes('哪一步变的'))
   assert.ok(deep.includes('证据'))
   assert.notEqual(few, deep)
+})
+
+// ---------- 7. 今天最后一段（2026-10-29，用户 m01296 B）----------
+// 日记三天零篇的直接原因是「没有时机」：叫醒里不再派活是对的，但一整天一个
+// 「到今天了」的节点都没有。这里只认「当天最后一段」这一个位置。
+
+test('isLastWakeOfDay：按 daily.events 与 wakesPerDay 里更小的那个算', () => {
+  const cfg = { daily: { events: 2 }, wakesPerDay: 4 }
+  assert.equal(isLastWakeOfDay(cfg, { sent: 0 }), false, '第一次醒不是最后一段')
+  assert.equal(isLastWakeOfDay(cfg, { sent: 1 }), true, '第二次也就是当天最后一次')
+  assert.equal(isLastWakeOfDay({ daily: { events: 6 }, wakesPerDay: 1 }, { sent: 0 }), true,
+    'wakesPerDay 更小时以它为准')
+  assert.equal(isLastWakeOfDay({ daily: { events: 2 }, wakesPerDay: 4 }, { sent: 3 }), true,
+    '已经超了也仍然算「到了最后」，不能再多给时机')
+})
+
+test('isLastWakeOfDay：配额坏掉（0 / 非数字）时不乱给时机', () => {
+  assert.equal(isLastWakeOfDay({ daily: { events: 0 }, wakesPerDay: 0 }, { sent: 0 }), false)
+  assert.equal(isLastWakeOfDay(null, { sent: 0 }), true, '没配置按默认 1 算：第一醒就是最后一次')
+  assert.equal(isLastWakeOfDay({ daily: { events: 2 }, wakesPerDay: 4 }, {}), false)
 })

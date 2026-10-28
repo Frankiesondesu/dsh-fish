@@ -43,10 +43,26 @@ test('「改完就生效」那句话只出现在真有设置项的页签', async
     '只有成长 / 上网 / 记忆三页是自动保存')
   assert.ok(src.includes("AUTO_SAVE_TABS.has(tab) ? h('p'"),
     '提示行要按当前页签判断')
-  assert.ok(src.includes("AUTO_SAVE_TABS.has(tab) && autoNote ?"),
-    '「已保存」回执也只在有设置项的页签显示')
+  // 2026-10-29 用户：「没保存：不允许修改：bili」和「改完就生效，不需要点保存」挤在一起，
+  // 两句没有联系、也不是同类型的提示。回执与失败框因此都搬到页签栏上方。
+  assert.ok(!src.includes("AUTO_SAVE_TABS.has(tab) && autoNote ?"),
+    '回执不许再塞回页签内容里（会和「改完就生效」混成一堆）')
+  assert.ok(src.includes("h('p', { className: 'ok', style: { margin: '0 0 8px' } }, autoNote)"),
+    '「已保存」回执放在页签栏上方')
   for (const t of ['now', 'home', 'env', 'data']) {
     assert.ok(!src.includes(`AUTO_SAVE_TABS = new Set(['grow', 'bili', 'memory', '${t}'`),
       `${t} 不该加进自动保存页签`)
   }
+})
+
+test('保存失败不再冒充提示行：一句人话 + 一行技术信息 + 自己点掉', async () => {
+  const src = await readFile(CLIENT, 'utf8')
+  // 失败文案先说「不是你填错了」，再给原因；技术字段名只出现在「技术信息」那一行。
+  assert.ok(src.includes('这一项没存上。可能是插件这一版还没接上它'), '失败要说人话')
+  assert.ok(src.includes('不是你填错了'), '不能让用户以为是自己填错了')
+  assert.ok(src.includes('技术信息：${saveFail}'), '技术信息单独一行，别混进人话里')
+  assert.ok(src.includes("onClick: () => setSaveFail('')"), '失败框要点得掉，不能一直挂着')
+  assert.ok(!src.includes('没保存：${e.message}'), '别再把原始报错直接拼在「没保存：」后面')
+  // 回执会自己消失（2.5 秒），不会一直停在页签下面。
+  assert.ok(src.includes('setTimeout(() => setAutoNote(\'\'), 2500)'), '回执要自动消失')
 })

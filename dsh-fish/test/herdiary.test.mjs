@@ -11,11 +11,12 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { registerHerDiary, renderDiary, DIARY_READ_MAX } from '../lib/herdiary.js'
+import { DIARY_BRIEF } from '../lib/persona.js'
 import { writeDaily } from '../lib/store.js'
 
 async function tmpRoot() {
@@ -132,4 +133,36 @@ test('renderDiary：三种结局各说各的话', () => {
   assert.match(renderDiary({ why: '打不开' }), /打不开/)
   assert.match(renderDiary({ dates: ['2026-10-28'] }), /- 2026-10-28/)
   assert.match(renderDiary({}), /还没写过日记/)
+})
+
+// ---------- 身份文档里必须写清「用哪个东西记」（2026-10-29，用户 m01296 A）----------
+// 三天零篇的根因：常驻段只写了「每天我会记一笔」，没写机制。同一页的 SLEEP_BRIEF
+// 写了 growth_commit / refs，她照着能交出来；日记这段没写，就一次也没试过。
+
+test('同日追加太长时留「最后一段」：晚上补的那段不能被截掉（0.6.28）', async () => {
+  const root = await tmpRoot()
+  try {
+    // 早上写一大段，晚上又补一段；合起来超上限
+    await writeDaily('diaryDir', '2026-10-29', '早：' + '字'.repeat(DIARY_READ_MAX), root)
+    await writeDaily('diaryDir', '2026-10-29', '晚：今天她又说了一句', root)
+
+    const out = await toolFor(root).execute({ date: '2026-10-29' })
+    assert.equal(out.found, true)
+    assert.ok(out.text.includes('晚：今天她又说了一句'), '最新那段必须看得见')
+    assert.match(out.text, /当天写了好几段/)
+  } finally {
+    await rm(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 })
+  }
+})
+
+test('DIARY_BRIEF 写了机制：growth_commit + type=diary', () => {
+  assert.match(DIARY_BRIEF, /growth_commit/)
+  assert.match(DIARY_BRIEF, /type=diary/)
+})
+
+test('这段机制句确实进身份文档（selfdoc 的 diary 分支还在）', async () => {
+  const selfdoc = await readFile(new URL('../lib/selfdoc.js', import.meta.url), 'utf8')
+  assert.ok(selfdoc.includes('if (diary) body.push(DIARY_BRIEF'), 'diary 开关仍然决定这一段进不进文档')
+  const src = await readFile(new URL('../lib/persona.js', import.meta.url), 'utf8')
+  assert.ok(src.includes('type=diary'), '机制句在 persona.js 里')
 })

@@ -62,6 +62,39 @@ export const FISH_TOOLS = Object.freeze([
  */
 export const HER_TOOLS = Object.freeze([...FISH_TOOLS, 'read_image'])
 
+/**
+ * 「手边到底有什么」——写进 system prompt 的那一段（2026-10-29，用户 m01276）。
+ *
+ * 为什么光有 restrict/guard 还不够：restrict 按宿主源码只掩码 inherited 层，
+ * 注册在 agent 自己作用域里的工具（dsh-ops 的 ops_*、Agent Teams 那几个）
+ * 挡不掉，会**真的出现在她的工具表里**；宿主老版本还可能连 guard 都没有。
+ * 工具定义进了上下文，模型就会倾向于把它当成「我能用」——唯一还能做的，
+ * 是在提示词里把「哪几样真是我的」说死，并告诉她越界会得到什么回答。
+ *
+ * 与 guard 的话术保持一致：不说「权限/禁止」，只说伸手够不着。她该以为是自己做不到。
+ *
+ * @param {string[]} [names] 这一次真正放行的工具名
+ * @returns {string} 空串表示这一层不挂（收窄关掉了，就别说「只有这几样」）
+ */
+export function toolSurfaceText(names = HER_TOOLS) {
+  const list = [...new Set((names ?? []).map((s) => String(s).trim()).filter(Boolean))]
+  if (!list.length) return ''
+  return [
+    `我手边能用的东西只有这几样：${list.join('、')}。`,
+    '工具表里如果还列着别的名字（比如带 ops_、team_、subagent、workflow、skill 这类），那不是我的：别去调，也别把它们说成我会的事。',
+    '真伸手去用，只会得到一句「这件事我做不到」，还白搭一轮。',
+    '有人问我手上有什么，我按这几样说；没有的就直说没有，不要许诺。',
+  ].join('\n')
+}
+
+/** 提示词里当前该说的那份（registerToolRestrict 每次算完 allow 就刷新）。 */
+let surfaceNow = toolSurfaceText()
+
+/** 读当前提示词段。收窄关着时是空串。 */
+export function currentToolSurface() {
+  return surfaceNow
+}
+
 /** 归一化目录，用于判断"这条会话是不是她的屋子"。Windows 大小写不敏感。 */
 function normDir(p) {
   if (!p) return ''
@@ -143,11 +176,16 @@ export function registerToolRestrict(ctx, { herDir, extra = [], enabled = true, 
   const say = log ?? (() => {})
   if (!enabled) {
     say('[dsh-fish] 工具面收窄：关闭（配置里关掉了）')
+    // 收窄关掉时，提示词里也不能说「只有这几样」——那会跟她眼前看到的对不上。
+    surfaceNow = ''
     onResult?.({ ok: false, applied: 0, why: 'disabled', allow: [] })
     return () => {}
   }
 
   const allow = [...new Set([...HER_TOOLS, ...extra.map((s) => String(s).trim()).filter(Boolean)])]
+  // 先让提示词跟上这一次的白名单，再谈 restrict 挂没挂上：
+  // 就算 restrict 因名字没登记而延后，这一段也已经说清了「多出来的不是你的」。
+  surfaceNow = toolSurfaceText(allow)
   let applied = 0
   let failed = ''
 
@@ -162,24 +200,41 @@ export function registerToolRestrict(ctx, { herDir, extra = [], enabled = true, 
     // 不在 global 层。不传 agent 拿到的是 global view，只有插件自己注册的那几个
     // （实测 7 个，没有 skill）——用它做校验会把 skill 误判成「不存在」。
     try {
-      let set = null
-      try { set = agent?.ctx?.tools?.view?.(agent)?.restrictableNames } catch { set = null }
-      if (!set || typeof set[Symbol.iterator] !== 'function' || set.size === 0) {
-        // 兜底：拿不到就退回 global view（至少还有插件自己那几个）
-        try { set = agent?.ctx?.tools?.view?.()?.restrictableNames } catch { set = null }
-      }
-      if (set && typeof set[Symbol.iterator] === 'function') {
-        const names = [...set].map((x) => String(x)).sort()
-        // 快照只能变多不能变少：0.6.0 真机上宿主还没登记完时只有 1 个名字，
-        // 用它覆盖会把白名单校验搞成「大部分真工具都被判未知」。
-        if (names.length && (!lastKnownTools || names.length > lastKnownTools.length)) {
-          lastKnownTools = names
-        }
-      }
+      if (agent) lastAgent = agent
+      refreshFrom(agent)
     } catch { /* 拿不到就算了，界面会退回只查拼写 */ }
     try {
       if (!isHerAgent(agent, herDir)) return
       const scopedTools = agent?.ctx?.tools
+      // ---- 分两桶（2026-10-29）----
+      // `restrict()` 只认 `restrictableNames`（inherited 层）。own 层看得见却点不了名
+      // （dsh-ops 的 ops_*、别的插件按会话注册的工具都在这里）；把它们塞进 allow，
+      // 宿主会抛 `names unknown global tool "ops_bash"`，整条收窄当场失效。
+      // 所以：restrict 只下发「收得窄的」，guard 与提示词用配置里的全量。
+      // 白名单里写 ops_bash 的意思因此变成「守卫放行它」——它本来就挡不住。
+      const bucket = () => {
+        let restrictable = new Set()
+        let visible = new Set()
+        try {
+          const v = agent?.ctx?.tools?.view?.(agent) ?? null
+          const rn = namesOf(v?.restrictableNames)
+          if (rn.length) restrictable = new Set(rn)
+          const vn = namesOf(v?.visible)
+          if (vn.length) visible = new Set(vn)
+          // 顺手把此刻的工具表记进快照：这一刀落下时它认得的名字，就是白名单该认的名字。
+          if (v) rememberFromView(v)
+        } catch { /* 拿不到就退回全量，交给下面的 catch + 延后重试 */ }
+        // 三桶：收得窄的 / 看得见但点不了名的（own 层）/ 根本还没登记的。
+        // 只有第一种能下给 restrict()；第三种说明宿主还没登记完，必须延后——
+        // 静悄悄只收窄一半，会让她永久少一只手（0.6.0 真机事故）。
+        // 宿主老版本（或 view 没给 visible）只报 restrictableNames：那时没法分辨
+        // 「还没登记」和「own 层」，照旧把全量交给 restrict，让它的报错走延后重试。
+        const split = visible.size > 0 && restrictable.size > 0
+        const forRestrict = split ? allow.filter((n) => restrictable.has(n)) : allow.slice()
+        const missing = split ? allow.filter((n) => !restrictable.has(n) && !visible.has(n)) : []
+        return { restrictable, visible, forRestrict, missing }
+      }
+      let { forRestrict: allowForRestrict, missing: missingNow } = bucket()
       if (!scopedTools?.restrict) {
         failed = '宿主的 agent.ctx 上没有 tools.restrict（版本不支持）'
         say(`[dsh-fish] 工具面收窄失败：${failed}`)
@@ -243,12 +298,15 @@ export function registerToolRestrict(ctx, { herDir, extra = [], enabled = true, 
         try { agent.ctx.effect?.(() => dispose) } catch { /* 拿不到 effect 就靠父级回滚，不致命 */ }
       }
       try {
-        applyRestrict(allow)
+        if (missingNow.length) {
+          throw new Error(`tools.restrict() names unknown global tool "${missingNow[0]}"`)
+        }
+        applyRestrict(allowForRestrict)
         applied += 1
-        say(`[dsh-fish] 工具面收窄：她这条会话只留 ${allow.length} 个工具${guardOk ? '，另有兜底守卫' : ''}`)
+        say(`[dsh-fish] 工具面收窄：她这条会话只留 ${allowForRestrict.length} 个工具${guardOk ? '，另有兜底守卫' : ''}`)
         // 真的挂上了才算数——"注册了"和"生效了"必须分开报，否则自检会说谎。
         // effective 记的是**这次真下给宿主的那份名单**，导出里要跟配置的 allow 分开写。
-        onResult?.({ ok: true, applied, failed, why: 'applied', allow, effective: [...allow], guard: guardOk })
+        onResult?.({ ok: true, applied, failed, why: 'applied', allow, effective: [...allowForRestrict], guard: guardOk })
         return
       } catch (err) {
         // 2026-10-25 真机：宿主先建了她的 agent，插件自己的工具还没在全局层登记完，
@@ -267,15 +325,15 @@ export function registerToolRestrict(ctx, { herDir, extra = [], enabled = true, 
         say(`[dsh-fish] 工具面收窄延后：宿主还没登记完（${msg.slice(0, 120)}）`)
         let tries = 0
         const attempt = () => {
-          let set = null
-          try { set = agent?.ctx?.tools?.view?.(agent)?.restrictableNames ?? null } catch { set = null }
-          const have = set instanceof Set ? set : new Set([...(set ?? [])])
-          if (allow.every((n) => have.has(n))) {
+          const again = bucket()
+          allowForRestrict = again.forRestrict
+          missingNow = again.missing
+          if (!again.missing.length) {
             try {
-              applyRestrict(allow)
+              applyRestrict(allowForRestrict)
               applied += 1
-              say(`[dsh-fish] 工具面收窄：她这条会话只留 ${allow.length} 个工具${guardOk ? '，另有兜底守卫' : ''}`)
-              onResult?.({ ok: true, applied, failed, why: 'applied-late', allow, effective: [...allow], guard: guardOk })
+              say(`[dsh-fish] 工具面收窄：她这条会话只留 ${allowForRestrict.length} 个工具${guardOk ? '，另有兜底守卫' : ''}`)
+              onResult?.({ ok: true, applied, failed, why: 'applied-late', allow, effective: [...allowForRestrict], guard: guardOk })
               return
             } catch (err2) {
               say(`[dsh-fish] 收窄重试没成：${String(err2?.message ?? err2).slice(0, 160)}`)
@@ -336,17 +394,76 @@ export function describeRestrict({ applied = 0, failed = '', allow, why = '' } =
  * 已知边界：preset/own 层的工具可能不在这里，别人机器上会存在「真工具被判未知」，
  * 所以界面不提供强制保存出口，文档写清「名字必须与宿主工具名完全一致」。
  */
-export function knownToolNames(ctx) {
-  // 有快照就用快照（那是真正会被 restrict() 认可的名字）；
-  // 没有就返回 null —— 让调用方只查拼写，别把「还没见过」说成「不存在」。
+export function knownToolNames(_ctx) {
+  // 先现取一次：别的插件可能在 agent 建好之后才注册工具（dsh-ops 就是 attach 时才 publish），
+  // 只用创建那一刻的快照会把这些名字一直判成「不存在」，用户永远存不进白名单。
+  if (lastAgent) refreshFrom(lastAgent)
+  // 有快照就用快照；没有就返回 null —— 让调用方只查拼写，别把「还没见过」说成「不存在」。
   if (lastKnownTools && lastKnownTools.length) return lastKnownTools.slice()
   return null
+}
+
+/**
+ * 她这条会话看得见、但 `restrict()` 点不了名的那些（own 层）。
+ *
+ * 2026-10-29 真机：dsh-ops 的 `ops_bash` / `ops_discover_tools` 就长在这里。
+ * 它们跟「白名单里拼错的字母」是两码事——名字真的存在，只是收窄这把刀够不着。
+ */
+export function ownLayerNames() {
+  return [...seenOwn].sort()
 }
 
 /** 测试用：直接塞一份名字快照（真机上由 agent/created 时取到）。 */
 export function rememberKnownTools(names) {
   const list = Array.isArray(names) ? names.map((x) => String(x)).sort() : []
   lastKnownTools = list.length ? list : null
+  // 单塞一份不许留着上一次的 own 层结论，否则测试之间会串味。
+  ownLayerNow = []
+  seenTools.clear()
+  seenOwn.clear()
+  // 复位快照时也忘了那个 agent：否则下次 knownToolNames() 会立刻从旧 agent 现取一份，
+  // 把刚清掉的名单又灌回来（测试之间会串味）。
+  lastAgent = null
+  for (const n of list) seenTools.add(n)
+}
+
+function namesOf(v) {
+  if (v instanceof Set || v instanceof Map) return [...v.keys()].map((x) => String(x))
+  if (Array.isArray(v)) return v.map((x) => String(x))
+  return []
+}
+
+/**
+ * 从一次 `tools.view(agent)` 里记下两件事（2026-10-29）：
+ *   - 白名单校验要认的名字 = `restrictableNames ∪ visible`；
+ *   - `visible − restrictable` 就是 own 层：看得见、`restrict()` 点不了名。
+ *
+ * 以前只记 `restrictableNames`，于是 ops_bash 这种真名字被判「不存在」，
+ * 用户永远存不进白名单，也放行不了。
+ */
+export function rememberFromView(view) {
+  try {
+    const restrictable = namesOf(view?.restrictableNames)
+    const visible = namesOf(view?.visible)
+    const union = [...new Set([...restrictable, ...visible])].sort()
+    // 只能变多不能变少：0.6.0 真机上宿主还没登记完时只有 1 个名字，
+    // 用它覆盖会把白名单校验搞成「大部分真工具都被判未知」。
+    // 0.6.21 起改成跨 agent 累积——同一个进程里她家、别的工作区、子 agent 的工具表不同，
+    // 只留最后一份会让先注册的工具从名单里掉出去，白名单又报「名字不存在」。
+    for (const n of union) seenTools.add(n)
+    if (seenTools.size) lastKnownTools = [...seenTools].sort()
+    if (visible.length) {
+      const rset = new Set(restrictable)
+      ownLayerNow = visible.filter((n) => !rset.has(n)).sort()
+      for (const n of ownLayerNow) seenOwn.add(n)
+    } else {
+      // 这次 view 没给 visible：不知道就别说上一局的话，免得设置页提示串味。
+      ownLayerNow = []
+    }
+    return { restrictable, visible, ownLayerNow: ownLayerNow.slice() }
+  } catch {
+    return { restrictable: [], visible: [], ownLayerNow: [] }
+  }
 }
 
 /**
@@ -390,6 +507,29 @@ let lastState = { ok: false, applied: 0, why: 'not attempted', allow: HER_TOOLS.
 // 只有拿到过某个 agent 的全局视角才有值；plugin 自己的 view() 只看得到本插件注册的那几个，
 // 拿它校验会把 `skill` 这类宿主工具判成不存在，所以**不用它兜底**。
 let lastKnownTools = null
+// visible − restrictable：看得见、`restrict()` 点不了名（own 层，比如 dsh-ops 的 ops_*）。
+let ownLayerNow = []
+// 累积式记录：同一个进程里会有好几个 agent（她的家、别的工作区、子 agent），
+// 每个 agent 的 own 层工具不一样；只留最后一份会让先注册的那些从名单里消失。
+// 这份名单只用来挡「拼错的名字」，宁可多认，也不能把真名字判成不存在。
+const seenTools = new Set()
+const seenOwn = new Set()
+// 最近一个被登记的 agent：白名单校验时用它现取一次 view，拿到「此刻」的工具表。
+// 只靠 agent/created 那一刻的快照不够——别的插件常常在 agent 建好之后才注册工具
+// （dsh-ops 就是 attach 时才 publish），那一刻的快照里没有它们。
+let lastAgent = null
+
+/** 内部：拿某个 agent 此刻的视角并记下来。拿不到就什么都不做。 */
+function refreshFrom(agent) {
+  try {
+    let view = null
+    try { view = agent?.ctx?.tools?.view?.(agent) ?? null } catch { view = null }
+    if (!view) {
+      try { view = agent?.ctx?.tools?.view?.() ?? null } catch { view = null }
+    }
+    if (view) rememberFromView(view)
+  } catch { /* 拿不到就算了，界面会退回只查拼写 */ }
+}
 
 /** 读最近一次收窄结论（自检用）。 */
 export function readRestrictState() {

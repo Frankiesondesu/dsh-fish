@@ -33,7 +33,7 @@ import { dateKey } from './settings.js'
 import { deriveSelf } from './derive.js'
 import { writeInboxFile } from './inbox.js'
 import { refreshSelfDoc } from './selfdoc.js'
-import { Reject } from './schema.js'
+import { Reject, tsMs } from './schema.js'
 
 import { defineTool } from './tool.js'
 import { guardWrite } from './tenant.js'
@@ -73,6 +73,32 @@ export function lettersToday(events, dk = dateKey()) {
     if (String(e.text ?? '').startsWith(`letter:${dk}:`)) n += 1
   }
   return n
+}
+
+/**
+ * 某段时间里她留的话（0.6.16，用户要求「留话也做」）。
+ *
+ * 出门/请神期间 her_leave 照样能用——它写的是**家里**的事件流与信箱，
+ * 参数只有文本，兜底守卫不会拦。出门页据此把「她在外头留的那几句」摊开，
+ * 回来的时候人能看见这一趟她主动说过什么。
+ *
+ * @param {Array} events 她家的事件流
+ * @param {{since?:number, sessionId?:string, limit?:number}} opts
+ */
+export function lettersSince(events, { since = 0, sessionId = '', limit = 6 } = {}) {
+  const ids = letterIds(events)
+  const at = Number(since) || 0
+  const sid = String(sessionId ?? '')
+  const out = []
+  for (const e of events ?? []) {
+    if (e?.type !== 'utterance') continue
+    if (!ids.has(String(e.id ?? ''))) continue
+    if (at && tsMs(e) < at) continue
+    if (sid && String(e.sessionId ?? '') !== sid) continue
+    out.push({ id: String(e.id ?? ''), ts: tsMs(e), text: String(e.text ?? '').slice(0, 200) })
+  }
+  const cap = Math.max(1, Math.min(20, Number(limit) || 6))
+  return out.slice(-cap)
 }
 
 /**
@@ -128,8 +154,7 @@ export async function leaveLetter(root, text, { log, sessionId = '' } = {}) {
   }
 }
 
-/** 注册 her_leave 工具。 */
-export function registerLetter(ctx, deps = {}) {
+/** 注册 her_leave 工具。 */export function registerLetter(ctx, deps = {}) {
   const root = deps.root ?? rootDir()
   return ctx.tools.register(
     defineTool({

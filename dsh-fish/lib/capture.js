@@ -22,6 +22,8 @@ import { toJsonSchema } from './toolschema.js'
 import { inWake } from './wakewin.js'
 import { refreshSelfDoc } from './selfdoc.js'
 import { guardWrite } from './tenant.js'
+import { activeOf, readOutings } from './outing.js'
+import { tripKey } from './keepsake.js'
 
 /**
  * 防注入：把不可信的第三方文本包成"素材"。
@@ -144,10 +146,21 @@ export function registerCapture(ctx, deps = {}) {
             if (!config.diary.enabled) return { ok: false, id: '', note: '今天不写日记。' }
             const dk = dateKey()
             const file = await writeDaily('diaryDir', dk, text, root)
+            // 这一篇是不是出门那趟写的（0.6.17 旅行日记）：只有「进行中的出门会话」
+            // 才打趟次标记，家里写的不打。日记本体仍然写进同一个 diary/YYYY-MM-DD.md，
+            // 标记只进 meta，界面按标记把这一趟的几篇聚在一起。
+            let trip = ''
+            try {
+              const { outings } = await readOutings(root)
+              const active = activeOf({ outings })
+              if (active?.sessionId && String(active.sessionId) === String(who.sessionId ?? '')) {
+                trip = tripKey(active)
+              }
+            } catch { trip = '' }
             // source 必须是 system：schema 规定 tool 只能写 HER_TYPES，
             // meta 写错成 'tool' 会被 NOT_HER_TYPE 拒掉 —— 日记就会变成"写下了但没标记"。
             await appendEvent(
-              { type: 'meta', text: `diary:${dk}`, sessionId: who.sessionId },
+              { type: 'meta', text: `diary:${dk}${trip ? ` trip:${trip}` : ''}`, sessionId: who.sessionId },
               { ...stamp, source: 'system' },
               root,
             )

@@ -148,10 +148,10 @@
 | `config.json` | 生长环境 | 可以，也可以走设置页 |
 | `owner.json` | 主人身份（0600） | 可以 |
 | `diary/YYYY-MM-DD.md` | 她的日记 | 看设置里给不给你看 |
-| `diary/archive/YYYY-MM-DD.md` | 同一天写第二遍时，前一遍的原文（0.6.4 起） | — |
+| `diary/archive/YYYY-MM-DD.md` | 0.6.4–0.6.27 留下的旧稿归档（0.6.28 起不再新增） | — |
 | `out/YYYY-MM-DD.md` | 她刷完站写的东西 | — |
 
-同一天写两次日记时，第二遍不再覆盖第一遍：旧稿先整份挪到 `diary/archive/<日期>.md`，再写新的。观测台、`/dsh-fish/diary`、`listDiary` 仍然只读当天的顶层文件，所以面板上看到的是最新那版，旧版只留在归档目录里；内容完全一样时不动归档。
+同一天写两次日记时，第二遍接在第一遍后面（中间一行 `---`），两段都留在 `diary/<日期>.md` 里；内容与最后一版完全一样时不追加。观测台、`/dsh-fish/diary`、`listDiary` 仍然一天一页，**跨天**才出现翻页键，同一天的几段合成同一页。`diary/archive/` 里 0.6.4–0.6.27 的旧稿原样保留，只是新写入不再产生归档。
 
 `state.json` 是派生品这条由测试守住：删掉它 → `rebuild()` → 内容与之前一致。
 
@@ -242,16 +242,17 @@ lib/
   status.js     「现在在干什么」的旁观者视角
   log.js        插件自己的运行日志
   selfcheck.js  环境自检
+  selfupdate.js 自带升级：下载 GitHub tag 包 → 解开验包 → 关应用换包 → 自动重开
   update.js     检查更新（只在点按钮时出网，六条源并发取最新版本号）
   backup.js     整包备份 / 恢复
   reset.js      把她放回第一天（封存，不删）
   readme.js     数据文件夹里的那份「说明.md」
-  restrict.js   只让她看见自己的工具
+  restrict.js   只让她看见自己的工具（收窄 + 兜底守卫 + 提示词里的「手边有什么」）
   tool.js       插件自己注册工具时用的定义函数
   toolschema.js 简写参数 DSL → 标准 JSON Schema
   observe.js    宿主侧 JSON API（/dsh-fish/state、/events、/beliefs、/diary、/config、/wake、/browse、/reports、/update）
   client.js     浏览器半边：设置 → 大肥鱼
-test/           745 个测试，node --test 全绿
+test/           883 个测试，node --test 全绿
 ```
 
 ## 跑测试
@@ -291,7 +292,15 @@ node --test                     # 在插件目录里跑（不带参数，Node �
 
 装完**重启 DSH**，设置 → 大肥鱼。
 
-想查有没有新版：设置 → 大肥鱼 → **插件** → 点「检查更新」。它只在点按钮那一下出网（六条源并发取最新版本号，国内通哪条算哪条），插件跑起来之后**不会**自己去查、也不会自动装。同一张卡里还有个 GitHub 入口，代码、更新记录、怎么装都在那边。
+想查有没有新版：设置 → 大肥鱼 → **插件** → 点「检查更新」。它只在点按钮那一下出网（六条源并发取最新版本号，国内通哪条算哪条），插件跑起来之后**不会**自己去查。
+
+**查到新版可以直接在这儿升级**（0.6.14 起）：点「下载 vX」→ 下载并校验 → 点「现在重启并安装」→ 应用自己关掉、换包、重开。中间有两次确认，没点确认什么都不会发生：第一次只下载，不碰现有安装；第二次才关应用。
+
+- 下载走 GitHub 的 tag 包（`codeload` 直连；`ghproxy.net` / `ghfast.top` 两个镜像走 `github.com/…/archive/refs/tags/v<ver>.tar.gz`——镜像不认 codeload 地址，会回 403。单源 25 秒、整批 60 秒，断了换下一个）。下载完**先解开验包**——包名、版本、`lib/index.js` 都在才算成功；镜像回个 HTML 错误页、或缓存滞后给了旧版本，都会被拒，半截文件不落盘。
+- 失败会写清哪条源、什么原因，卡片里留「重试下载」，不用刷新页面。
+- 安装交给一个独立脚本做（数据目录 `updates/install-v<ver>.cmd`）：等应用退出 → 备份 profile 的 `package.json` / `pnpm-lock.yaml` / 插件目录 → 用应用自带的 node/pnpm 装**刚才下载并验过的那只本地包**（`add "file:<数据目录>/updates/dsh-fish-v<ver>.tgz"`）→ 核对装上的版本 → 失败就还原备份 → 重开应用。日志在 `updates/last.log`，界面上能看到最后几行。不直接写 `github:` spec，是因为 pnpm 得跑 `git ls-remote` 打 `github.com:443`，国内实测 `Connection was reset`；本地包零网络。那个 `.tgz` 会留在 `updates/` 里，之后 `pnpm install` 还要用它。
+- **开发版不升级**：依赖写的是 `link:` / `file:`（装到源码目录那种）时按钮不会出现，服务端也会拒——那会把源码目录换成下载包。非桌面版（拿 `node` 跑起来的）同样拒绝安装：换上去却没有能重开的 exe，等于把人关在门外。
+- 同一张卡里还有个 GitHub 入口（「或去 GitHub 手动下载」），代码、更新记录、怎么装都在那边。
 
 > 路径里带中文时，用 ASCII 目录联接（junction）指过去更稳：先 `fs.symlinkSync(真目录, ASCII 别名, 'junction')`，再 `link:<ASCII 别名>`。用 `mklink /J` 接中文目标路径常把目录名写成乱码，随后 `MODULE_NOT_FOUND`。
 
@@ -305,7 +314,7 @@ node --test                     # 在插件目录里跑（不带参数，Node �
 P1（骨架）：事件流、派生、阶段门、生物钟、工具、冷落检测、日记、观测台。
 P2（她真的会刷 B 站并写报告）：`lib/bili.js` 只读客户端 + `lib/browse.js` 选题筛读 + `lib/look.js` 的 `bili_look` 工具 + `lib/report.js` 写稿，已接进生物钟。
 
-**已有 745 个测试全绿**，真接口跑通过一轮（10.8s，含首页+详情+评论+弹幕）。
+**已有 883 个测试全绿**，真接口跑通过一轮（10.8s，含首页+详情+评论+弹幕）。
 
 `browse.enabled` 默认 **true**（装好就能用）；不想让她上网就在设置 → 大肥鱼里关掉，关掉后定时器一次都不会调 B 站接口。
 
