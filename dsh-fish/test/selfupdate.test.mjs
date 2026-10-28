@@ -454,7 +454,7 @@ test('非桌面版（execPath 是 node）不许装：没有能重开的目标就
       root: join(base, 'data'),
       current: '0.6.13',
       moduleUrl,
-      exe: 'C:\\Program Files\\nodejs\\node.exe',
+      exe: 'C:/Program Files/nodejs/node.exe',
       platform: 'win32',
       downloadImpl: async () => ({ ok: true, bytes: 1, source: '源' }),
     })

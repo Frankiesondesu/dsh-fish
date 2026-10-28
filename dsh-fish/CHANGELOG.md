@@ -1,3 +1,17 @@
+## 0.7.2 — 2026-10-29
+
+又只修 CI，产品代码仍然没动（功能与 0.7.0 / 0.7.1 一致）。
+
+0.7.1 之后 Linux 上还剩一条红：`test/selfupdate.test.mjs` 的「非桌面版（execPath 是 node）不许装」。原因还是平台假设：
+
+- 用例里把 exe 写成 `'C:\\Program Files\\nodejs\\node.exe'`，产品判断是 `path.basename(exe)` 是否等于 `node(\\.exe)?`。
+- Windows 上 `path.basename` 认得反斜杠，得到 `node.exe`，于是走进「不是桌面版」分支 —— 测试通过。
+- Linux 上反斜杠不是分隔符，basename 就是整串，判不成 node，于是继续往下真的去 spawn `cmd.exe`，报 `spawn cmd.exe ENOENT`。
+
+修法：exe 改成 `'C:/Program Files/nodejs/node.exe'`。正斜杠在两个平台上 `path.basename` 都认得，所以两边都稳定走进「不是桌面版」分支。
+
+回归：`node --test` 全量 **883 passed / 0 failed**；本机 `test/selfupdate.test.mjs` 28/28。
+
 ## 0.7.1 — 2026-10-29
 
 只修 CI，产品代码没动。
