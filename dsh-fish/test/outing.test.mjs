@@ -196,6 +196,17 @@ test('建会话失败时撤掉空壳，否则她会一直「挂在门外」', as
   }
 })
 
+test('出门页签的开关不跟安装路径走：正式版里 .dev 不在就得藏起来', async () => {
+  // 2026-10-29 用户 m00608：早先按「代码路径里有没有 node_modules」猜安装形态，
+  // 发布包被解包到插件目录 / 经 junction 指过去时路径里没有这一段，页签就漏给了所有人。
+  const src = readFileSync(new URL('../lib/observe.js', import.meta.url), 'utf8')
+  assert.ok(!src.includes('IS_DEV_INSTALL'), '不能再按安装形态算一次就定死')
+  assert.ok(!src.includes("includes('node_modules')"), '安装路径判定会把页签漏给正式版')
+  assert.ok(src.includes('dev: await devMode(root)'), '/outing 的 dev 要跟 .dev 开关走')
+  // 同一个判据也被「去刷 B 站」用：没有 .dev 时两处一起藏，不各算各的。
+  assert.ok(src.includes("from './devmode.js'"), '要复用 devmode 那个文件开关')
+})
+
 test('已经绑了会话的那条不能被当空壳撤掉', async () => {
   const { root, done } = tmp()
   try {
