@@ -111,7 +111,7 @@ test('幂等：重复 bootstrap 不会再建一个会话', async () => {
   } finally { await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) }
 })
 
-test('她把会话归档了：下次启动重建一个新的', async () => {
+test('她把会话归档了：不自动重建，明说要才重建（0.6.8）', async () => {
   const root = await tmpRoot()
   try {
     const { ctx, sessions } = fakeCtx()
@@ -124,10 +124,64 @@ test('她把会话归档了：下次启动重建一个新的', async () => {
     ws.sessionIds = []
     ctx.get('workspaceRegistry').archivedSessionIds = [oldId]
 
+    // 第一次：认出来是归档态，不重建，并把这件事记进 home.json
+    const ses = await ensureTalkSession(ctx, { root, wsId: a.wsId })
+    assert.equal(ses.ok, false, '归档之后不该自动重开')
+    assert.equal(ses.archived, true)
+    assert.match(ses.why, /收起来/)
+    assert.equal(String((await homeStatus(root)).status), 'archived', '归档态要落盘，重启之后也认')
+
+    // 第二次（模拟重启）：home.json 已经是 archived，宿主这次什么都不说，也不重建
+    const again = await ensureTalkSession(ctx, { root, wsId: a.wsId })
+    assert.equal(again.ok, false)
+    assert.equal(again.archived, true)
+
+    // 明说要：建一条新的，归档态被清掉
+    const forced = await ensureTalkSession(ctx, { root, wsId: a.wsId, force: true })
+    assert.equal(forced.ok, true, forced.why)
+    assert.notEqual(forced.sessionId, oldId, 'force 之后必须是新的一条')
+    assert.equal(forced.reused, false)
+    assert.equal(String((await homeStatus(root)).status), '', '重开之后归档标记要清掉')
+    assert.notEqual(forced.sessionId, oldId)
+  } finally { await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) }
+})
+
+test('刚建出来的会话：宿主索引还没列出来也先复用（10 分钟宽限）', async () => {
+  const root = await tmpRoot()
+  try {
+    const { ctx, sessions, created } = fakeCtx()
+    const a = await bootstrapHome(ctx, { root })
+    assert.equal(a.ok, true, a.why)
+
+    // 宿主索引延迟：sessionIds 里暂时查不到，但 home.json 的 createdAt 是刚刚
+    const ws = sessions.get(a.wsId)
+    ws.sessionIds = []
+
     const ses = await ensureTalkSession(ctx, { root, wsId: a.wsId })
     assert.equal(ses.ok, true, ses.why)
-    assert.notEqual(ses.sessionId, oldId, '旧会话没了就得建新的')
-    assert.equal(ses.reused, false)
+    assert.equal(ses.sessionId, a.sessionId, '宽限期内必须复用，不能每条重启都新建一条')
+    assert.equal(ses.reused, true)
+    assert.equal(created.length, 1, '不该多建一条')
+  } finally { await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) }
+})
+
+test('同一个 root 的并发建会话只飞一次（启动链路与「第一次说话」撞车）', async () => {
+  const root = await tmpRoot()
+  try {
+    const { ctx, created } = fakeCtx()
+    const a = await bootstrapHome(ctx, { root })
+    assert.equal(a.ok, true, a.why)
+    // 清掉 home.json 模拟「会话丢了，两条路径同时发现」
+    await rm(join(root, 'home.json'), { force: true })
+
+    const [x, y] = await Promise.all([
+      ensureTalkSession(ctx, { root, wsId: a.wsId }),
+      ensureTalkSession(ctx, { root, wsId: a.wsId }),
+    ])
+    assert.equal(x.ok, true, x.why)
+    assert.equal(y.ok, true, y.why)
+    assert.equal(x.sessionId, y.sessionId, '并发调用必须拿到同一条会话')
+    assert.equal(created.length, 2, '启动时那条 + 并发这一条')
   } finally { await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) }
 })
 
@@ -256,7 +310,7 @@ test('talkSessionId：没有 workspaceRegistry 时交白卷，不建任何会话
   } finally { await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) }
 })
 
-test('talkSessionId：记下的会话被归档了，会重建一次而不是原地报错', async () => {
+test('talkSessionId：记下的会话被归档了，不自动重建，交白卷并说清楚（0.6.8）', async () => {
   const root = await tmpRoot()
   try {
     const { ctx, reg } = fakeCtx()
@@ -266,9 +320,10 @@ test('talkSessionId：记下的会话被归档了，会重建一次而不是原�
     // 模拟：那条会话在宿主侧被归档（判活口径看的是 registry.archivedSessionIds）
     reg.archivedSessionIds = [first]
 
-    const second = await talkSessionId(ctx, { root })
-    assert.ok(second, '应当重建出一条可用的会话')
-    assert.notEqual(second, first, '重建的必须是新的那条')
+    const notes = []
+    const second = await talkSessionId(ctx, { root, log: (m) => notes.push(String(m)) })
+    assert.equal(second, '', '收起来的那一局不该被悄悄重开')
+    assert.ok(notes.some((n) => /收起来/.test(n)), '要用人话说清楚为什么没会话')
   } finally { await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) }
 })
 

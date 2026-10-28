@@ -47,22 +47,38 @@ test('两张原理图在包里，而且是完整的 svg', async () => {
 test('出图走服务端白名单路由，客户端不内联图', async () => {
   const ob = await readFile(OBSERVE, 'utf8')
   assert.ok(ob.includes("['/media', async (req, res)"), '必须有 /media 路由')
-  assert.ok(ob.includes('/^\\/dsh-fish\\/media\\/(principle-[a-z]+\\.svg)$/'), '文件名必须白名单匹配')
-  assert.ok(ob.includes("'content-type': 'image/svg+xml; charset=utf-8'"), '必须声明 svg 类型')
+  // 2026-10-28：反馈页的交流群二维码也走这条白名单路由（只多放一个文件名，仍不做通用文件服务）。
+  assert.ok(ob.includes('/^\\/dsh-fish\\/media\\/((?:principle-[a-z]+\\.svg)|(?:feedback-qr\\.jpg))$/'), '文件名必须白名单匹配')
+  // 2026-10-28 起同一条路由既出 svg 也出 jpg，类型按扩展名给，不再是一句写死的常量。
+  assert.ok(ob.includes("'image/svg+xml; charset=utf-8'"), '必须声明 svg 类型')
+  assert.ok(ob.includes("'image/jpeg'"), '二维码那张必须声明 jpeg 类型')
   assert.ok(ob.includes('fileURLToPath(new URL(`../media/'), '必须从包内 media/ 读文件')
 
   const cl = await readFile(CLIENT, 'utf8')
   assert.ok(cl.includes('`${API}/media/principle-loop.svg`'), '图一必须走 /media 路由')
   assert.ok(cl.includes('`${API}/media/principle-memory.svg`'), '图二必须走 /media 路由')
+  assert.ok(cl.includes('`${API}/media/feedback-qr.jpg`'), '反馈页二维码必须走 /media 路由，不引外链')
   assert.ok(!cl.includes('<svg'), '客户端里不许内联 SVG（会让 bundle 无谓变大）')
 })
 
-test('页签顺序：插件 → 原理 → 数据', async () => {
+test('页签顺序：插件 → 原理 → 数据 → 反馈 → 出门（发布版才藏）', async () => {
   const cl = await readFile(CLIENT, 'utf8')
   const tabs = cl.match(/const TABS = \[([\s\S]*?)\n {6}\]/)
   assert.ok(tabs, '必须能定位到 TABS')
   const ids = [...tabs[1].matchAll(/\['([a-z]+)', '[^']+'\]/g)].map((m) => m[1])
-  assert.deepEqual(ids, ['now', 'grow', 'home', 'bili', 'memory', 'env', 'principle', 'data'])
+  // 2026-10-28 用户要求加第 9 个页签「反馈」（开发者 QQ + 交流群二维码），排在最后；
+  // 同一天加的「出门」页还要真机跑一段时间，只在开发副本里露出来，发布版由 devMode 过滤掉。
+  assert.deepEqual(ids, ['now', 'grow', 'home', 'bili', 'memory', 'env', 'principle', 'data', 'feedback', 'outing'])
+  // 藏的是入口，不是功能：发布版按 devMode 过滤，本机开发副本照常显示。
+  assert.ok(cl.includes('const [devMode, setDevMode] = useState(null)'), '要有 devMode 开关')
+  assert.ok(cl.includes("TABS.filter(([id]) => id !== 'outing' || devMode === true)"), '出门页要按 devMode 过滤')
+  assert.ok(cl.includes('setDevMode(o?.dev === true)'), '挂载时要从 /outing 读 dev')
+  // 收起的是入口，不是功能：说明、页面、渲染树都还在，重新放出来不用重写。
+  assert.ok(cl.includes("outing: '出门："), 'TAB_HELP 必须有出门页说明')
+  assert.ok(/showTab\('outing'\) \? outingPage : null/.test(cl), '出门页要挂进渲染树')
+  assert.ok(cl.includes('const outingPage = h('), '出门页面代码要保留')
+  // 动作面板不是配置：不许进 AUTO_SAVE_TABS（否则会多一句「改完就生效」的错误提示）
+  assert.ok(!/AUTO_SAVE_TABS = new Set\(.*outing/.test(cl), '出门不进自动保存页签')
   assert.ok(cl.includes("principle: '原理："), 'TAB_HELP 必须有原理页说明')
   assert.ok(cl.includes("showTab('principle') ? principlePage : null"), '必须真的挂上渲染')
   assert.ok(cl.indexOf("showTab('principle')") > cl.indexOf("showTab('env')"), '原理在插件之后')

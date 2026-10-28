@@ -14,6 +14,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises'
+import { writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import {
@@ -27,6 +28,7 @@ import {
   makeLogger,
   redactConfig,
   scrub,
+  tailEvents,
   tailLog,
 } from '../lib/log.js'
 import { DEFAULTS } from '../lib/settings.js'
@@ -173,4 +175,64 @@ test('ctx 里没有 logger 也能用（测试环境与极老宿主）', async ()
 
 test('日志没有开关：DEFAULTS 里不存在 log 这组配置', () => {
   assert.equal('log' in DEFAULTS, false, '有开关就等于允许"出事那一刻才发现日志关着"')
+})
+
+test('tailEvents：给事件流尾部，且丢掉被截断的半截首行', async () => {
+  const root = await tempRoot()
+  const file = join(root, 'events.jsonl')
+  const rows = []
+  for (let i = 0; i < 8; i += 1) rows.push(JSON.stringify({ type: 'meta', text: `watched:2026-10-28 BV1xx411c7m${i}` }))
+  writeFileSync(file, rows.join('\n') + '\n', 'utf8')
+  const ev = tailEvents(root, { lines: 3 })
+  assert.equal(ev.exists, true)
+  assert.equal(ev.lines.length, 3)
+  assert.match(ev.lines[2], /BV1xx411c7m7/)
+  // 没有这个文件也要如实说没有，不抛
+  const none = tailEvents(join(root, 'nope'))
+  assert.equal(none.exists, false)
+  assert.deepEqual(none.lines, [])
+})
+
+test('导出里把「配置允许」与「实际生效」分开写（另一台机器的排查就栽在只有前者）', async () => {
+  const root = await tempRoot()
+  const text = buildBundle(root, {
+    version: '0.6.2',
+    restrict: { applied: 1, allow: ['growth_commit', 'her_recall', 'read_image'], effective: ['growth_commit'], guard: true, why: 'applied' },
+  })
+  assert.match(text, /配置允许 3 个/)
+  assert.match(text, /实际生效: 1 个（growth_commit）/)
+  assert.match(text, /名单里没生效的: her_recall \/ read_image/)
+})
+
+test('没收窄时导出明说「她看得见全部工具」，不是「允许 0 个」', async () => {
+  const root = await tempRoot()
+  const text = buildBundle(root, {
+    version: '0.6.2',
+    restrict: { applied: 0, allow: ['growth_commit', 'read_image'], effective: [], guard: true, why: 'deferred' },
+  })
+  assert.match(text, /未收窄/)
+  assert.match(text, /实际生效: 没收窄 —— 这一局她看得见全部工具/)
+})
+
+test('导出里带模型与图像输入（看不见画面有一半原因是模型不吃图）', async () => {
+  const root = await tempRoot()
+  const yes = buildBundle(root, { model: { provider: 'deepseek', model: 'v4-flash', imageInput: true } })
+  assert.match(yes, /模型: deepseek \/ v4-flash · 图像输入: 支持/)
+  const no = buildBundle(root, { model: { provider: 'x', model: 'y', imageInput: false } })
+  assert.match(no, /图像输入: 不支持/)
+  // 说不准就写说不准，不能替人家宣布「不支持」
+  const maybe = buildBundle(root, { model: { provider: '', model: '', imageInput: null, why: '读不到' } })
+  assert.match(maybe, /图像输入: 说不准/)
+})
+
+test('导出里带事件流尾部：watched: 这种计数只在事件流里，日志文件里一个字都没有', async () => {
+  const root = await tempRoot()
+  logBoot(root, '0.6.2 · test')
+  writeFileSync(join(root, 'events.jsonl'), JSON.stringify({ type: 'meta', text: 'watched:2026-10-28 BV1xx411c7mD' }) + '\n', 'utf8')
+  const text = buildBundle(root, { version: '0.6.2', lines: 5, eventLines: 5 })
+  const iEv = text.indexOf('--- 事件流')
+  const iLog = text.indexOf('--- 日志')
+  assert.ok(iEv > 0, '要有事件流段')
+  assert.ok(iLog > iEv, '事件流在日志前面')
+  assert.match(text, /watched:2026-10-28 BV1xx411c7mD/)
 })

@@ -17,23 +17,28 @@ import { registerCapture } from './capture.js'
 import { registerLook } from './look.js'
 import { registerSpeak } from './speak.js'
 import { registerRecall } from './recall.js'
+import { registerHerDiary } from './herdiary.js'
 import { registerWatch } from './watch.js'
 import { registerLetter } from './letter.js'
 import { registerObserve } from './observe.js'
 import { startScheduler } from './scheduler.js'
+import { registerTurns } from './turns.js'
 import { bootstrapHome, homeStatus, wakeIfBlank } from './home.js'
+import { noteRoot } from './homes.js'
 import { writeSelfDoc } from './selfdoc.js'
+import { claimRoot, beatRoot, releaseRoot, HEARTBEAT_MS } from './tenant.js'
 import { registerToolRestrict } from './restrict.js'
 // `clearWakeSection` 在 dispose 里用：它挂在 system prompt 段上，是个模块级变量，
 // 停用时不清的话下次启用会带着上一次的残留（2026-10-25）。
 import { clearWakeSection, registerIdentity } from './identity.js'
+import { registerPossession } from './possess.js'
 
 import { logBoot, makeLogger } from './log.js'
 
 export const name = 'dsh-fish'
 
 /** 版本号：只用于日志导出（排查时第一件事是确认跑的是哪一版）。 */
-export const VERSION = '0.6.1'
+export const VERSION = '0.6.9'
 
 // ⚠️ 一个数组写全，不要拆成对象
 export const inject = ['sessionController', 'tools', 'webServer', 'connection']
@@ -50,6 +55,10 @@ export function apply(ctx, baseConfig = {}) {
   // 工具面收窄的结果（给自检读）。applied 是"真的挂上过几次"，
   // 不是"注册了没有"——注册了但没匹配到 agent 等于没生效，这两件事必须分开。
   let restrictState = { ok: false, applied: 0, why: 'not attempted', allow: [] }
+  // 多租户（2026-10-28 m01319）：这个对象是「这个实例认哪个家、它还是不是房主」的唯一真相，
+  // 工具注册时按引用传下去 —— boot 之后填进来，工具执行时现读，不做拷贝。
+  const tenancy = { root, herDir: '', tenant: { ok: true, instanceId: '', why: '' } }
+  let heartbeat = null
 
   async function boot() {
     logBoot(root, `${VERSION} · ${process.version} · ${process.platform}`)
@@ -57,7 +66,68 @@ export function apply(ctx, baseConfig = {}) {
     // 她自己的房间必须先存在：她的会话 cwd 指向这里（不是 root），
     // 这样她不会一睁眼就站在自己的 events.jsonl 旁边。
     const herDir = await ensureHer(root)
+
+    // ---- 一个 root 只认一个实例（2026-10-28 m01319）----
+    // root 是进程级解析的：两个工作区如果都落到同一个家，光看调用者 cwd 分辨不出来
+    // （两边 cwd 都在这个 root 里，校验会同时通过）。所以加载时先占位：
+    // 谁先占谁是房主；后进来的认出来之后**不写也不崩** —— 她还能说话，只是不落盘。
+    try {
+      const claim = await claimRoot(root, { version: VERSION })
+      tenancy.tenant = claim
+      tenancy.herDir = herDir
+      if (!claim.ok) {
+        logger.error(`[dsh-fish] ${claim.why}`)
+      } else if (claim.instanceId) {
+        const id = claim.instanceId
+        heartbeat = setInterval(() => {
+          beatRoot(root, id)
+            .then((still) => {
+              if (still === false && tenancy.tenant.ok !== false) {
+                // 续不上 = 家被别人接管了。从此不再写，也不再抢回来（否则两边来回覆盖）。
+                tenancy.tenant = {
+                  ok: false,
+                  instanceId: id,
+                  why: '这个家已经被另一个实例接管了，之后不再写入。',
+                }
+                logger.warn('[dsh-fish] 占用权丢了，停止写入')
+              }
+            })
+            .catch(() => {})
+        }, HEARTBEAT_MS)
+        heartbeat.unref?.()
+      }
+    } catch (err) {
+      logger.warn('[dsh-fish] 占用声明失败，按无冲突继续', err?.message ?? err)
+      tenancy.herDir = herDir
+    }
+
     const { events } = await readEvents(root)
+
+    // ---- 换家留痕（2026-10-28 房客日志 m01863）----
+    // 换 root 就是换家：老家的数据留在原地，跟新家没有任何关系。这句话
+    // 用户最容易误解成「搬家」，于是改成配置之后发现侧栏多出一间屋、旧的还在。
+    // 这里只做两件事：把「这次住哪」记进数据目录之外的登记表；换了就写一条
+    // meta 事件说明从哪到哪。**不迁移、不删除、不合并**。
+    try {
+      const moved = await noteRoot(root)
+      tenancy.homes = moved
+      if (moved.changed) {
+        const last = events[events.length - 1]
+        const day = Number(last?.day ?? 1) || 1
+        const stage = Number(last?.stage ?? 1) || 1
+        logger.warn(`[dsh-fish] 家换了：${moved.from} → ${moved.to}`)
+        await appendEvent(
+          {
+            type: 'meta',
+            text: `家换了：${moved.from} → ${moved.to}。这不是搬家——旧家的东西还在旧地方，没有并过来；这边从一开始就是新的。`,
+          },
+          { day, stage, source: 'system' },
+          root,
+        )
+      }
+    } catch (err) {
+      logger.warn('[dsh-fish] 换家记录失败', err?.message ?? err)
+    }
 
     // 首次启动播种：她最初的那一点点性格，是**第一个事实**，不是可调参数。
     // 之所以写成事件而不是配置项：配置项会被"打开设置页改一下"，
@@ -113,7 +183,7 @@ export function apply(ctx, baseConfig = {}) {
     // `agent.ctx.systemPrompt.section(...)`：system 角色、不进历史、界面上看不到。
     // 顺序：先把文本落盘（identityText 从文件读），再注册监听，最后才建她的会话。
     try {
-      const pre = await writeSelfDoc(root, { log: (...a) => logger.warn(...a) })
+      const pre = await writeSelfDoc(root, { log: (...a) => logger.warn(...a), tenant: tenancy.tenant })
       if (!pre.ok) logger.warn(`[dsh-fish] 身份文本写不出来：${pre.why}`)
     } catch (err) {
       logger.warn('[dsh-fish] 身份文本预写失败', err?.message ?? err)
@@ -123,6 +193,16 @@ export function apply(ctx, baseConfig = {}) {
       if (typeof off === 'function') disposers.push(off)
     } catch (err) {
       logger.warn('[dsh-fish] 身份段没挂上', err?.message ?? err)
+    }
+
+    // ---- 请神：冷会话补挂（2026-10-28）----
+    // 只在 possessions.json 里有一条 active 记录、且新起来的这条会话对得上时挂。
+    // 热会话（现在就开着的那条）由设置页的 /possession 路由直接挂，不等这里。
+    try {
+      const off = registerPossession(ctx, { root, herDir, log: (...a) => logger.info(...a) })
+      if (typeof off === 'function') disposers.push(off)
+    } catch (err) {
+      logger.warn('[dsh-fish] 请神补挂没挂上', err?.message ?? err)
     }
 
     let home = { ok: false, why: 'not attempted', wsId: '', sessionId: '' }
@@ -146,20 +226,32 @@ export function apply(ctx, baseConfig = {}) {
     // ---- 身份文本再落一次盘：屋子建好之后 activeCarry 等才齐，内容可能变 ----
     // 这条改动之后它**不再被宿主注入**（那是旧的 AGENTS.md 通道），只是落盘副本；
     // 真正进她上下文的是上面注册的 system prompt 段（每轮组装时现读文件）。
-    const doc = await writeSelfDoc(root, { log: (...a) => logger.warn(...a) })
+    const doc = await writeSelfDoc(root, { log: (...a) => logger.warn(...a), tenant: tenancy.tenant })
     if (!doc.ok) logger.warn(`[dsh-fish] 身份文件写不出来：${doc.why}`)
+
+    // ---- 侧栏轮数：在侧栏亲口跟她说话也算一轮（issue #6，2026-10-28）----
+    // 原来只有 /say 路由会 bumpTurns，用户直接打字时 rotateAfter 永不触发。
+    // 观察者只读会话事件，认来源是"真人打的"，一轮结束再结账。
+    try {
+      const off = registerTurns(ctx, { root, log: (...a) => logger.info(...a) })
+      if (typeof off === 'function') disposers.push(off)
+    } catch (err) {
+      logger.warn('[dsh-fish] 轮数观察没挂上', err?.message ?? err)
+    }
 
     // 工具：一个写（growth_commit）、一个看（bili_look）。
     // 两者都必须成功注册；缺了任何一个她都会变残（只会说不会看，或只会记不会看）。
     if (ctx.tools?.register) {
       for (const reg of [
-        () => registerCapture(ctx, { root }),
+        () => registerCapture(ctx, { root, tenant: tenancy }),
         () => registerLook(ctx, { root, client: baseConfig.client }),
-        () => registerSpeak(ctx, { root, client: baseConfig.client }),
+        () => registerSpeak(ctx, { root, client: baseConfig.client, tenant: tenancy }),
         () => registerRecall(ctx, { root }),
+        // issue #7：日记不进事件流，所以她需要一个只读的窗口回头翻（her_diary）。
+        () => registerHerDiary(ctx, { root }),
         () => registerWatch(ctx, { root }),
         // R4：留话（不审批）。和 growth_commit 一样是纯追加，但收件人明确。
-        () => registerLetter(ctx, { root }),
+        () => registerLetter(ctx, { root, tenant: tenancy }),
       ]) {
         try {
           const d = reg()
@@ -172,7 +264,7 @@ export function apply(ctx, baseConfig = {}) {
     }
 
     // 观测台路由
-    const obs = registerObserve(ctx, { root, version: VERSION })
+    const obs = registerObserve(ctx, { root, version: VERSION, tenancy })
     if (obs?.dispose) disposers.push(() => obs.dispose())
 
     // 生物钟：把屋子信息一起传下去。她每晚醒来说话要落进**同一个**会话，
@@ -196,17 +288,22 @@ export function apply(ctx, baseConfig = {}) {
     console.error('[dsh-fish] 启动失败', err)
   })
 
-  ctx.on?.('dispose', () => {
+  function shutdown() {
+    try { clearInterval(heartbeat) } catch { /* ignore */ }
+    try {
+      const id = tenancy.tenant?.instanceId
+      if (id) releaseRoot(root, id).catch(() => {})
+    } catch { /* ignore */ }
     try { scheduler?.dispose?.() } catch { /* ignore */ }
     try { clearWakeSection() } catch { /* ignore */ }
     for (const d of disposers) { try { d() } catch { /* ignore */ } }
-  })
+  }
+
+  ctx.on?.('dispose', shutdown)
 
   return {
     dispose() {
-      try { scheduler?.dispose?.() } catch { /* ignore */ }
-      try { clearWakeSection() } catch { /* ignore */ }
-      for (const d of disposers) { try { d() } catch { /* ignore */ } }
+      shutdown()
     },
   }
 }

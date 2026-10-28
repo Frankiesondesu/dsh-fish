@@ -160,15 +160,24 @@ test('recordBrowse 落一条 meta，itemsFromEvents 能读回，且按天隔离'
   })
 })
 
-test('recordBrowse 空列表不写、超长自动砍条目（不砍坏 JSON）', async () => {
+test('recordBrowse 空列表不写；条目多时分片，一条都不丢（也不再砍成前 4 条）', async () => {
   await withRoot(async (root) => {
     assert.equal(await recordBrowse(root, '2026-10-22', [], {}), null)
-    const many = Array.from({ length: 20 }, (_, i) => v({ bvid: `BV${i}`, title: '长标题'.repeat(20) }))
+    const many = Array.from({ length: 20 }, (_, i) => v({
+      bvid: `BV${i}`,
+      title: '长标题'.repeat(20),
+      pic: `//i0.hdslb.com/bfs/archive/${i}.jpg`.padEnd(200, 'x'),
+    }))
     await recordBrowse(root, '2026-10-22', many, { day: 1, stage: 1 })
     const { events } = await readEvents(root)
+    const lines = events.filter((e) => e?.type === 'meta' && /^browse(-more)?:2026-10-22 /.test(String(e.text)))
+    assert.ok(lines.length > 1, `长条目应分片，实得 ${lines.length} 条`)
+    for (const ln of lines) assert.ok(String(ln.text).length <= 2000, '单片不能超宿主 schema 的正文上限')
     const back = itemsFromEvents(events, '2026-10-22')
-    assert.ok(back.length > 0 && back.length < 20, `应被砍到 20 条以内，实得 ${back.length}`)
-    // 被砍过也必须是能解析的完整 JSON —— itemsFromEvents 读得出来就说明没坏
+    assert.equal(back.length, 20, `20 条一条都不能丢，实得 ${back.length}`)
+    assert.deepEqual(back.map((x) => x.bvid), many.map((x) => x.bvid), '顺序也要保得住')
+    // 配额算的是「刷了几次站」，不能被分片数撑大
+    assert.equal(browseCountToday(events, '2026-10-22'), 1)
   })
 })
 

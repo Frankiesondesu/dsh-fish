@@ -254,6 +254,48 @@ test('只能评今天真的看过的视频', async () => {
   })
 })
 
+test('targetsToday：主动看过的、看过画面的都算；递过来没看的不算', () => {
+  const dk = '2026-10-28'
+  const events = [
+    { type: 'meta', text: `browse:${dk} [{"bvid":"BVbrowse1"}]` },
+    { type: 'meta', text: `look:${dk} BVlook1` },
+    { type: 'meta', text: `watched:${dk} BVwatch1` },
+    { type: 'meta', text: `hand:${dk} BVhand1` },       // 只是递过来
+    { type: 'meta', text: 'look:2026-10-27 BVold1' },   // 昨天看的
+  ]
+  const got = targetsToday(events, dk).map((x) => x.bvid).sort()
+  assert.deepEqual(got, ['BVbrowse1', 'BVlook1', 'BVwatch1'])
+})
+
+test('他递来的视频：她先看一眼，就能在那条下面说话', async () => {
+  await withRoot(async (root) => {
+    const dk = dateKey()
+    await enableComment(root)
+    await appendEvent(
+      { type: 'meta', text: `hand:${dk} BV7` },
+      { day: 1, stage: 1, source: 'system' },
+      root,
+    )
+    const client = fakeClient()
+
+    // 只是递过来、她还没看 → 不能说（看过才能评，不是递来就能评）
+    const before = await postComment({ root, client, bvid: 'BV7', text: '路过', dateKey: dk })
+    assert.equal(before.ok, false)
+    assert.match(before.why, /没看/)
+    assert.equal(client.calls.filter((c) => c[0] === 'replyAdd').length, 0)
+
+    // 她自己看过一眼（what=video 会写这一行）→ 同一天就能说
+    await appendEvent(
+      { type: 'meta', text: `look:${dk} BV7` },
+      { day: 1, stage: 1, source: 'system' },
+      root,
+    )
+    const after = await postComment({ root, client, bvid: 'BV7', text: '看完了', dateKey: dk })
+    assert.equal(after.ok, true)
+    assert.equal(after.rpid, 90001)
+  })
+})
+
 test('配额用完就拒绝，且第二次不再打接口', async () => {
   await withRoot(async (root) => {
     const dk = dateKey()

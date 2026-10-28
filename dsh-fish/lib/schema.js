@@ -221,6 +221,13 @@ export function validateEvent(raw, { day, stage, now = Date.now(), source = 'too
     stage: Number.isInteger(raw.stage) ? raw.stage : Number(stage ?? 1),
     type,
     source,
+    // 谁写的（2026-10-28，用户 m01319）：房客那边两份大肥鱼共用一个 root，
+    // 事件流里只有时间/类型/正文，「这条是哪条会话说的」查不了，误认就卡在这里。
+    // 系统侧写入（定时器、日记标记）没有会话 → undefined 不落 JSON；
+    // 也不写空串，空串会被读成「有一个会话，只是没有 id」。
+    ...(typeof raw.sessionId === 'string' && raw.sessionId.trim()
+      ? { sessionId: raw.sessionId.trim().replace(/[\u0000-\u001f\u007f]/g, '').slice(0, 120) }
+      : {}),
     text,
     refs,
     verdict: ['confirmed', 'refuted', 'refined'].includes(raw.verdict) ? raw.verdict : null,

@@ -265,3 +265,13 @@ test('peersOnMachine：认得别的 B 站插件的状态库，但不把我们自
 test('peersOnMachine：目录读不了也不抛（自检不能因为这一项挂掉）', () => {
   assert.deepEqual(peersOnMachine('Z:\does\not\exist'), [])
 })
+
+test('browsePlan 冷却时把剩余分钟带进提示，不只说「冷却中」（反馈 4）', () => {
+  const cfg = { browse: { perDay: 2, topN: 4, deepRead: 6 } }
+  const t = browsePlan(cfg, { cooling: true, strikes: 0, remainMin: 17 })
+  assert.equal(t.skip, true)
+  assert.match(t.note, /17 分钟/)
+  // 没有 remainMin 的旧调用点也不能显示 "undefined"
+  const t2 = browsePlan(cfg, { cooling: true, strikes: 0 })
+  assert.equal(t2.note, '风控冷却中')
+})

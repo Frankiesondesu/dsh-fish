@@ -102,7 +102,11 @@ export async function saveOwner(patch = {}, root = rootDir()) {
     const c = String(patch.cookie).trim()
     if (c) {
       const parsed = parseCookieInput(c)
-      if (!parsed.cookie) return { ok: false, note: 'cookie 里没认出 B 站的键。', owner: publicOwner(cur) }
+      if (!parsed.cookie) {
+        // cookie 认不出来也不该连累上面两格：旧版这里整单返回，用户填的 mid/昵称就白填了。
+        await writeOwner(next, root)
+        return { ok: false, note: 'cookie 里没认出 B 站的键，只存下了上面两格。', owner: publicOwner(next) }
+      }
       next.cookie = parsed.cookie
       next.savedAt = new Date().toISOString()
       const miss = parsed.missing

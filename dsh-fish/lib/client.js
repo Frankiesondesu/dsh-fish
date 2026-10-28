@@ -125,6 +125,20 @@ window.__ModuleLoader__.load({
       '.dfish .ghlink{display:inline-flex;align-items:center;gap:6px;font-size:13px;line-height:20px;color:var(--dsw-alias-label-primary);text-decoration:none;border-radius:6px;padding:2px 4px;margin-left:-4px}',
       '.dfish .ghlink:hover{color:var(--dsw-alias-state-business-primary);background:rgba(128,128,128,.1)}',
       '.dfish .ghlink svg{flex:0 0 auto}',
+      // 常见问题解答按钮（2026-10-28 用户要求）：点开就地展开，不在设置页里铺满。
+      // 2026-10-28 晚（用户 m00416「点了没有反应」）：原本是 `<a target="_blank">` 开新窗口，
+      // 但宿主的信任栅栏只认 App 登录 cookie，新标签页一律 403 —— 换成 button + 面板。
+      '.dfish .faq-btn{display:inline-flex;align-items:center;gap:6px;height:34px;padding:0 16px;border-radius:8px;border:0.5px solid var(--dsw-alias-border-l2);color:var(--dsw-alias-label-primary);font-size:13.5px;text-decoration:none;background:transparent;cursor:pointer}',
+      '.dfish .faq-btn:hover{background:rgba(128,128,128,.12);color:var(--dsw-alias-label-primary)}',
+      '.dfish .faq-btn .arrow{opacity:.6;font-size:12px}',
+      '.dfish .faq-panel{margin-top:10px;border:0.5px solid var(--dsw-alias-border-l2);border-radius:10px;background:rgba(128,128,128,.04);overflow:hidden}',
+      '.dfish .faq-head{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:8px 12px;border-bottom:0.5px solid var(--dsw-alias-border-l2)}',
+      '.dfish .faq-head button{height:24px;padding:0 10px;font-size:12px;border-radius:6px}',
+      '.dfish .faq-body{max-height:52vh;overflow:auto;padding:4px 12px 12px}',
+      '.dfish .faq-qa{padding:10px 0;border-bottom:0.5px solid var(--dsw-alias-border-l2)}',
+      '.dfish .faq-qa:last-child{border-bottom:0}',
+      '.dfish .faq-q{font-size:13.5px;font-weight:600;line-height:1.7}',
+      '.dfish .faq-a{margin:6px 0 0;font-size:13px;line-height:1.75;color:var(--dsw-alias-label-secondary)}',
     ].join('\n')
 
     function useStyleOnce() {
@@ -248,6 +262,12 @@ window.__ModuleLoader__.load({
       // 备份与恢复（2026-10-25）：只在数据页用，不进轮询。
       const [backupBusy, setBackupBusy] = useState(false)
       const [backupMsg, setBackupMsg] = useState('')
+      // 迁移工作区（2026-10-28，用户 m06510）
+      const [moveBusy, setMoveBusy] = useState(false)
+      const [moveMsg, setMoveMsg] = useState('')
+      const [moveAsk, setMoveAsk] = useState(false)
+      const [moveTarget, setMoveTarget] = useState('')
+      const [moveInfo, setMoveInfo] = useState(null)
       let topEl = null
       const [sayText, setSayText] = useState('')
       const [said, setSaid] = useState([])
@@ -282,6 +302,9 @@ window.__ModuleLoader__.load({
       const [browsePerDay, setBrowsePerDay] = useState(1)
       const [browseTopN, setBrowseTopN] = useState(4)
       const [browseDanmaku, setBrowseDanmaku] = useState(6)
+      // 请求节奏（issue #5）：服务器/机房 IP 需要放慢，家宽可以更快
+      const [biliMinGap, setBiliMinGap] = useState(800)
+      const [biliJitter, setBiliJitter] = useState(500)
       // 桌面提醒（P3-3 重写）：默认关，由他自己打开
       const [notifyOn, setNotifyOn] = useState(false)
       // 浏览器通知权限 + 弹不出来时的页面内气泡
@@ -321,6 +344,10 @@ window.__ModuleLoader__.load({
       // 设置界面 2.0（2026-10-24）：观看历史分页 + 报告默认收起
       const [histPage, setHistPage] = useState(0)
       const [showReport, setShowReport] = useState(false)
+      // 常见问题解答（2026-10-28 用户 m00416）：改成就地展开，不再开新窗口（见 feedbackPage 前的注释）
+      const [faq, setFaq] = useState(null)
+      const [faqOpen, setFaqOpen] = useState(false)
+      const [faqNote, setFaqNote] = useState('')
       // 主人是谁 + B 站登录（2026-10-23 加）
       const [ow, setOw] = useState(null)
       const [owMid, setOwMid] = useState('')
@@ -341,6 +368,11 @@ window.__ModuleLoader__.load({
       // 首屏载入完先把基线记下来，否则一打开页面就会把刚读到的配置又写回去一遍。
       const baselinePending = useRef(true)
       const lastSaved = useRef('')
+      // 日记三项单独提交（2026-10-28 用户反馈「开了『让我看日记』插件又自己关」）：
+      // 记下最后一次动过它们的时刻，用来挡住紧接着的 load() 把旧值写回输入框。
+      const diaryTouchedAt = useRef(0)
+      // 还没回包的日记 patch 数量：有在飞的就不让 load() 覆盖输入框。
+      const diaryPending = useRef(0)
       // 原理页两张图：点开看原图，滚轮缩放、按住拖动（2026-10-25 用户：插件里看不清）。
       const [zoom, setZoom] = useState(null)
       const dragRef = useRef(null)
@@ -391,8 +423,14 @@ window.__ModuleLoader__.load({
           const s = await jget('/state')
           setState(s)
           setAbsent(Number(s.config?.absenceAfterDays ?? 2))
-          setDiaryVisible(Boolean(s.config?.diary?.visible))
-          setDiaryEnabled(Boolean(s.config?.diary?.enabled))
+          // 刚点过日记开关就别用服务端的旧值把它压回去（下面的 patchDiary 已经存过盘了）
+          if (!diaryPending.current && Date.now() - diaryTouchedAt.current > 3000) {
+            // 服务端没给这个字段（undefined）不等于 false，别把空值当成「关掉」写回界面
+            const dv = s.config?.diary?.visible
+            const de = s.config?.diary?.enabled
+            if (typeof dv === 'boolean') setDiaryVisible(dv)
+            if (typeof de === 'boolean') setDiaryEnabled(de)
+          }
           setWakes(Number(s.config?.wakesPerDay ?? 1))
           setEventsPerDay(Number(s.config?.daily?.events ?? 1))
           setQuestionsPerDay(Number(s.config?.daily?.questions ?? 1))
@@ -421,6 +459,13 @@ window.__ModuleLoader__.load({
           setInbox(ib)
           setHome(hm)
           setDataPaths(pth)
+          // 迁移工作区：只读她现在住哪、有多少东西（失败就只显示按钮，不影响别处）
+          jget('/move').then(setMoveInfo).catch(() => {})
+          // 出门：现在在哪、有哪些工作区可去（失败就只显示空页，不影响别处）
+          // 顺带带回 dev：只有开发副本才把「出门」页露出来（0.6.6 发布版先藏着）。
+          jget('/outing').then((o) => { setOuting(o); setDevMode(o?.dev === true) }).catch(() => {})
+          // 请神：现在上身在哪条、哪些对话可以请（失败就只显示空卡）
+          jget('/possession').then(setPossess).catch(() => {})
           // 上下文与记忆：单独取，失败不影响其它卡片
           jget('/memory').then(setMem).catch(() => {})
           // 她以前看过什么 / 风控状态：都是只读，失败不影响其它卡片
@@ -452,6 +497,8 @@ window.__ModuleLoader__.load({
           setBrowsePerDay(Number(cfg.browse?.perDay ?? 1))
           setBrowseTopN(Number(cfg.browse?.topN ?? 4))
           setBrowseDanmaku(Number(cfg.browse?.danmaku ?? 6))
+          setBiliMinGap(Number(cfg.bili?.minIntervalMs ?? 800))
+          setBiliJitter(Number(cfg.bili?.jitterMs ?? 500))
           setNotifyOn(cfg.notify?.enabled === true)
           setCommentOn(cfg.comment?.enabled === true)
           setCommentPerDay(Number(cfg.comment?.perDay ?? 1))
@@ -570,7 +617,8 @@ window.__ModuleLoader__.load({
         wakesPerDay: Number(wakes),
         daily: { events: Number(eventsPerDay), questions: Number(questionsPerDay) },
         growthDays: Number(growthDaysUi),
-        diary: { visible: diaryVisible, enabled: diaryEnabled, keepDays: Number(diaryKeep) },
+        // diary 不在这张表里：它有自己的 patchDiary（见下）。
+        // 整表提交会把日记三项一起写一遍，手里一旦是旧值就等于替用户把开关关掉。
         avoid: {
           keywords: avoidText.split(/[,，\s]+/).map((x) => x.trim()).filter(Boolean),
           minDuration: Number(avoidMinDur),
@@ -579,6 +627,7 @@ window.__ModuleLoader__.load({
         window: [wakeFrom, wakeTo],
         browse: { enabled: browseOn, perDay: Number(browsePerDay), topN: Number(browseTopN), deepRead: Number(browseDeepRead), danmaku: Number(browseDanmaku), voices: Boolean(browseVoices), window: [browseFrom, browseTo] },
         video: { enabled: videoOn, perDay: Number(videoPerDay), frames: Number(videoFrames) },
+        bili: { minIntervalMs: Number(biliMinGap), jitterMs: Number(biliJitter) },
         notify: { enabled: notifyOn },
         chat: { rotateAfter: Number(rotateAfter), replyChars: Number(replyChars) },
         tools: { restrict: Boolean(toolsRestrict), allow: toolsAllowSaved },
@@ -602,12 +651,14 @@ window.__ModuleLoader__.load({
         ['每天最多几条事件', eventsPerDay, 0, 5],
         ['每天最多几个问题', questionsPerDay, 0, 5],
         ['成长天数', growthDaysUi, 7, 180],
-        ['日记保留天数', diaryKeep, 0, 3650],
+        // 日记三项不在这里：它们由 patchDiary 单独提交（整表保存会把开关写回旧值）。
         ['最短屏蔽时长', avoidMinDur, 0, 3600],
         ['每天看几次', browsePerDay, 0, 4],
         ['每次几条', browseTopN, 1, 20],
         ['深读几条评论', browseDeepRead, 0, 40],
         ['弹幕几条', browseDanmaku, 0, 30],
+        ['请求间隔', biliMinGap, 200, 120000],
+        ['请求抖动', biliJitter, 0, 60000],
         ['每天看几个视频', videoPerDay, 0, 6],
         ['抽几帧', videoFrames, 4, 16],
         ['多少轮换会话', rotateAfter, 0, 500],
@@ -638,6 +689,19 @@ window.__ModuleLoader__.load({
           if (silent) setAutoNote(`没保存：${e.message}`)
           else setErr(e.message)
         } finally { if (!silent) setBusy('') }
+      }
+
+      // 日记三项单独提交（2026-10-28 用户反馈「开了『让我看日记』插件又自己关」）。
+      // 走整表保存时，任何一项环境参数变化都会顺带把 diary 一起写一遍；
+      // 只要那一刻手里是旧值，开关就被静默翻回去。这里改成「改了哪项就只提交哪项」，
+      // 服务端 updateConfig 是深合并，没传的键原样保留。
+      const patchDiary = async (patch) => {
+        diaryTouchedAt.current = Date.now()
+        diaryPending.current += 1
+        try {
+          await jpost('/config', { diary: patch })
+          setAutoNote(`已保存 ${new Date().toTimeString().slice(0, 8)}`)
+        } catch (e) { setAutoNote(`没保存：${e.message}`) } finally { diaryPending.current -= 1 }
       }
 
       // 改完就生效：任何一项变了，停手 700ms 就写盘（连点加减号也只写一次）。
@@ -871,6 +935,21 @@ window.__ModuleLoader__.load({
         } finally { setBusy('') }
       }
 
+      // 会话被用户归档之后，插件不再自动重开（0.6.8）。必须有个明说的入口，
+      // 否则「收起来」就真的变成「再也回不去」。它只建新会话，不动任何文件。
+      const doRebuild = async () => {
+        setBusy('rebuild'); setNote('')
+        try {
+          const r = await jpost('/home/rebuild', { confirm: 'rebuild' })
+          if (!r.ok) setNote(`没搭成：${r.error || r.note || ''}`)
+          else if (r.woke) setNote('搭好了，也叫了她一声——侧栏里等她说出第一句就会出现。')
+          else setNote('搭好了。点一下上面的「现在叫醒大肥鱼」，她开一次口，侧栏里才看得见这条会话。')
+          await load()
+        } catch (e) {
+          setErr(e.message)
+        } finally { setBusy('') }
+      }
+
       if (err && !state) {
         return h('div', { className: 'dfish' },
           h('h2', null, '大肥鱼'),
@@ -981,7 +1060,8 @@ window.__ModuleLoader__.load({
           // 2026-10-27（用户 m01371）：把 QQ 桥接写进说明——不写，用户只能对着「白名单」
           // 三个字干猜该填什么；它本来就是个跨插件用法，不是本插件自己的开关。
           h('div', { style: { marginTop: '10px' } },
-            h('div', { style: { fontWeight: 600, marginBottom: '4px' } }, 'QQ 接入'),
+            // 小标题带「（其他渠道同理）」（用户 m05411）：正文只讲 QQ，标题提示这条路对别的平台一样成立。
+            h('div', { style: { fontWeight: 600, marginBottom: '4px' } }, 'QQ 接入（其他渠道同理）'),
             '想让她在 QQ 上说话，装一个社区现成的 QQ 桥接插件（比如 qq-bridge），然后在上面填：qq_send_message, qq_get_unread_messages, qq_reply。',
             '本插件不直接提供 QQ 桥接功能——社区已经有很多成熟的项目，两个一起装、在这里放行就可以。',
             '如果你不知道装的那个 QQ 插件实际工具名是什么，可以先问一问你的大肥鱼；有哪些项目可以桥接 QQ，也可以问她。')),
@@ -1061,6 +1141,18 @@ window.__ModuleLoader__.load({
 
       // 重置卡片单独提出来：它是唯一一个有破坏性的 ui，塞在那一长串 return 里
       // 很容易少/多一个括号（已经踩过：node --check 直接 SyntaxError）。
+      // 会话被收起来时单独给一张卡：不藏在「重置」里，免得用户以为只能靠重开一局解决。
+      const archivedCard = String(state?.home?.status ?? '') === 'archived'
+        ? h('div', { className: 'card full' },
+            h('h3', null, '会话被收起来了'),
+            h('div', { className: 'dim' },
+              '你在侧栏把「跟大肥鱼说话」归档了。从 0.6.8 起，插件不会自己偷偷再开一局——'
+              + '收起来就该是收起来。要一局新的，点下面这个；状态、日记、记忆都不动。'),
+            h('div', { className: 'row' },
+              h('button', { onClick: doRebuild, disabled: !!busy },
+                busy === 'rebuild' ? '搭屋中…' : '重新搭一间')))
+        : null
+
       const resetCard = h('div', { className: 'card full' },
         h('h3', null, '重置大肥鱼'),
         h('div', { className: 'dim' },
@@ -1231,6 +1323,12 @@ window.__ModuleLoader__.load({
       //   · 面向用户的字符串里**不出现「她/他」**（test/p5.test.mjs 有硬断言）。
       // ================================================================
 
+      // 出门页只在「开发副本」里露出来（2026-10-28 用户要求）：功能还要真机跑一段时间，
+      // 发布版（npm 装进 node_modules 的那种）先不显示。代码、路由、审查卡都留着。
+      // 是不是开发副本由服务端算（看它自己的 import.meta.url 在不在 node_modules 底下），
+      // 客户端在挂载时从 /outing 读一次；读不到就当发布版，先藏起来。
+      const [devMode, setDevMode] = useState(null)
+
       const TABS = [
         ['now', '状态'],
         ['grow', '成长'],
@@ -1240,6 +1338,8 @@ window.__ModuleLoader__.load({
         ['env', '插件'],
         ['principle', '原理'],
         ['data', '数据'],
+        ['feedback', '反馈'],
+        ['outing', '出门'],
       ]
 
       // 只有这几个页签里的东西是「改完就写盘」的。没有设置项的页签（状态 / 住所 / 原理 / 数据）
@@ -1255,6 +1355,8 @@ window.__ModuleLoader__.load({
         env: '插件：别的插件能往她上下文里塞什么工具，以及为什么默认只放她自己那几个。',
         principle: '原理：两张图讲清她怎么长大、记忆怎么被筛；每条设计从哪条理论来，以及这一套能用在什么场景。',
         data: '数据：都存在哪、每日报告、运行日志，以及重置（有破坏性的操作放在这一页最下面）。',
+        feedback: '反馈：找开发者、进交流群。插件有问题、有想要的功能，都可以说。',
+        outing: '出门：送她去别的工作区干活，回来再判这趟算不算数。出门期间家里那套日程会暂停。',
       }
 
       // 阶段与门：写清楚，因为「下一个成长瓶颈」这几个字原来没人看得懂。
@@ -1302,7 +1404,8 @@ window.__ModuleLoader__.load({
       //   · 保存 → 删掉，因为每个设置页底部本来就有「保存改动」，
       //     顶上再放一个同样的按钮，只会让人猜「这两个是不是不一样」。
       const tabBar = h('div', { className: 'tabs' },
-        ...TABS.map(([id, name]) => h('button', {
+        // 出门页是开发预览：发布版不露（devMode 由 /outing 带回来），代码与路由不受影响。
+        ...TABS.filter(([id]) => id !== 'outing' || devMode === true).map(([id, name]) => h('button', {
           key: id,
           className: 'tab' + (tab === id ? ' on' : ''),
           title: TAB_HELP[id] || '',
@@ -1505,11 +1608,15 @@ window.__ModuleLoader__.load({
         group('日记',
           '她每天会写日记。打开下面那个开关，你就能看。',
           h('div', { className: 'grid2' },
-            Toggle({ label: '写日记', on: diaryEnabled, onChange: setDiaryEnabled,
+            Toggle({ label: '写日记', on: diaryEnabled,
+              onChange: (v) => { setDiaryEnabled(v); patchDiary({ enabled: v }) },
               hint: '关掉后不再写新的，已经写好的不会删。' }),
-            Toggle({ label: '让我看日记', on: diaryVisible, onChange: setDiaryVisible,
+            Toggle({ label: '让我看日记', on: diaryVisible,
+              onChange: (v) => { setDiaryVisible(v); patchDiary({ visible: v }) },
               hint: '打开即时生效，之前错过的日记看不到，只能看到以后的日记，关闭的话就是盲盒体验' }),
-            Sel({ label: '日记留多久', value: diaryKeep, onChange: setDiaryKeep, options: [0, 30, 90, 365, 3650],
+            Sel({ label: '日记留多久', value: diaryKeep,
+              onChange: (v) => { setDiaryKeep(v); patchDiary({ keepDays: Number(v) }) },
+              options: [0, 30, 90, 365, 3650],
               fmt: (v) => (Number(v) === 0 ? '永久保留' : `${v} 天`),
               hint: '超期的日记按天清掉，不占地方。想看历史就选永久。' }))),
         group('深度思考与学习（maybe）',
@@ -1584,8 +1691,12 @@ window.__ModuleLoader__.load({
         group('本插件工作自检',
           '这个插件没有要安装的依赖（只用 Node 自带的东西，外加可选的 ffmpeg）。真会坏的是别的：状态库写不进去、cookie 过期、宿主没给接口、B 站风控。',
           risk && risk.cooling
-            ? h('p', { className: 'warn' }, `B 站那边正在冷却，还有约 ${risk.remainMin} 分钟。冷却期她不刷站，但照常醒来说话。`)
-            : null,
+            ? h('p', { className: 'warn' },
+                `B 站那边正在冷却，还有约 ${risk.remainMin} 分钟。冷却期她不刷站，但照常醒来说话。`)
+            : risk?.memory?.readMs > 0
+              ? h('p', { className: 'dim' },
+                  `刚才被 B 站拦过一次，她自己歇一会儿（还有约 ${Math.ceil(risk.memory.readMs / 1000)} 秒）。这层只是进程内的，重启就清空。`)
+              : null,
           h('div', { className: 'row' },
             h('button', {
               disabled: checking,
@@ -1599,17 +1710,42 @@ window.__ModuleLoader__.load({
                 h('p', { className: 'hint' }, `${checks.summary || ''}（${String(checks.checkedAt || '').replace('T', ' ').slice(0, 19)}）`),
                 h('ul', null, (checks.items || []).map((c) => h('li', { key: c.id },
                   `${c.ok ? '✓' : '✗'} ${c.label}${c.detail ? ` — ${c.detail}` : ''}`,
-                  !c.ok && c.fix ? h('span', { className: 'tag' }, c.fix) : null))))
+                  // 修法单独占一行：以前塞在 .tag 胶囊里，一句话还行；
+                  // 2026-10-28 加的「看画面」修法有三步，胶囊会被撑成挤在一起的长条。
+                  !c.ok && c.fix
+                    ? h('div', { className: 'hint', style: { marginTop: '3px' } }, c.fix)
+                    : null))))
             : null),
         )
 
       // ---------------------------- 上网 ----------------------------
-      // 视频观看历史分页：一天一组，一页三天。用户要的是「能翻」，不是「一次全列」。
-      const HIST_PAGE_SIZE = 3
-      const histGroups = hist?.groups || []
-      const histPages = Math.max(1, Math.ceil(histGroups.length / HIST_PAGE_SIZE))
+      // 视频观看历史分页（2026-10-28 用户 m00416；当晚按用户反馈改成「随量自适应」）：
+      // 0.6.6 之前是「按天分组、每页三天」——一天刷 10 条、查 3 天就是 30 条挤在一屏。
+      // 现在**按条翻页**，并且每页条数不是一个死数字，而是按「一天实际刷几条」分档：
+      //   一共 ≤ 8 条 → 一页全放下，连翻页条都不出（别让人看到「第 1 / 1 页」这种噪音）；
+      //   日均 > 20 条 → 6 条/页；> 10 → 8 条；> 5 → 10 条；其余 12 条。
+      // 也就是刷得越密、每页越短：重度用户一屏不会顶到十几条，轻度用户又不用为翻页而翻页。
+      const HIST_PAGE_MAX = 12
+      const histFlat = (hist?.groups || []).flatMap((g) =>
+        (g.items || []).map((it) => ({ ...it, date: g.date })))
+      const histDayCount = (hist?.groups || []).length
+      const histTotal = histFlat.length
+      const histPerDay = histDayCount ? histTotal / histDayCount : 0
+      const histPageSize = histTotal === 0 ? HIST_PAGE_MAX
+        : histTotal <= 8 ? histTotal
+          : histPerDay > 20 ? 6
+            : histPerDay > 10 ? 8
+              : histPerDay > 5 ? 10
+                : HIST_PAGE_MAX
+      const histPages = Math.max(1, Math.ceil(histTotal / histPageSize))
       const histAt = Math.min(histPage, histPages - 1)
-      const histSlice = histGroups.slice(histAt * HIST_PAGE_SIZE, histAt * HIST_PAGE_SIZE + HIST_PAGE_SIZE)
+      const histSlice = histFlat.slice(histAt * histPageSize, histAt * histPageSize + histPageSize)
+      const histPager = histPages > 1
+        ? h('div', { className: 'row' },
+          h('button', { disabled: histAt <= 0, onClick: () => setHistPage(histAt - 1) }, '较新'),
+          h('span', { className: 'dim' }, `第 ${histAt + 1} / ${histPages} 页 · 一页 ${histPageSize} 条`),
+          h('button', { disabled: histAt >= histPages - 1, onClick: () => setHistPage(histAt + 1) }, '更早'))
+        : null
 
       const biliPage = h('div', { className: 'page' },
         group('能不能出门',
@@ -1647,6 +1783,15 @@ window.__ModuleLoader__.load({
             Sel({ label: '每条取几帧', value: videoFrames, onChange: setVideoFrames, options: [4, 6, 9, 12, 16],
               fmt: (v) => (v == 9 ? '9 帧（3×3，推荐）' : `${v} 帧`),
               hint: '帧越多越费时间。9 帧是一张 3×3 拼图，够看清在拍什么。' }))),
+        // 请求节奏（issue #5）：机房/服务器 IP 与家宽的风控阈值差别很大。
+        // 这里放的是**网络环境参数**，不是她看什么、怎么想。
+        group('请求节奏（网络环境）',
+          'B 站会按 IP 判机器人：家里宽带 0.8 秒一次很安全，云服务器上同样的速度反而更容易被盯。放在设置里，是因为这件事跟"你在哪台机器上养她"有关。',
+          h('div', { className: 'grid2' },
+            Num({ label: '两次请求最少隔多久', value: biliMinGap, onChange: setBiliMinGap, min: 200, max: 120000, step: 100, unit: '毫秒',
+              hint: '默认 800。云服务器/机房 IP 建议 2000–3000；被风控过就先调到 3000。' }),
+            Num({ label: '每次再随机多等多久', value: biliJitter, onChange: setBiliJitter, min: 0, max: 60000, step: 100, unit: '毫秒',
+              hint: '默认 500。固定的节奏像机器，抖动让它看起来像人手滑。0 = 不抖。' }))),
         group('黑名单',
           '这些是她的避让清单。以后想到新的可以随时加。',
           h('div', { className: 'grid2' },
@@ -1665,7 +1810,7 @@ window.__ModuleLoader__.load({
               hint: '模型自己写评论内容，养成前期不建议开启，除非你想看到你的笨比大肥鱼出去给你丢人，到处发一些意义不明的评论。' }),
             Sel({ label: '每天最多发几条评论', value: commentPerDay, onChange: setCommentPerDay, options: [0, 1, 2, 3, 4, 5],
               fmt: (v) => (Number(v) === 0 ? '0 条 · 不发' : `${v} 条`),
-              hint: '只能评当天真的看过的视频。配额到了就停。' }),
+              hint: '只能评当天真的看过的：平台推的、自己主动去看的、看过画面的都算。递过来但没看一眼的不算——看过才能评。配额到了就停。' }),
             Num({ label: '每天最多回几条别人', value: commentReplyPerDay, onChange: setCommentReplyPerDay, min: 0, max: 10, unit: '条',
               hint: '回的是别人在她评论下面的楼中楼。' }),
             Sel({ label: '多久看一次有没有人回复', value: commentScanMin, onChange: setCommentScanMin, options: [5, 10, 15, 30, 60, 120, 360, 720],
@@ -1680,6 +1825,11 @@ window.__ModuleLoader__.load({
             cm.waitingCount ? ` 有 ${cm.waitingCount} 条没回。` : ' 没人回。') : null),
         group('领养人验证',
           '这是要 @ 的账号，一般填你自己的大号。它和下面登录用的 cookie 是两个账号，互不影响——存 cookie、点测试都不会改这两格。',
+          // 旧版本（≤0.5.9）会把登录账号写进这两格，只有点「保存」才会重写；这里点出来，别让人以为是刷新丢的。
+          owMid && ow?.account?.mid && String(owMid) === String(ow.account.mid)
+            ? h('p', { className: 'warn' },
+                '这两格现在跟下面登录的账号是同一个号，像是旧版本写进去的。改成你要 @ 的 uid 和昵称，再点「保存」。')
+            : null,
           h('div', { className: 'grid2' },
             Text({ label: '要 @ 的 B 站 uid', value: owMid, onChange: setOwMid, placeholder: '数字，比如 12345678', wide: true,
               hint: '就是 B 站个人主页地址里那串数字。' }),
@@ -1705,12 +1855,13 @@ window.__ModuleLoader__.load({
             h('button', { onClick: saveOwnerCard, disabled: busy === 'owner' },
               busy === 'owner' ? '保存中…' : '保存'),
             h('button', { onClick: testOwner, disabled: busy === 'owtest' },
-              busy === 'owtest' ? '测试中…' : '测试能不能说话'),
+              busy === 'owtest' ? '测试中…' : '测试 cookie 能不能说话'),
+            h('span', { className: 'hint' }, '只验下面那份 cookie，不保存、不动上面两格；两格要改就点「保存」。'),
             owNote ? h('span', { className: 'dim' }, owNote) : null)),
 
         // ---- 以前看了什么（视频观看历史，分页） ----
         groupFull('看视频历史记录',
-          '按天分组，一天一组，一页三天。标题点开就是 B 站原视频。',
+          '按条翻页：每页 6~12 条，按你一天实际刷多少自动调，刷得越密每页越短；日期只在换天时出现一次。标题点开就是 B 站原视频。',
           h('div', { className: 'grid2', style: { marginBottom: '10px' } },
             Sel({ label: '查多久的记录', value: histDays,
               onChange: (v) => { setHistDays(Number(v)); setHistPage(0) },
@@ -1718,40 +1869,42 @@ window.__ModuleLoader__.load({
               fmt: (v) => (Number(v) === 1 ? '今天' : `${v} 天`),
               hint: '最多一年。这只是查询范围，不会删记录；改完点右上「刷新」。' })),
           h('div', { className: 'row', style: { marginBottom: '8px' } },
-            h('span', { className: 'dim' }, `共 ${histGroups.length} 天 · ${hist?.total ?? 0} 条`),
-            h('button', { disabled: histAt <= 0, onClick: () => setHistPage(histAt - 1) }, '较新'),
-            h('span', { className: 'dim' }, `第 ${histAt + 1} / ${histPages} 页`),
-            h('button', { disabled: histAt >= histPages - 1, onClick: () => setHistPage(histAt + 1) }, '更早')),
-          !histGroups.length
+            h('span', { className: 'dim' }, `共 ${histDayCount} 天 · ${hist?.total ?? 0} 条`),
+            histPager),
+          !histFlat.length
             ? h('p', { className: 'empty' }, '还没有记录。等她刷过一次再来。')
-            : h('div', null, histSlice.map((g) => h('div', { key: g.date, style: { marginTop: '10px' } },
-                h('div', { className: 'tag' }, g.date),
-                h('ul', null, g.items.map((it) => h('li', {
-                  key: it.bvid,
-                  style: { display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '6px' },
-                },
-                  h('img', {
-                    src: `/dsh-fish/cover/${it.bvid}`,
-                    alt: '',
-                    loading: 'lazy',
-                    onError: (e) => { e.currentTarget.style.display = 'none' },
-                    style: {
-                      width: '80px',
-                      height: '50px',
-                      objectFit: 'cover',
-                      borderRadius: '4px',
-                      flex: '0 0 auto',
-                      background: 'rgba(128,128,128,.15)',
-                    },
-                  }),
-                  h('a', {
-                    href: it.url,
-                    target: '_blank',
-                    rel: 'noreferrer',
-                    style: { color: 'inherit' },
-                  }, esc(it.title) || it.bvid),
-                  h('span', { className: 'tag' }, it.up ? esc(it.up) : '')))))),
-              ),
+            : h('div', null, histSlice.map((it, i) => h('div', {
+                // 列表按时间从新到旧摊平；换天时插一条日期标签（一页 12 条，不是一天一页）
+                key: `${it.date}|${it.bvid}|${i}`,
+                style: { display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '6px' },
+              },
+                i === 0 || histSlice[i - 1].date !== it.date
+                  ? h('div', { className: 'tag', style: { flex: '0 0 auto', minWidth: '86px' } }, it.date.slice(5))
+                  : h('span', { style: { flex: '0 0 auto', width: '86px' } }),
+                h('img', {
+                  src: `/dsh-fish/cover/${it.bvid}`,
+                  alt: '',
+                  loading: 'lazy',
+                  onError: (e) => { e.currentTarget.style.display = 'none' },
+                  style: {
+                    width: '80px',
+                    height: '50px',
+                    objectFit: 'cover',
+                    borderRadius: '4px',
+                    flex: '0 0 auto',
+                    background: 'rgba(128,128,128,.15)',
+                  },
+                }),
+                h('a', {
+                  href: it.url,
+                  target: '_blank',
+                  rel: 'noreferrer',
+                  style: { color: 'inherit' },
+                }, esc(it.title) || it.bvid),
+                h('span', { className: 'tag' }, it.up ? esc(it.up) : '')))),
+          histPages > 1
+            ? h('div', { className: 'row', style: { marginTop: '10px' } }, histPager)
+            : null,
           // 今日概览并进这里，不再单开一张卡（原来「今天看了什么」和「以前看过什么」是两次重复）
           !browse ? null
             : !browse.enabled ? h('p', { className: 'hint' }, '今天没开上网。')
@@ -2089,8 +2242,339 @@ window.__ModuleLoader__.load({
           h('p', { className: 'hint', style: { margin: '6px 0 0' } },
             '代码、更新记录、怎么装都在那边。觉得有用的话，点个 Star 就是最实在的支持。')))
 
+      // 反馈页（2026-10-28 用户要求）：开发者 QQ + 交流群二维码。
+      // 二维码是插件自带的 media/feedback-qr.jpg，由 /media 白名单路由出去，
+      // 不引第三方图床——群图挂了这页就废了，而群图挂在别人服务器上并不可靠。
+      // 两张卡都占满整行：反馈页内容少，半宽会让右边空一大块（宽屏下尤其明显）。
+      //
+      // 常见问题（2026-10-28 用户 m00416「点了没有反应」）：
+      //   原来做成 `<a target="_blank">` 指向 /dsh-fish/faq，想在浏览器新窗口看全文。
+      //   但宿主的信任栅栏只认 App 内置登录 cookie，新标签页直接敲路径一律 403——
+      //   用户看到的就是「点了一下，什么都没发生」。现在改成**就地展开**：点按钮
+      //   向 `/faq.data`（同源、带 cookie）取一次 JSON，在卡片里摊开一个可滚动的
+      //   面板。不撑长页面（固定高度内滚动），也不依赖任何窗口策略。
+      const faqOpenNow = async () => {
+        if (faqOpen) { setFaqOpen(false); return }
+        setFaqOpen(true)
+        if (faq) return
+        setFaqNote('读取中…')
+        try {
+          const d = await jget('/faq.data')
+          setFaq(d)
+          setFaqNote('')
+        } catch (e) {
+          setFaqNote(String(e && e.message ? e.message : e))
+        }
+      }
+
+      const faqPanel = !faqOpen ? null : h('div', { className: 'faq-panel' },
+        h('div', { className: 'faq-head' },
+          h('span', { style: { fontWeight: 600 } }, faq?.title || '常见问题解答'),
+          h('button', { onClick: () => setFaqOpen(false) }, '收起')),
+        faqNote ? h('p', { className: 'warn' }, faqNote) : null,
+        !faq ? null : h('div', { className: 'faq-body' }, faq.items.map((it, i) => h('div', { key: i, className: 'faq-qa' },
+          h('div', { className: 'faq-q' }, `${i + 1}. ${it.q}`),
+          it.a.map((p, j) => h('p', { key: j, className: 'faq-a' }, p))))))
+
+      const feedbackPage = h('div', { className: 'page' },
+        // 常见问题（2026-10-28 用户要求）：放最前面——反馈页本来就是「先看说明，再找人」。
+        groupFull('常见问题',
+          '权限、接别的渠道、上下文撑爆、遗忘机制、换对话——作者都写在里面了。点开就在下面展开，看完点「收起」。',
+          h('button', {
+            className: 'faq-btn',
+            onClick: faqOpenNow,
+          }, faqOpen ? '收起常见问题' : '常见问题解答', h('span', { className: 'arrow' }, faqOpen ? '↑' : '↓')),
+          faqPanel),
+
+        groupFull('找开发者',
+          '插件不好用、发现 bug、有想要的功能，直接说。',
+          h('div', { style: { fontSize: '13.5px', lineHeight: '1.9' } },
+            h('div', null, '开发者 QQ：', h('span', { style: { fontWeight: 600 } }, '1264518494')),
+            h('div', { className: 'hint', style: { margin: '8px 0 0' } },
+              '加好友备注「大肥鱼」。如果是报错之类的问题，建议把「设置 → 大肥鱼 → 数据」那份报告一起发过来，比截图好用。'))),
+
+        groupFull('交流群',
+          '想看看别人怎么养、想闲聊、想问一句就走，进群。',
+          h('div', { style: { maxWidth: '380px' } },
+            h('img', {
+              src: `${API}/media/feedback-qr.jpg`,
+              alt: 'dsh-fish 交流群二维码',
+              style: {
+                width: '100%', display: 'block', borderRadius: '10px',
+                border: '0.5px solid var(--dsw-alias-border-l2)',
+              },
+            }),
+            h('div', { className: 'hint', style: { margin: '10px 0 0' } },
+              '群号：615628177 —— 二维码扫不出来就搜这个号。'))))
+
       // 顺序是用户定的：①手上能用什么 ②为什么默认只放这几个 ③关于（版本 / 检查更新 / GitHub）。
       // 「关于」放最后——它是这个页的收尾，不是打开就要看的东西。
+      // ---------------------------- 出门 ----------------------------
+      // 用户 m07453：让她自己出门去别的工作区干活，回来再判这趟算不算数。
+      // 「出门」不是配置（没有自动保存提示），是一次动作——所以不进 AUTO_SAVE_TABS。
+      const [outing, setOuting] = useState(null)
+      const [outingBusy, setOutingBusy] = useState(false)
+      const [outingMsg, setOutingMsg] = useState('')
+      const [outingPick, setOutingPick] = useState('')
+      const [outingEndAsk, setOutingEndAsk] = useState(false)
+      // 回家卡上被取消勾选的条目 id（默认全勾 = 空数组）
+      const [outingDrop, setOutingDrop] = useState([])
+
+      async function doStartOuting() {
+        const ws = outingPick || outing?.workspaces?.[0]?.id || ''
+        if (!ws) { setOutingMsg('先选一个工作区。'); return }
+        setOutingBusy(true)
+        setOutingMsg('正在开门……')
+        try {
+          await jpost('/outing', { action: 'start', workspaceId: ws })
+          setOuting(await jget('/outing'))
+          setOutingMsg('她已经出门了，正在那个工作区里。')
+        } catch (e) {
+          setOutingMsg(`派活失败：${e.message}`)
+        } finally {
+          setOutingBusy(false)
+        }
+      }
+
+      // 出门口袋（2026-10-28，用户 m01145 拍板「干活模式」）：
+      // 干净工作区 + 读拦截 + 保留记忆工具。口袋是一个从没写过记忆的空目录，
+      // 每轮注入只剩骨架——她带过去的只有出门那一刻的自己。
+      async function doStartPocket() {
+        setOutingBusy(true)
+        setOutingMsg('正在开门……')
+        try {
+          await jpost('/outing', { action: 'start', pocket: true })
+          setOuting(await jget('/outing'))
+          setOutingMsg('她去口袋了。那边没有这里的白板，也没有这十几天的账；要交付的东西，等她回来你点头再搬。')
+        } catch (e) {
+          setOutingMsg(`派活失败：${e.message}`)
+        } finally {
+          setOutingBusy(false)
+        }
+      }
+
+      async function doEndOuting(keep, drop = []) {
+        setOutingBusy(true)
+        setOutingMsg('正在叫她回来……')
+        try {
+          const r = await jpost('/outing', { action: 'end', kept: keep, rejectedIds: drop })
+          setOuting(await jget('/outing'))
+          setOutingMsg(
+            r?.status === 'pending'
+              ? '这趟的事件流被动过，先不收——她留在外面，等你确认过再说。'
+              : keep === false
+                ? '叫回来了。这趟不算数，那部分判断会被跳过。'
+                : drop.length
+                  ? '叫回来了。取消勾选了 ' + drop.length + ' 条，那部分会被跳过。'
+                  : '叫回来了。',
+          )
+          setOutingEndAsk(false)
+        } catch (e) {
+          setOutingMsg(`叫不回来：${e.message}`)
+        } finally {
+          setOutingBusy(false)
+        }
+      }
+
+      // 请神（2026-10-28）：把一条正在用的对话临时交给她。
+      // 不做「人格设定」——请神只是把此刻的她借过去，结束时撤销，那条对话恢复原样。
+      const [possess, setPossess] = useState(null)
+      const [possessBusy, setPossessBusy] = useState(false)
+      const [possessMsg, setPossessMsg] = useState('')
+      const [possessPick, setPossessPick] = useState('')
+
+      async function loadPossess() {
+        try { setPossess(await jget('/possession')) } catch { /* 拿不到就保持原样 */ }
+      }
+
+      async function doStartPossess() {
+        const sid = possessPick || possess?.sessions?.[0]?.sessionId || ''
+        if (!sid) { setPossessMsg('先选一条正在运行的对话。'); return }
+        setPossessBusy(true)
+        setPossessMsg('正在请……')
+        try {
+          await jpost('/possession', { action: 'start', sessionId: sid })
+          await loadPossess()
+          setOuting(await jget('/outing').catch(() => outing))
+          setPossessMsg('上身了。那条对话下一轮开始，回你话的就是她。')
+        } catch (e) {
+          setPossessMsg(`请不上：${e.message}`)
+        } finally {
+          setPossessBusy(false)
+        }
+      }
+
+      async function doEndPossess() {
+        setPossessBusy(true)
+        setPossessMsg('正在请她回去……')
+        try {
+          await jpost('/possession', { action: 'end' })
+          await loadPossess()
+          setOuting(await jget('/outing').catch(() => outing))
+          setPossessMsg('回去了。那条对话恢复成原来的样子。')
+        } catch (e) {
+          setPossessMsg(`请不回去：${e.message}`)
+        } finally {
+          setPossessBusy(false)
+        }
+      }
+
+      const possessActive = possess?.active ?? null
+      const possessSessions = possess?.sessions ?? []
+      const possessTarget = possessPick || possessSessions[0]?.sessionId || ''
+
+      const awayNowUI = outing?.away ?? null
+      const isOut = awayNowUI?.kind === 'outing'
+      const wsList = outing?.workspaces ?? []
+      const recentOutings = (outing?.outings ?? []).slice(-6).reverse()
+      const outPick = outingPick || wsList[0]?.id || ''
+      const outPickRow = wsList.find((w) => w.id === outPick) ?? null
+      const outingDisabled = Boolean(outing?.away?.kind)
+
+      // 回家审查：比对结果先给她自己看，不是点完才告诉她「对不上」。
+      const verifyText = (v) => {
+        if (!v) return '还没比对。'
+        if (v.checkable === false) return '这一趟没记基线，回家时没法比对。'
+        if (v.ok === true) return `事件流只多出 ${v.appended ?? 0} 字节，没有删改。`
+        return `事件流不对劲：${v.why || '内容对不上'}`
+      }
+      const outingStatusText = (o) =>
+        o.status === 'active'
+          ? '还在外面'
+          : o.status === 'pending'
+            ? '等确认'
+            : o.status === 'rejected'
+              ? '没算数'
+              : '已收下'
+      const outingRows = recentOutings.map((o) =>
+        h('div', { style: { display: 'flex', gap: '10px', justifyContent: 'space-between' } },
+          h('span', null, o.workspaceName || o.workspaceId || '别的工作区'),
+          h('span', { className: 'hint', style: { margin: 0 } },
+            `${outingStatusText(o)} · ${new Date(o.startedAt).toLocaleDateString()}`)))
+
+      const outingPage = h('div', { className: 'page' },
+        groupFull('现在在哪',
+          '在家，还是出门去了别的地方。出门期间家里那套日程会整段暂停——两边同时醒着会互相踩同一份记录。',
+          isOut
+            ? h('div', null,
+                h('p', { style: { margin: '0 0 6px', fontWeight: 600 } },
+                  awayNowUI.line || '此刻在外面'),
+                h('p', { className: 'hint' },
+                  '这趟不自动收下：回来时先比对事件流。如果有人在后面动过她那份记录，默认拒收，她留在外面等你确认。'),
+                h('p', { className: 'hint' },
+                  verifyText(awayNowUI.verify),
+                  outing?.identityFrozen ? ' 她带的是出门那一刻的身份快照，家里之后改了什么，这一趟不会变成她。' : ''),
+                outingEndAsk
+                  ? h('div', null,
+                      h('p', { className: 'hint', style: { marginTop: '8px' } },
+                        (awayNowUI.outing?.workspaceName || '').includes('口袋')
+                          ? '她这趟在口袋里，你这边没有她可用的工具，所以自己家的账上不会多出东西——清单空着是正常的，不代表这趟没做事。算不算，你说了算。'
+                          : '这趟多出 ' + (awayNowUI.since?.total ?? 0) + ' 条。默认全收下；不想留下的那条取消勾选。她顶回来的会单独标出来——只收下说得漂亮的，等于把这趟教坏。'),
+                      h('div', { style: { display: 'flex', flexDirection: 'column', gap: '6px', marginTop: '6px', maxHeight: '260px', overflow: 'auto' } },
+                        ...(awayNowUI.since?.items ?? []).map((it) => {
+                          const on = !outingDrop.includes(it.id)
+                          return h('label', { key: it.id, style: { display: 'flex', gap: '8px', alignItems: 'flex-start', fontSize: '13px', lineHeight: '1.6' } },
+                            h('input', {
+                              type: 'checkbox',
+                              checked: on,
+                              disabled: outingBusy,
+                              onChange: (e) => setOutingDrop((prev) => e.target.checked ? prev.filter((x) => x !== it.id) : [...prev, it.id]),
+                            }),
+                            h('span', null,
+                              it.pushback ? h('strong', { style: { marginRight: '6px' } }, '顶回来的') : null,
+                              it.text))
+                        })),
+                      h('div', { className: 'row', style: { marginTop: '8px' } },
+                        h('button', { disabled: outingBusy, onClick: () => doEndOuting(true, outingDrop) }, '这趟收下'),
+                        h('button', { disabled: outingBusy, className: 'ghost', onClick: () => doEndOuting(false, []) }, '整趟不算'),
+                        h('button', { disabled: outingBusy, className: 'ghost', onClick: () => { setOutingEndAsk(false); setOutingMsg('') } }, '再等等')))
+                  : h('div', { className: 'row', style: { marginTop: '8px' } },
+                      h('button', { disabled: outingBusy, onClick: () => { setOutingDrop([]); setOutingEndAsk(true) } }, '叫她回家…')))
+            : h('p', { className: 'dim', style: { margin: 0 } },
+                awayNowUI?.kind === 'possession' ? '此刻在替人说话。' : '在家。'),
+
+          outingMsg ? h('p', { className: 'hint', style: { marginTop: '10px' } }, outingMsg) : null),
+
+        groupFull('出门口袋（干活模式）',
+          '一个空的工作区：没有这里的白板，也没有这十几天的账。她带过去的只有出门那一刻的自己。',
+          !outing
+            ? h('p', { className: 'hint' }, '正在读口袋……')
+            : h('div', null,
+                h('p', { className: 'hint', style: { margin: '0 0 8px' } },
+                  '位置：' + (outing.pocket?.path || '（还定不下来）') +
+                    (outing.pocket?.registered ? '' : ' · 第一次开门时会自动登记成工作区')),
+                h('div', { className: 'row' },
+                  h('button', {
+                    disabled: outingDisabled || outingBusy,
+                    onClick: doStartPocket,
+                  }, outingBusy ? '正在开门……' : '送她去口袋')),
+                h('p', { className: 'hint', style: { marginTop: '8px' } },
+                  '她在口袋里写不进 02-我的项目 / 03-我的文档 / 04-小工具 这几个目录——沙箱的写权限跟着工作区走。要交付的东西，等她回来再搬。'))),
+
+        groupFull('送她出门',
+          '选一个工作区，在那边开一条新会话。她继承那个工作区本来的权限和工具，不套家里那套收窄过的名单。',
+          !outing
+            ? h('p', { className: 'hint' }, '正在读工作区列表……')
+            : wsList.length === 0
+              ? h('p', { className: 'hint' }, '还没有别的工作区。先在宿主里建一个，再回来。')
+              : h('div', null,
+                  h('div', { className: 'row', style: { alignItems: 'center', gap: '10px' } },
+                    h('select', {
+                      value: outPick,
+                      disabled: outingDisabled || outingBusy,
+                      onChange: (e) => setOutingPick(e.target.value),
+                    }, ...wsList.map((w) => h('option', { value: w.id }, w.title || w.id))),
+                    h('button', {
+                      disabled: outingDisabled || outingBusy || !outPick,
+                      onClick: doStartOuting,
+                    }, outingBusy ? '正在开门……' : '让她去这里')),
+                  outPickRow?.risky
+                    ? h('p', { className: 'hint', style: { marginTop: '8px', fontWeight: 600 } },
+                        '这个工作区里有插件源码。她在那边能读到自己不该看的文件（禁令清单就在源码里），换个地方更稳。')
+                    : null,
+                  h('p', { className: 'hint', style: { marginTop: '8px' } },
+                    '出门期间：家里不叫她、不刷 B 站、不写日记。回家那一刻才结算这趟算不算数。'),
+                  h('p', { className: 'hint', style: { marginTop: '8px', fontWeight: 600 } },
+                    '这条老路会把那个人工作区的白板和交接账本每轮注入给她（2026-10-28 20:55 那趟就是这样漏的）。只是想让她去干活，用上面的口袋。'),
+                  awayNowUI?.kind === 'possession'
+                    ? h('p', { className: 'hint' }, '先结束请神，才能出门。')
+                    : null)),
+
+        groupFull('请神（上身到一条正在用的对话）',
+          '把一条对话临时交给她：下一轮起，回你话的是她——身份是真的，工具也是真的，不是演。结束时撤销，那条对话恢复原样。',
+          possessActive
+            ? h('div', null,
+                h('p', { className: 'hint', style: { margin: 0, fontWeight: 600 } },
+                  `现在上身：${possessActive.title || possessActive.sessionId}`),
+                h('p', { className: 'hint', style: { marginTop: '8px' } },
+                  '这段时间那条对话的守卫分不出谁在说话，会连你一起拦；它也不再是原来的那个人。'),
+                h('button', {
+                  disabled: possessBusy,
+                  onClick: doEndPossess,
+                }, possessBusy ? '正在请她回去……' : '结束请神'))
+            : h('div', null,
+                h('p', { className: 'hint', style: { margin: 0 } },
+                  '只能请到「现在开着」的对话；没开过的那条打开一次之后才会出现在这里。'),
+                h('div', { style: { display: 'flex', gap: '8px', marginTop: '8px', flexWrap: 'wrap' } },
+                  h('select', {
+                    value: possessTarget,
+                    disabled: possessBusy || possessSessions.length === 0,
+                    onChange: (e) => setPossessPick(e.target.value),
+                  }, ...possessSessions.map((s) => h('option', { value: s.sessionId }, s.title || s.sessionId.slice(-8)))),
+                  h('button', {
+                    disabled: possessBusy || !possessTarget,
+                    onClick: doStartPossess,
+                  }, possessBusy ? '正在请……' : '请她上身')),
+                h('p', { className: 'hint', style: { marginTop: '8px', fontWeight: 600 } },
+                  '注意：同一个对话分不出谁在说话——请神期间那条对话的工具面对你也不可用，守卫也会连你一起拦。只能由你结束。')),
+          possessMsg ? h('p', { className: 'hint', style: { margin: '8px 0 0' } }, possessMsg) : null),
+
+        recentOutings.length === 0
+          ? null
+          : groupFull('最近几趟',
+              '只留最近几条。去哪、什么时候走的、最后算没算数。',
+              h('div', { style: { fontSize: '13px', lineHeight: '1.9' } }, ...outingRows)))
+
       const envPage = h('div', { className: 'page' },
         toolsCard,
         group('为什么默认只放这几个',
@@ -2154,6 +2638,86 @@ window.__ModuleLoader__.load({
         el.click()
       }
 
+      // ---- 迁移工作区（2026-10-28，用户 m06510）----
+      // 用户要的是：点一个按钮 → 选文件夹 → 全搬过去。
+      // 文件夹选择优先用桌面端的原生选择器（宿主用 contextBridge 暴露的
+      // `__DSH_DIRECTORY_PICKER__`）；web 模式下没有它，退回手输路径。
+      async function refreshMove() {
+        try { setMoveInfo(await jget('/move')) } catch { setMoveInfo(null) }
+      }
+
+      async function pickFolder() {
+        try {
+          const p = globalThis.__DSH_DIRECTORY_PICKER__
+          if (p && typeof p.pick === 'function') {
+            const dir = await p.pick()
+            if (dir) setMoveTarget(String(dir))
+            return String(dir || '')
+          }
+        } catch (e) {
+          setMoveMsg(`打开文件夹选择器失败：${e.message}`)
+        }
+        return ''
+      }
+
+      async function askMove() {
+        setMoveAsk(true)
+        setMoveMsg('')
+        await refreshMove()
+      }
+
+      async function doMove() {
+        const target = String(moveTarget || '').trim()
+        if (!target) { setMoveMsg('先选一个文件夹'); return }
+        setMoveBusy(true)
+        setMoveMsg('正在搬……东西多的话要等一会儿，别关窗口。')
+        try {
+          const r = await jpost('/move', { target })
+          setMoveAsk(false)
+          setMoveTarget('')
+          setMoveMsg(
+            `搬好了：${r.files} 个文件、约 ${Math.max(1, Math.round((r.bytes || 0) / 1024))}KB，现在在 ${r.to}。`
+            + (r.oldDirMoved ? '老目录没删，改名收在旁边的 dsh-fish-backups 里。' : '老目录还在原处（改名没成功），确认无误后你可以自己删。')
+            + '重启 DSH 之后她才会在新位置醒过来。'
+            + (r.stranded ? ` 侧栏旧会话没全清干净：${r.stranded}` : ''),
+          )
+        } catch (e) {
+          setMoveMsg(`迁移失败：${e.message}`)
+        } finally {
+          setMoveBusy(false)
+        }
+      }
+
+      const moveHint = moveInfo
+        ? `现在住在 ${moveInfo.root}（${moveInfo.files} 个文件，约 ${Math.max(1, Math.round((moveInfo.bytes || 0) / 1024))}KB）${moveInfo.moved ? '——已经搬过一次了' : ''}。`
+        : ''
+
+      const moveCard = h('div', { style: { marginTop: '14px' } },
+        h('div', { className: 'row', style: { alignItems: 'center', gap: '10px' } },
+          h('button', { disabled: moveBusy, onClick: askMove }, '迁移工作区…'),
+          h('span', { className: 'hint', style: { margin: '0' } }, '把大肥鱼的所有文件迁移至任何你想存放的地方')),
+        !moveAsk
+          ? (moveMsg ? h('p', { className: 'hint' }, moveMsg) : null)
+          : h('div', { style: { marginTop: '10px' } },
+              h('p', { className: 'dim' }, '有些人不想让这些文件待在 C 盘，想挪到 D 盘、E 盘。搬的是整个数据文件夹：事件流、日记、她的房间、配置、登录凭据，全都在里面。'),
+              h('p', { className: 'hint' }, '搬的是复制 + 逐文件核对字节数。老目录不会删，会改名收在同级的 dsh-fish-backups 里。'),
+              h('p', { className: 'hint' }, '搬完必须重启 DSH 才生效——她现在住哪是在启动时定下来的。'),
+              moveHint ? h('p', { className: 'hint' }, moveHint) : null,
+              h('p', { className: 'dim' }, '选一个文件夹。搬过去之后会在里面建一个 dsh-fish 子目录（如果那个文件夹里已经有一份完整的档，就直接用它）。'),
+              h('div', { className: 'row' },
+                h('input', {
+                  type: 'text',
+                  value: moveTarget,
+                  placeholder: '例如：D:\\大肥鱼',
+                  style: { flex: '1', minWidth: '220px' },
+                  onChange: (e) => setMoveTarget(e.target.value),
+                }),
+                h('button', { disabled: moveBusy, onClick: pickFolder }, '选择文件夹…')),
+              h('div', { className: 'row', style: { marginTop: '8px' } },
+                h('button', { disabled: moveBusy || !moveTarget.trim(), onClick: doMove }, moveBusy ? '正在搬……' : '搬到这个文件夹'),
+                h('button', { disabled: moveBusy, className: 'ghost', onClick: () => { setMoveAsk(false); setMoveMsg('') } }, '算了')),
+              moveMsg ? h('p', { className: 'hint' }, moveMsg) : null))
+
       const dataPage = h('div', { className: 'page' },
         group('数据在哪',
           '一个文件夹装全部。想备份、想搬走、想看原始记录，都在这一格里。',
@@ -2164,7 +2728,8 @@ window.__ModuleLoader__.load({
               h('button', {
                 disabled: !dataPaths?.root,
                 onClick: () => copyPath(dataPaths?.root || ''),
-              }, dataPaths?.root ? '复制数据文件夹路径' : '路径还没读到')))),
+              }, dataPaths?.root ? '复制数据文件夹路径' : '路径还没读到')),
+            moveCard)),
 
         group('备份与恢复',
           '备份是一份 json：事件流、配置、日记、她的房间、头像都在里面。换台机器，或者想重开一局之前，先存一份。',
@@ -2239,6 +2804,15 @@ window.__ModuleLoader__.load({
 
         importCard,
 
+        // 换家留痕（0.6.8）：只在「跟上次不一样」时出现。用户改了 cordis.patch.yml 的 root
+        // 之后，侧栏会多一间屋、旧的还在——这里直接把两个路径并排摆出来，省得靠猜。
+        state?.homes?.changed === true
+          ? h('p', { className: 'hint' },
+              `这次住的是 ${state.homes.to}；上一次在 ${state.homes.from}。换家不等于搬家——旧家的东西还在原地，没有并过来。`)
+          : null,
+
+        archivedCard,
+
         resetCard)
 
       const showTab = (id) => tab === id
@@ -2269,6 +2843,8 @@ window.__ModuleLoader__.load({
         showTab('env') ? envPage : null,
         showTab('principle') ? principlePage : null,
         showTab('data') ? dataPage : null,
+        showTab('feedback') ? feedbackPage : null,
+        showTab('outing') ? outingPage : null,
       )
     }
 

@@ -219,8 +219,23 @@ export async function runChecks(o = {}) {
   // 现在只要有真宿主，就按 registry 里**真的在不在**判断。
   const T = o.tools ?? null
   const notRegistered = T && typeof T.get === 'function' ? FISH_TOOLS.filter((n) => !T.get(n)) : []
-  // read_image 是宿主的工具，别人的机器上可能没有：只提示，不算失败。
-  const noImage = T && typeof T.get === 'function' && !T.get('read_image')
+  // read_image 是宿主的工具，别人的机器上可能没有。
+  // 2026-10-28：以前它只是跟在「手上的工具」后面一句附注，而且那一项还是绿的。
+  // 结果用户那边「ffmpeg 装了、额度也没用完，就是看不到画面」只能靠人肉翻日志——
+  // 日志里那句「宿主没给 read_image，她看不了图——不影响说话」写在绿行末尾，没人会注意。
+  // 它其实是「看画面」的前提：抽帧她能抽，打不开图就等于白抽。所以单列一项。
+  //
+  // 2026-10-28 深夜修正（用户 m05885）：上面那个判据 `!T.get('read_image')` 是**必然误报**。
+  // 宿主把 read_image 注册在 agent 平面（由 attachments 服务挂着；preset 的工具是祖先层贡献），
+  // 全局工具表 `tools.get()` 里根本查不到它 —— 所以任何真机都会报「宿主没给 read_image」。
+  // 反证：用户本机同一条会话里 read_image 取到了 1096x622 的 PNG，她还照着画面把内容讲了出来
+  // （「画面是黑的底，白符号是实心的。橙色小人被夹在两个 −1 中间……」）。
+  // 现在改成「有旁证就算有」，绝不再凭全局表缺席就去说她瞎：
+  //   · 全局表里直接看到 → 有；
+  //   · restrict 真的挂上了（applied > 0）且 allow 里有这个名字 → 有。
+  //     restrict 遇到不存在的名字会抛错，所以这等于宿主亲口认过这个名字。
+  //   · 都查不到 → 判不准，如实说判不准，不说她看不了图。
+  const globalHasImage = !!(T && typeof T.get === 'function' && T.get('read_image'))
   const R = o.restrict ?? null
   const allowNames = Array.isArray(R?.allow) ? R.allow : []
   const want = allowNames.length > 0 ? allowNames.length : 7
@@ -245,14 +260,47 @@ export async function runChecks(o = {}) {
   } else if (Number(R?.applied) > 0) {
     push('tools', '手上的工具', {
       ok: true,
-      detail: `已收窄：她那条会话只看得见 ${want} 个工具（${allowNames.join(' / ')}）。${
-        noImage ? '宿主没给 read_image，她看不了图——不影响说话。' : ''}`,
+      detail: `已收窄：她那条会话只看得见 ${want} 个工具（${allowNames.join(' / ')}）。`,
     })
   } else {
     push('tools', '手上的工具', {
       ok: true,
       detail: '已注册，等她的会话下一次启动就生效（现在这条是她之前开的）。',
     })
+  }
+
+  // 「看画面」单列一项（2026-10-28）。
+  // 只在真有宿主工具表的时候才判——没有 tools 说明是假环境（测试/预检），不冒充结论。
+  //
+  // 判据的顺序（都是「有正面证据才下结论」）：
+  //   1. 全局表里看到 read_image            → 有（green）
+  //   2. restrict 真挂上了且 allow 含它      → 有（green，宿主认过这个名字，不存在会抛错）
+  //   3. 宿主没有 attachments 服务           → 一定没有（red，这是宿主原文的前提：
+  //      "read_image registers only while a durable ctx.attachments service is mounted"）
+  //   4. 都没有                              → 判不准（green，写清楚「让她看一次就知道」）
+  // 第 4 条刻意不报红：全局表里查不到**不能**证明她没有（用户 m05885 真机上
+  // read_image 明明好用，却被旧判据冤枉成「看不了图」）。
+  if (T && typeof T.get === 'function') {
+    const restrictProved = Number(R?.applied) > 0 && allowNames.includes('read_image')
+    if (globalHasImage || restrictProved) {
+      push('read-image', '看画面', {
+        ok: true,
+        detail: globalHasImage
+          ? '宿主给了 read_image，她能打开自己抽出来的帧（模型本身也得支持图像输入，否则还是会被拒）。'
+          : '宿主认了 read_image：她能打开自己抽出来的帧（模型本身也得支持图像输入，否则还是会被拒）。',
+      })
+    } else if (o.attachments === false) {
+      push('read-image', '看画面', {
+        ok: false,
+        detail: '宿主没挂附件服务，read_image 注册不上：她能抽到视频帧，但打不开那张图。装不装 ffmpeg 都一样。',
+        fix: '① 给这个 profile 装上带图片能力的插件（官方附件/图片那类），让宿主把 attachments 与 read_image 注出来；② 或者换一个声明了图像输入的模型再用；③ 弄好后重启 DSH，这一项就不再是红的。',
+      })
+    } else {
+      push('read-image', '看画面', {
+        ok: true,
+        detail: '查不准（宿主把 read_image 挂在会话那一层，这里看不见）。让她看一次画面就知道：能把画面内容讲出来，就是好的。',
+      })
+    }
   }
 
   const bad = items.filter((x) => !x.ok)

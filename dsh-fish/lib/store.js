@@ -16,11 +16,21 @@
 
 import { promises as fs } from 'node:fs'
 import { dirname, join } from 'node:path'
-import { homedir } from 'node:os'
 import { validateEvent, EVENT_SCHEMA_VERSION } from './schema.js'
+import { defaultRoot, readLocationSync } from './locate.js'
 
+/**
+ * 状态库的根目录。
+ *
+ * 2026-10-28（用户 m06510）：加一层「迁移指针」——用户可以把整个数据目录搬到
+ * D 盘 / E 盘，位置记在 `~/.dsh-fish-location.json`（在数据目录**之外**，
+ * 否则搬家时门牌号会被一起搬走）。这里必须保持**同步**：它被
+ * `paths(root = rootDir())` 这种默认参数调用，几十处，不可能全改成 await。
+ *
+ * 顺序：环境变量 → 指针文件 → `~/.dsh-fish`。指针坏了等于没迁过，不抛。
+ */
 export function rootDir() {
-  return process.env.DSH_FISH_HOME || join(homedir(), '.dsh-fish')
+  return process.env.DSH_FISH_HOME || readLocationSync() || defaultRoot()
 }
 
 export function paths(root = rootDir()) {
@@ -210,11 +220,43 @@ export async function writeConfig(cfg, root = rootDir()) {
   await writeAtomic(paths(root).config, JSON.stringify(cfg, null, 2))
 }
 
-/** 日记 / 报告落盘 */
+/**
+ * 日记 / 报告落盘。
+ *
+ * issue #7（2026-10-28）：日记按日期命名，同一天写第二次原来是**整篇覆盖**，
+ * 前一版永久丢失，而界面只显示「有日记」，主人在界面上完全无感。
+ *
+ * 现在的规则：覆盖前，如果目标文件已存在且内容不同，先把旧版本存到
+ * `diary/archive/YYYY-MM-DD-HHmmss.md`，再写新的。
+ *   - 「一天一篇」的语义不变：客户端按日期分页，不用改；
+ *   - archive 是**子目录**，listDiary 的正则只认顶层 `YYYY-MM-DD.md`，
+ *     不会把归档版当成第三篇日记显示出来；
+ *   - 内容相同不归档（重写同一篇是幂等的，不该每天堆垃圾）；
+ *   - 归档失败**不阻断**主写入：丢一版旧稿也好过今天写不成。
+ * 报告（out/）不归档：它是派生品，随时能由事件流重算。
+ */
 export async function writeDaily(dirName, dateKey, text, root = rootDir()) {
-  const file = join(paths(root)[dirName], `${dateKey}.md`)
+  const dir = paths(root)[dirName]
+  const file = join(dir, `${dateKey}.md`)
+  if (dirName === 'diaryDir') {
+    const prev = await readDaily(dirName, dateKey, root).catch(() => null)
+    if (prev !== null && prev !== text) {
+      try {
+        await fs.mkdir(join(dir, 'archive'), { recursive: true })
+        await writeAtomic(join(dir, 'archive', `${dateKey}-${stampLocal()}.md`), prev)
+      } catch {
+        /* 归档失败不影响本次写入 */
+      }
+    }
+  }
   await writeAtomic(file, text)
   return file
+}
+
+/** 日记归档用的时间戳：本地时间，人看得懂（UTC 会在半夜差一天） */
+function stampLocal(d = new Date()) {
+  const p = (n) => String(n).padStart(2, '0')
+  return `${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`
 }
 
 export async function readDaily(dirName, dateKey, root = rootDir()) {

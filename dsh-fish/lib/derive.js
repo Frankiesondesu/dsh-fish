@@ -262,7 +262,18 @@ export function pickName(text) {
 export function deriveSelf(events = [], opts = {}) {
   const now = Number(opts.now ?? Date.now())
   const growthDays = clampInt(opts.growthDays ?? 30, 7, 180, 30)
-  const evs = orderEvents(events)
+  const ordered = orderEvents(events)
+  // 出门审查：回家卡上被取消勾选的条目，靠追加的一条 meta 记着它们的 id。
+  // 事件流只能追加（第 5 条铁律），所以「不收下」= deriveSelf 跳过，而不是删行。
+  // 原文仍在，观测台/导出照样看得见。
+  const rejectedIds = new Set()
+  for (const e of ordered) {
+    if (e.type !== 'meta') continue
+    const t = String(e.text ?? '')
+    if (!t.startsWith('outing-reject:')) continue
+    for (const id of t.slice('outing-reject:'.length).split(/[\s,]+/)) if (id) rejectedIds.add(id)
+  }
+  const evs = rejectedIds.size ? ordered.filter((e) => !rejectedIds.has(e.id)) : ordered
   const seedEv = evs.find((e) => e.type === 'seed')
   const seed = seedEv?.text ?? ''
 

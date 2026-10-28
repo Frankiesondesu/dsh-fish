@@ -21,6 +21,7 @@ import { loadConfig, dateKey } from './settings.js'
 import { toJsonSchema } from './toolschema.js'
 import { inWake } from './wakewin.js'
 import { refreshSelfDoc } from './selfdoc.js'
+import { guardWrite } from './tenant.js'
 
 /**
  * 防注入：把不可信的第三方文本包成"素材"。
@@ -118,11 +119,18 @@ export function registerCapture(ctx, deps = {}) {
         render: (_args, out) =>
           [{ type: 'text', text: out.ok ? `[已记下 ${out.id}]` : `[没记下：${out.note}]` }],
       },
-      async execute(args) {
+      async execute(args, exec) {
+        // 写入前先认「谁在说、说的是哪栋房子」（2026-10-28 用户 m01319）。
+        // 房客那边两份大肥鱼共用一个 root，事件流里没有「谁」，误认就发生在这里。
+        // 拒绝必须说清原因：静默丢弃会让她以为写进去了，然后反复重试同一句。
+        const who = guardWrite(deps.tenant, exec, 'growth_commit')
+        if (!who.ok) return { ok: false, id: '', note: who.note }
+
         // 算当前的 day / stage —— 但**只用于写信封**，绝不回传给模型
         const { events } = await readEvents(root)
         const { config } = await loadConfig(root)
         const model = deriveSelf(events, { growthDays: config.growthDays })
+        const stamp = { day: model.day, stage: model.stage }
 
         try {
           // ---- 日记：写进 diary/YYYY-MM-DD.md，不进事件流 ----
@@ -139,8 +147,8 @@ export function registerCapture(ctx, deps = {}) {
             // source 必须是 system：schema 规定 tool 只能写 HER_TYPES，
             // meta 写错成 'tool' 会被 NOT_HER_TYPE 拒掉 —— 日记就会变成"写下了但没标记"。
             await appendEvent(
-              { type: 'meta', text: `diary:${dk}` },
-              { day: model.day, stage: model.stage, source: 'system' },
+              { type: 'meta', text: `diary:${dk}`, sessionId: who.sessionId },
+              { ...stamp, source: 'system' },
               root,
             )
             // 注意：返回值只说"写下了"，不说写给谁看、写在哪 —— 她无从得知可见性。
@@ -158,8 +166,10 @@ export function registerCapture(ctx, deps = {}) {
               refs: args?.refs,
               verdict: args?.verdict,
               confidence: args?.confidence,
+              // 「谁写的」：这一条是她这条会话说的，不是别的屋子里那一位。
+              sessionId: who.sessionId,
             },
-            { day: model.day, stage: model.stage, source: 'tool' },
+            { ...stamp, source: 'tool' },
             root,
           )
 
