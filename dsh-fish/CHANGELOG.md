@@ -1,3 +1,14 @@
+## 0.6.11 — 2026-10-29
+
+**「出门」页签在公开版里没藏住，所有人装完都能看见（2026-10-29 用户 m00608 真机发现）。**
+
+0.6.7 说好「出门页只在开发副本里露出」，判据是 `/outing` 回包里的 `dev: IS_DEV_INSTALL`，而 `IS_DEV_INSTALL` 的算法是「自己的 `import.meta.url` 路径里有没有 `node_modules` 这一段」。这个判据不可靠：发布包会被解包到插件目录、也可能经 junction / link 指过去，路径里根本没有 `node_modules`，于是 `dev` 恒真、页签在正式版照常渲染。换句话说，它猜的是「安装布局」，而布局不由插件决定。
+
+- **判据换成文件开关**：`/outing` 的 `dev` 改用 `await devMode(root)`（`lib/devmode.js`）——`DSH_FISH_DEV=1` 或数据目录下存在 `.dev` 文件才算本机测试版。这跟「去刷 B 站」那个按钮共用同一个开关，与安装路径彻底解耦：没这个标记就是正式版，页签不渲染。
+- **删掉 `isDevInstall()` / `IS_DEV_INSTALL`**：不再按路径猜安装形态，避免以后换一种装法又漏一次。代码、路由、审查卡照旧全部保留，本机 `.dev` 在，开发副本上页签与以前一样。
+- **回归用例**（`test/outing.test.mjs`）：断言 `lib/observe.js` 里没有 `IS_DEV_INSTALL`、没有 `includes('node_modules')`、`/outing` 的 `dev` 走 `devMode(root)`，且复用 `./devmode.js`——判据再被改回路径猜法时这条会红。
+- 验证：本机 `node --test` **780 tests / pass 780 / fail 0**。
+
 ## 0.6.10 — 2026-10-28
 
 **GitHub Actions 四个 job 全红：三处「只在 Windows 上成立」的路径判断（2026-10-28 发布后自查）。**

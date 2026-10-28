@@ -74,18 +74,12 @@ import { LOG_KEEP, LOG_MAX_BYTES, buildBundle, clearLog, logLine, logsDir, redac
 // 「有没有新版」（2026-10-25 用户要求）：只读、只出网、不落盘。
 import { checkUpdate, REPO_URL, normalizeVersion } from './update.js'
 
-// 安装形态：开发副本（profile 里 link 到仓库）的代码就在仓库里；
-// npm 装出来的一定在某个 node_modules/dsh-fish/ 底下。
-// 「出门」页要真机跑一阵（2026-10-28 用户要求），发布版先不显示，代码与路由都保留。
-function isDevInstall() {
-  try {
-    return !fileURLToPath(import.meta.url).split(/[\\/]/).includes('node_modules')
-  } catch {
-    // 判断不了就当发布版：宁可先藏起来，也别让整页报错。
-    return false
-  }
-}
-const IS_DEV_INSTALL = isDevInstall()
+// 「出门」页签只在**本机测试版**露出（2026-10-28 用户要求；2026-10-29 修正判据）。
+// 早先用「代码路径里有没有 node_modules」猜安装形态：发布包可能被解包到插件目录、
+// 或被 link / junction 指过去，路径里根本没有 node_modules 这一段，于是页签在正式版
+// 漏了出去（用户 m00608）。现在改用和「去刷 B 站」同一个开关（lib/devmode.js：
+// `DSH_FISH_DEV=1` 或数据目录下的 `.dev` 文件）——与安装布局无关，没这个标记就是
+// 正式版，页签不渲染。代码、路由、审查卡都还在，只是入口藏起来。
 
 /**
  * 引导文案：别人第一次装，本机没有现成 cookie。
@@ -1175,8 +1169,9 @@ export function registerObserve(ctx, deps = {}) {
           possessions: possessions.slice(-20),
           workspaces,
           pocket,
-          // 开发副本才把「出门」页签露出来（发布版先藏着，代码和路由都还在）。
-          dev: IS_DEV_INSTALL,
+          // 只有本机测试版（`.dev` 或 DSH_FISH_DEV=1）才把「出门」页签露出来；
+          // 判据和「去刷 B 站」同一个开关，不再看安装路径（见文件上方注释）。
+          dev: await devMode(root),
           possessionEnabled: false,
           possessionWhy: '请神要覆盖宿主的身份段，段名必须运行期确认；0.6.3 只做出门，请神等确认后再开。',
         })
