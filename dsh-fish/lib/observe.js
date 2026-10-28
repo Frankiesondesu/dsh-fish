@@ -31,18 +31,27 @@ import { commentCountToday, replyCountToday, herComments, scanReplies } from './
 import { describeState, resetAll } from './reset.js'
 // 迁移工作区（2026-10-28，用户 m06510）：把整个数据目录搬到别的盘。
 import { moveRoot, moveStatus } from './move.js'
-import { identityText } from './identity.js'
-import { awayNow, awayLine, startOuting, endOuting, bindOutingSession, abortOuting, readOutings, readPossessions, activePossessionOf, snapshotEvents, verifyEvents, eventsSince } from './outing.js'
+import { identityText, detachOutside, liveAgentOf, attachIdentity, attachAwayGuard, mountedCount } from './identity.js'
+import { awayNow, awayLine, startOuting, endOuting, bindOutingSession, abortOuting, readOutings, readPossessions, activePossessionOf, snapshotEvents, verifyEvents, eventsSince, lastOutingForCwd, rejectNoteText, tripDays, tripNoOf, pendingOf, settlePending } from './outing.js'
+// 出门口袋（0.6.16 从本文件搬出去，为了能用假 registry 直接测「登记失败仍能出门」）。
+import { POCKET_TITLE, ensurePocket, pocketDirPath } from './pocket.js'
+// 往会话里补一句人话（请神交接句 / 回家驳回话术共用这一条路）。
+import { appendNote, queueNote } from './sessionnote.js'
+import { lettersSince } from './letter.js'
+// 纪念品（0.6.17，用户 m02041）：她只能问，带不带回去由人点头。
+import { keepsakesOfTrip, pendingKeepsakes, readKeepsakes, recentKeepsakes, decideKeepsake, tripKey } from './keepsake.js'
 // 请神（2026-10-28）：段名已在 asar 里确认（deployment:persona-prefix / -suffix），
 // 同名段在目标 agent 的 scoped ctx 上覆盖宿主那一段。
 import { possessInto, releasePossession } from './possess.js'
+// 对话的名字在 `session/title` 事件里，header 里没有（2026-10-29 用户 m00761）。
+import { titleOfAgent, clipTitle } from './sessiontitle.js'
 import { isHerHome, cwdOf } from './restrict.js'
 import { applyHandover, IMPORT_TEMPLATE } from './import.js'
 // 常见问题解答（2026-10-28 用户要求）：设置 → 反馈页的按钮点开，在新窗口里看全文。
 import { FAQ, FAQ_TITLE, renderFaqPage } from './faq.js'
 import { readHomeRecord, retireHomeSessions } from './retire.js'
 import { collectBackup, backupFileName, restoreBackup } from './backup.js'
-import { bootstrapHome, homeStatus, wakeIfBlank } from './home.js'
+import { bootstrapHome, homeStatus, wakeIfBlank, talkSessionId } from './home.js'
 import { selfDocStatus } from './selfdoc.js'
 import { personaBudget, BELIEF_SHOWN, shownCount } from './persona.js'
 // 立场清单（2026-10-25，用户设计「纵向·立场」）：四道门走完之后长出来的那张清单。
@@ -65,7 +74,7 @@ import { publicOwner, saveOwner, saveAccount } from './owner.js'
 import { createClient } from './bili.js'
 import { historyFromEvents } from './history.js'
 import { runChecks } from './selfcheck.js'
-import { readRestrictState, knownToolNames } from './restrict.js'
+import { readRestrictState, knownToolNames, ownLayerNames } from './restrict.js'
 import { riskState, clearRisk } from './risk.js'
 import { decodeBase64Image, saveImage } from './media.js'
 // 导出包里要写清「她那条会话用的哪个模型、吃不吃图」——只读探测，失败不影响导出。
@@ -73,6 +82,9 @@ import { resolveHerModel } from './modelinfo.js'
 import { LOG_KEEP, LOG_MAX_BYTES, buildBundle, clearLog, logLine, logsDir, redactConfig, tailLog } from './log.js'
 // 「有没有新版」（2026-10-25 用户要求）：只读、只出网、不落盘。
 import { checkUpdate, REPO_URL, normalizeVersion } from './update.js'
+// 「下载 → 校验 → 关应用安装」（2026-10-29 用户要求）：市场索引滞后半天到一天，
+// 所以插件自己带一条升级通道。所有动作都要用户在界面上点过确认才发生。
+import { createSelfUpdater, runtimeBins, tailUpdateLog } from './selfupdate.js'
 
 // 「出门」页签只在**本机测试版**露出（2026-10-28 用户要求；2026-10-29 修正判据）。
 // 早先用「代码路径里有没有 node_modules」猜安装形态：发布包可能被解包到插件目录、
@@ -140,6 +152,15 @@ export function registerObserve(ctx, deps = {}) {
   const root = deps.root ?? rootDir()
   const disposers = []
 
+  // 自带升级通道（2026-10-29）：状态机只活在内存里，应用一重启就作废。
+  // 留着上次下好的包反而危险——之后可能被当成"当前版本"装上去。
+  const selfUpdater = deps.selfUpdater ?? createSelfUpdater({
+    root,
+    current: deps.version,
+    exe: process.execPath,
+    ...runtimeBins({ exe: process.execPath }),
+  })
+
   // ---- 信任栅栏：失败即拒绝 ----
   function guarded(handler) {
     return async (req, res) => {
@@ -165,7 +186,16 @@ export function registerObserve(ctx, deps = {}) {
       const { events } = await readEvents(root)
       const { config } = await loadConfig(root)
       const st = deriveStatus({ events, config, now: new Date() })
-      send(res, 200, { ...st, running: true })
+      // 此刻在外面（0.6.16，用户 m01613）：一条给人看的话，派生函数保持纯事件输入。
+      let away = null
+      try {
+        const a = await awayNow(root)
+        if (a?.kind) {
+          const rec = a.kind === 'outing' ? a.outing : a.possession
+          away = { kind: a.kind, since: rec?.startedAt, line: awayLine(a), tripDays: a.kind === 'outing' ? tripDays(a.outing, { now: Date.now() }) : 0 }
+        }
+      } catch { /* 读台账失败不影响状态本身 */ }
+      send(res, 200, { ...st, away, running: true })
     }],
     ['/state', async (req, res) => {
       const { events, skipped } = await readEvents(root)
@@ -312,11 +342,18 @@ export function registerObserve(ctx, deps = {}) {
         // 白名单：只允许改"环境"，不允许任何指向她本人的键
         // chat/memory 是 2026-10-23 加的：一个是会话轮换阈值，一个是她能背多少字。
         // 两个都不是性格，但必须在这里登记，否则观测台「保存」会被 400 挡回来。
+        // bili 是 2026-10-29 补的：0.6.5 给 issue #5 加了「请求间隔 / 请求抖动」两个设置项，
+        // 客户端 buildConfig() 每次整表提交都带着它们，白名单却漏登记——于是用户改任何一项
+        // 设置都会看到一句「没存上」，而且整张表都没存进去（自动保存是整表提交）。
+        // 教训：新增顶层设置项时，settings.js 的 DEFAULTS 和这张白名单必须同时改；
+        // test/p5.test.mjs 里有一条防漂移用例，直接从 client.js 的 buildConfig() 反查这张表。
         // persona 不在这里：它是导入动作的副产物（见 lib/import.js），
         // 不给「从设置页直接改」的入口——否则就等于给了一个「关掉那两条禁令」的开关。
-        const allowed = ['growthDays', 'wakesPerDay', 'window', 'daily', 'diary', 'absenceAfterDays', 'avoid', 'browse', 'video', 'comment', 'notify', 'chat', 'memory', 'tools', 'observe', 'ui']
+        const allowed = ['growthDays', 'wakesPerDay', 'window', 'daily', 'diary', 'absenceAfterDays', 'avoid', 'browse', 'bili', 'video', 'comment', 'notify', 'chat', 'memory', 'tools', 'observe', 'ui']
         const bad = Object.keys(patch).filter((k) => !allowed.includes(k))
-        if (bad.length) return send(res, 400, { error: `不允许修改：${bad.join(', ')}` })
+        // 这句话会原样冒到界面上，所以写成人话（界面会把它放在「技术信息」那一行）：
+        // 原来那句「不允许修改：bili」既不说人话，也让人以为自己填错了。
+        if (bad.length) return send(res, 400, { error: `这一版还不支持保存：${bad.join('、')}` })
         // 白名单必须真的存在（2026-10-24）：宿主 restrict 遇到不认识的名字会抛错，
         // 整条收窄当场失效、她退回全量工具面。宁可不存，也不留一个拼错的字母。
         if (patch.tools && patch.tools.allow !== undefined) {
@@ -356,7 +393,13 @@ export function registerObserve(ctx, deps = {}) {
     ['/tools', async (req, res) => {
       if (req.method !== 'GET') return send(res, 405, { error: 'method not allowed' })
       const known = knownToolNames(ctx)
-      return send(res, 200, { ok: Boolean(known && known.length), known: known ?? [] })
+      // ownLayer：看得见、但 restrict() 点不了名的那些（dsh-ops 的 ops_* 就在这）。
+      // 客户端拿它提示「加进白名单只是让守卫放行」，不是「收窄会把她挡住」。
+      return send(res, 200, {
+        ok: Boolean(known && known.length),
+        known: known ?? [],
+        ownLayer: ownLayerNames(),
+      })
     }],
     // 只给两件事：看规则在哪一层、裁决她提上来的那一张。
     // 没有"新建规则"、没有"编辑规则"——规则不是设置项。
@@ -550,19 +593,72 @@ export function registerObserve(ctx, deps = {}) {
     // 只在设置页点「检查更新」时走一次，插件运行期**从不**自动查——
     // 她不需要知道自己是几号版本，那是装她的人的事。
     // 地址全部硬编码在 update.js 里，这里绝不接受客户端传 URL（否则就是 SSRF 口子）。
+    //
+    // 2026-10-29 加「下载 → 安装」两段（用户 m00203）：市场索引要等半天到一天，
+    // 所以插件自己带一条升级通道。三条约束：
+    //   · GET 只读状态，没有任何副作用；下载和安装都必须 POST（＝界面点过确认）；
+    //   · 安装不在本进程里做——写一个 .cmd，等宿主退出后才动手（运行中换包会 EPERM）；
+    //   · 状态机只在内存里，重启即作废，避免"上次下的包"被误装。
     ['/update', async (req, res) => {
-      const current = normalizeVersion(deps.version) || String(deps.version ?? '')
       const url = new URL(req.url, 'http://x')
-      const ms = Math.min(15_000, Math.max(1_000, Number(url.searchParams.get('ms') ?? 6000) || 6000))
-      // checkUpdate 自己永不抛（连不上是常态），这里再包一层只是防手滑。
-      let r
-      try {
-        r = await checkUpdate({ current, timeoutMs: ms })
-      } catch (err) {
-        r = { ok: false, current, error: String(err?.message ?? err) }
+      const route = url.pathname.replace(/\/+$/, '')
+
+      // ---- 只检查：点一次查一次 ----
+      if (route.endsWith('/update')) {
+        const current = normalizeVersion(deps.version) || String(deps.version ?? '')
+        const ms = Math.min(15_000, Math.max(1_000, Number(url.searchParams.get('ms') ?? 6000) || 6000))
+        // checkUpdate 自己永不抛（连不上是常态），这里再包一层只是防手滑。
+        let r
+        try {
+          r = await checkUpdate({ current, timeoutMs: ms })
+        } catch (err) {
+          r = { ok: false, current, error: String(err?.message ?? err) }
+        }
+        // GitHub 地址一并下发，客户端不需要自己拼（仓库改名只改 update.js 一处）。
+        send(res, 200, { ...r, repoUrl: REPO_URL })
+        return
       }
-      // GitHub 地址一并下发，客户端不需要自己拼（仓库改名只改 update.js 一处）。
-      send(res, 200, { ...r, repoUrl: REPO_URL })
+
+      // ---- 进度：客户端轮询这一条 ----
+      if (route.endsWith('/update/status')) {
+        const st = selfUpdater.status()
+        // 就绪/安装中时把脚本日志尾几行带上，出问题用户能直接看见卡在哪一步。
+        if (st.phase === 'prepared' || st.phase === 'installing') {
+          st.log = await tailUpdateLog(join(root, 'updates', 'last.log'))
+        }
+        send(res, 200, st)
+        return
+      }
+
+      // ---- 下载（界面确认过才到这）----
+      if (route.endsWith('/update/download')) {
+        if (req.method !== 'POST') return send(res, 405, { error: '只接受 POST' })
+        let body
+        try {
+          body = JSON.parse((await readBody(req)) || '{}')
+        } catch {
+          return send(res, 400, { error: 'body 不是合法 JSON' })
+        }
+        const version = String(body?.version ?? '').trim()
+        if (!version) return send(res, 400, { error: '缺 version' })
+        const r = await selfUpdater.start(version)
+        return send(res, r.ok ? 202 : 400, r)
+      }
+
+      // ---- 安装（第二次确认之后）----
+      if (route.endsWith('/update/install')) {
+        if (req.method !== 'POST') return send(res, 405, { error: '只接受 POST' })
+        let body
+        try {
+          body = JSON.parse((await readBody(req)) || '{}')
+        } catch {
+          return send(res, 400, { error: 'body 不是合法 JSON' })
+        }
+        const r = await selfUpdater.install(String(body?.version ?? '').trim())
+        return send(res, r.ok ? 202 : 400, r)
+      }
+
+      send(res, 404, { error: '没有这个接口' })
     }],
 
     // 「你不在的时候」：不推送，只在你回来时告诉你错过了什么。
@@ -1130,6 +1226,8 @@ export function registerObserve(ctx, deps = {}) {
               path: String(w.path ?? ''),
               // 插件源码目录：这趟风险最高——她读 lib/rules.js 等于读到完整禁令清单
               risky: isPluginSource(w.path),
+              // 这个工作区上一趟的会话（能复用就接着用，不必每次新开一条）
+              last: lastOutingForCwd({ outings }, w.path),
             }))
             .filter((w) => w.id)
           if (!list.length) why = '宿主没有可列的工作区（workspaceRegistry 不可用）'
@@ -1160,20 +1258,101 @@ export function registerObserve(ctx, deps = {}) {
         const since = away.kind === 'outing'
           ? eventsSince(join(root, 'events.jsonl'), away.outing?.startedAt)
           : { ok: false, total: 0, items: [], why: '没在外面' }
+        // 她这趟留的话（0.6.16）：her_leave 写的是**家里**的事件流与信箱，
+        // 出门页把这几句摊开，回家时人能看到她在外头主动说过什么。
+        let letters = []
+        if (away.outing?.startedAt) {
+          try {
+            const { events } = await readEvents(root)
+            letters = lettersSince(events, {
+              since: away.outing.startedAt,
+              sessionId: away.outing.sessionId || '',
+              limit: 6,
+            })
+          } catch { letters = [] }
+        }
+        // 「这趟出去几天」：状态卡与最近几趟都按这个口径显示（天数，不写情绪）。
+        const trip = away.outing ? tripDays(away.outing) : 0
+        // 旅行日记与纪念品（0.6.17）：每趟写了几篇日记、带回来几件。
+        // 日记本体仍在 diary/YYYY-MM-DD.md，这里只数 meta 里的趟次标记。
+        let keepsakes = { pending: [], recent: [] }
+        const diariesByTrip = new Map()
+        try {
+          keepsakes = { pending: pendingKeepsakes(root), recent: recentKeepsakes(root, 6) }
+          const { events } = await readEvents(root)
+          for (const ev of events) {
+            if (ev?.type !== 'meta') continue
+            const m = /^diary:\S+(?: trip:(\S+))?$/.exec(String(ev.text ?? ''))
+            if (m && m[1]) diariesByTrip.set(m[1], (diariesByTrip.get(m[1]) ?? 0) + 1)
+          }
+        } catch { /* 数不出来就按 0 算，不影响别的 */ }
+        const keptByTrip = new Map()
+        for (const it of readKeepsakes(root).items) {
+          if (it?.status !== 'kept' || !it.trip) continue
+          keptByTrip.set(it.trip, (keptByTrip.get(it.trip) ?? 0) + 1)
+        }
+        const tripsWithCounts = outings.map((o) => ({
+          ...o,
+          diaries: diariesByTrip.get(tripKey(o)) ?? 0,
+          keepsakes: keptByTrip.get(tripKey(o)) ?? 0,
+        }))
+        // 在外面的这一条到底是谁（0.6.26，用户 m03194）：界面要写清「哪个工作区的那条对话」。
+        // 光有台账不够——0.6.25 真机上出现过「台账写进去了，但装配那一步没走完」的幽灵出门：
+        // 界面说在外面，实际身份段/守卫一段没挂。这里把「挂了几段」一起回给界面，
+        // 让这种情况当场看得见，而不是等她想写点东西时才发现自己不是她。
+        let awayInfo = { ...away, line: awayLine(away), verify: liveVerify, since, tripDays: trip }
+        if (away?.kind) {
+          const rec = away.kind === 'outing' ? away.outing : away.possession
+          const sid = String(rec?.sessionId ?? '')
+          const live = liveAgentOf(ctx, sid)
+          const mounted = live ? mountedCount(live) : 0
+          awayInfo = {
+            ...awayInfo,
+            sessionId: sid,
+            sessionShort: sid.replace(/^session-/, '').slice(0, 8),
+            sessionTitle: live ? clipTitle(titleOfAgent(ctx, live)) : '',
+            tripNo: away.kind === 'outing' ? tripNoOf({ outings }, sid, Number(rec?.startedAt ?? 0)) : 0,
+            equipped: mounted > 0,
+            warning: mounted > 0 ? '' : '这趟没挂上装备（身份段与守卫都没挂），先回家再重来一次。',
+          }
+        }
+        // 0.6.32（用户 2026-10-29 真机要求）：上一次被拒收的那趟要能看见、能复核。
+        // 之前 pending 是单向的——这趟不再是 active，界面只剩「等确认」三个字，
+        // 没有原因、也没有下一步，只能手工改台账。这里把原因和复核入口一起回给界面。
+        let pendingReview = null
+        try {
+          const pend = pendingOf({ outings })
+          if (pend) {
+            const pv = verifyEvents(join(root, 'events.jsonl'), pend.baseline)
+            const psid = String(pend.sessionId ?? '')
+            pendingReview = {
+              sessionId: psid,
+              sessionShort: psid.replace(/^session-/, '').slice(0, 8),
+              workspaceName: pend.workspaceName || pend.workspaceId || '别的工作区',
+              endedAt: Number(pend.endedAt) || 0,
+              startedAt: Number(pend.startedAt) || 0,
+              checkable: pv.checkable !== false,
+              okNow: pv.ok === true,
+              reason: pv.why || (pv.ok === true ? '' : '文件对不上'),
+              appended: Number(pv.appended ?? 0),
+            }
+          }
+        } catch { /* 复核信息拿不到不影响别的 */ }
         return send(res, 200, {
           ok: true,
           why,
-          away: { ...away, line: awayLine(away), verify: liveVerify, since },
+          away: awayInfo,
+          pendingReview,
           identityFrozen: Boolean(away.outing?.identity),
-          outings: outings.slice(-20),
+          outings: tripsWithCounts.slice(-20),
           possessions: possessions.slice(-20),
+          letters,
+          keepsakes,
           workspaces,
           pocket,
           // 只有本机测试版（`.dev` 或 DSH_FISH_DEV=1）才把「出门」页签露出来；
           // 判据和「去刷 B 站」同一个开关，不再看安装路径（见文件上方注释）。
           dev: await devMode(root),
-          possessionEnabled: false,
-          possessionWhy: '请神要覆盖宿主的身份段，段名必须运行期确认；0.6.3 只做出门，请神等确认后再开。',
         })
       }
       if (req.method !== 'POST') return send(res, 405, { error: 'method not allowed' })
@@ -1181,6 +1360,34 @@ export function registerObserve(ctx, deps = {}) {
       let b = {}
       try { b = JSON.parse(raw || '{}') } catch { return send(res, 400, { error: 'body 不是合法 JSON' }) }
       const action = String(b.action ?? '')
+
+      // 纪念品点头 / 摇头（0.6.17）：只有这一步才会真的复制文件。
+      if (action === 'keepsake') {
+        const said = b.yes === true
+        const r = decideKeepsake(root, { id: String(b.id ?? ''), yes: said })
+        logLine('info', ['纪念品：', said ? '准了' : '没带', r.item?.rel ?? '', r.item?.id ?? ''], root)
+        return send(res, r.ok ? 200 : 409, { ok: r.ok, item: r.item ?? null, note: r.note })
+      }
+
+      // 复核上一次被拒收的那趟（0.6.32）：文件还原后重新比对，通过就当场收下。
+      // 之前 pending 是死路——这趟不再是 active，再点「收下」只会得到「她没在外面」。
+      if (action === 'review') {
+        const { outings } = await readOutings(root)
+        const pend = pendingOf({ outings })
+        if (!pend) return send(res, 409, { ok: false, why: '现在没有等复核的那趟' })
+        if (b.sessionId && String(pend.sessionId) !== String(b.sessionId)) {
+          return send(res, 409, { ok: false, why: '等复核的不是这一趟' })
+        }
+        const v = verifyEvents(join(root, 'events.jsonl'), pend.baseline)
+        if (v.checkable !== false && v.ok === false) {
+          logLine('info', ['复核：还是对不上', v.why ?? ''], root)
+          return send(res, 409, { ok: false, why: v.why || '文件还是对不上', verify: v })
+        }
+        const r = await settlePending(root, { status: 'done', kept: true })
+        if (!r.ok) return send(res, 409, { ok: false, why: r.why })
+        logLine('info', ['复核：通过，这趟收下了', r.outing?.workspaceName || '', v.why ?? ''], root)
+        return send(res, 200, { ok: true, outing: r.outing, verify: v })
+      }
 
       if (action === 'end') {
         const away = await awayNow(root)
@@ -1214,7 +1421,37 @@ export function registerObserve(ctx, deps = {}) {
         const r = await endOuting(root, { status, kept: tampered ? null : b.kept === false ? false : true })
         if (!r.ok) return send(res, 409, { ok: false, why: r.why })
         logLine('info', [`回家：${status}`, r.outing?.workspaceName || r.outing?.workspaceId || '', v.why ?? ''], root)
-        return send(res, 200, { ok: true, outing: r.outing, verify: v, tampered, rejected: rejectedIds.length })
+        // 回家这一刻，「这条会话还算不算她的」就有了答案：不再算 → 当场拆掉
+        // 身份段 / 处境段 / 兜底守卫（0.6.16）。不等进程退出，也不靠重启。
+        const outSid = String(r.outing?.sessionId || away.outing?.sessionId || '')
+        const outAgent = liveAgentOf(ctx, outSid)
+        const detached = outAgent ? detachOutside(outAgent) : { ok: false, removed: 0 }
+        if (detached.ok) logLine('info', ['回家：拆掉外面的装备', `${detached.removed} 段`], root)
+        // 驳回要讲给她听（设计 §3.7，用户 m01613 第①条）：
+        // 不是「你没去过」，而是「那几条我不认，它不算你」。写进**家里**那条会话。
+        let note = { ok: false, why: '这趟没有要驳回的' }
+        if (!tampered && rejectedIds.length) {
+          try {
+            const picked = eventsSince(join(root, 'events.jsonl'), away.outing?.startedAt)
+              .items.filter((it) => rejectedIds.includes(it.id))
+            const text = rejectNoteText({ items: picked, total: rejectedIds.length })
+            if (text) {
+              const rec = await readHomeRecord(root).catch(() => null)
+              const homeAgent = liveAgentOf(ctx, rec?.sessionId || '')
+              if (homeAgent) {
+                const w = appendNote(homeAgent, text)
+                note = { ok: w.ok, why: w.why ?? '', delivered: w.ok }
+              } else {
+                const q = await queueNote(root, text)
+                note = { ok: q.ok, why: q.why ?? '', delivered: false, queued: Boolean(q.ok) }
+              }
+              if (!note.ok) logLine('warn', ['回家：驳回话术没写进去', note.why], root)
+            }
+          } catch (err) {
+            note = { ok: false, why: String(err?.message ?? err).slice(0, 120) }
+          }
+        }
+        return send(res, 200, { ok: true, outing: r.outing, verify: v, tampered, rejected: rejectedIds.length, detached, note })
       }
 
       if (action === 'start') {
@@ -1252,45 +1489,91 @@ export function registerObserve(ctx, deps = {}) {
         const baseline = snapshotEvents(join(root, 'events.jsonl'))
         // 出门那一刻的身份快照：存进台账，她在外面读这个，不再读家里那份可变文件。
         const identity = identityText(root)
+        // 复用同一趟（0.6.16，用户 m01613）：接着上次那条会话，而不是每趟新开。
+        // 规则：一条会话算她的，仅当有一趟 active 出门指向它；这条新记录只是换了
+        // 记录去指向同一个 sessionId，历史那趟仍留在台账里。
+        const reuseId = String(b.sessionId ?? '').trim()
+        let reusePrev = null
+        if (reuseId) {
+          const { outings } = await readOutings(root)
+          reusePrev = outings.find((o) => o && String(o.sessionId ?? '') === reuseId) ?? null
+          if (!reusePrev) return send(res, 409, { ok: false, why: '台账里找不到这条会话的出门记录' })
+          if (wsPath && pathKey(reusePrev.cwd) !== pathKey(wsPath)) {
+            return send(res, 409, { ok: false, why: '这条会话上次去的是别的工作区，不能接过来' })
+          }
+          if (!wsPath) wsPath = String(reusePrev.cwd ?? '')
+          if (!wsTitle) wsTitle = String(reusePrev.workspaceName ?? '')
+        }
         // **先记账，再建会话**：`sc.create()` 会同步触发宿主的 `agent/created`，
         // identity.js 那条钩子必须已经看得到这次出门，否则她的身份段与兜底守卫
         // 都不会挂上——0.6.3 真机第一趟踩的就是这个顺序。
-        const r = await startOuting(root, { sessionId: '', workspaceId: wsId, workspaceName: wsTitle, cwd: wsPath, baseline, identity })
+        const r = await startOuting(root, { sessionId: reuseId, workspaceId: wsId, workspaceName: wsTitle, cwd: wsPath, baseline, identity })
         if (!r.ok) return send(res, 409, { ok: false, why: r.why })
         if (!wsId && !wsPath) return send(res, 400, { error: '要选一个工作区' })
-        let created = null
+        // 先落一行「出门」（0.6.26，用户 m03194）：以前装配那一段跑在日志之前，中间任何一步
+        // 抛错都会只留下台账里一条 active、日志里什么都没有——0.6.25 真机出现的「幽灵出门」。
+        // 先写一行，再装配，装配完再写一行；两行都在才算这趟真的挂上了。
+        const { outings: allOutings } = await readOutings(root)
+        const tripNo = reuseId ? tripNoOf({ outings: allOutings }, reuseId, Number(r.outing?.startedAt ?? 0)) : 1
+        logLine('info', ['出门：', wsTitle || wsId, reuseId ? `（接回第 ${tripNo} 趟）` : '（新开一条）', wsPath], root)
+        let sessionId = reuseId
         try {
-          // 口袋没登记成工作区时退到 `cwd`——照样能开门，只是记忆分区可能落在「未知工作区」。
-          created = wsId ? await sc.create({ workspaceId: wsId }) : await sc.create({ cwd: wsPath })
-        } catch (err) {
-          await abortOuting(root)
-          return send(res, 500, { ok: false, why: `建会话失败：${String(err?.message ?? err).slice(0, 160)}` })
-        }
-        const sessionId = String(created?.sessionId ?? created?.id ?? '')
-        if (!sessionId) {
-          await abortOuting(root)
-          return send(res, 500, { ok: false, why: '宿主没返回会话 id' })
-        }
-        // 会话 id 补进台账；agent/created 那边如果已经认出来并补过，这一步是幂等的。
-        await bindOutingSession(root, { sessionId })
-        // 首轮必须走 sc.prompt：她的身份段挂在 system prompt 上，冷启动就要生效。
-        // 不能 await（这一轮要等模型跑完），signal 是宿主必填参数（issue #1）。
-        try {
+          if (reuseId) {
+            // 挂着的老会话：`agent/created` 不会再触发，这里直接把装备挂回去。
+            const live = liveAgentOf(ctx, reuseId)
+            if (live) {
+              attachIdentity(live, root, { frozen: identity })
+              const g = attachAwayGuard(live, { root, herDir: paths(root).herDir, log: (m) => logLine('info', [m], root) })
+              if (!g.ok) logLine('warn', ['出门：接回的老会话兜底守卫没挂上', g.why ?? ''], root)
+              await bindOutingSession(root, { sessionId })
+            } else {
+              // 宿主 `create({sessionId})` 只复用**空白**会话（跑过 turn 会静默新开一条），
+              // 所以接回上次那趟必须让宿主把那条会话恢复起来。
+              // 0.6.26 真机踩过：这版宿主的 `sessionController` 没有 `resume`（Remote 面只有
+              // list/create/prompt/cancel/page/follow…），正确入口是 `resolveAgent(sessionId)`
+              // ——它内部 resolve → resume，且把并发恢复去重，返回 `{ agent }` 或 `{ error }`。
+              const back = await resolveSessionAgent(sc, reuseId)
+              // 恢复之后宿主的 agent/created 可能已经补挂过；没挂上就在这里补一次并记下来。
+              if (back && mountedCount(back) === 0) {
+                attachIdentity(back, root, { frozen: identity })
+                attachAwayGuard(back, { root, herDir: paths(root).herDir, log: (m) => logLine('info', [m], root) })
+              }
+            }
+          } else {
+            // 口袋没登记成工作区时退到 `cwd`——照样能开门，只是记忆分区可能落在「未知工作区」。
+            const created = wsId ? await sc.create({ workspaceId: wsId }) : await sc.create({ cwd: wsPath })
+            sessionId = String(created?.sessionId ?? created?.id ?? '')
+            if (!sessionId) throw new Error('宿主没返回会话 id')
+            // 会话 id 补进台账；agent/created 那边如果已经认出来并补过，这一步是幂等的。
+            await bindOutingSession(root, { sessionId })
+          }
+          // 首轮必须走 sc.prompt：她的身份段挂在 system prompt 上，冷启动就要生效。
+          // 不能 await（这一轮要等模型跑完），signal 是宿主必填参数（issue #1）。
+          // 接回上次那趟时不重念「你出门了」，只说一句还在那边。
+          const wakeText = reuseId
+            ? `又出门了，还在「${wsTitle || wsPath || '那边'}」。接着上次的做，家里人在叫你回去。`
+            : outingWakeText(wsTitle || wsPath || '别的工作区')
           if (typeof sc.prompt === 'function') {
             void sc.prompt({
               requestId: `outing-${sessionId}-${Date.now()}`,
               sessionId,
               mode: 'queue',
-              content: [{ type: 'text', text: outingWakeText(wsTitle || wsPath || '别的工作区') }],
+              content: [{ type: 'text', text: wakeText }],
             }, new AbortController().signal).catch((err) => {
               logLine('warn', ['出门首轮没递进去', String(err?.message ?? err).slice(0, 120)], root)
             })
           }
         } catch (err) {
-          logLine('warn', ['出门首轮没递进去', String(err?.message ?? err).slice(0, 120)], root)
+          const why = String(err?.message ?? err).slice(0, 160)
+          const live = liveAgentOf(ctx, reuseId || sessionId)
+          if (live) detachOutside(live)
+          try { await abortOuting(root, { force: true }) } catch { /* 撤不掉也要把错误说出去 */ }
+          logLine('warn', ['出门：装配失败，已经把这趟撤掉了', why], root)
+          return send(res, 500, { ok: false, why: `出门没装配完，已经撤掉这趟：${why}` })
         }
-        logLine('info', ['出门：', wsTitle || wsId, `会话 ${sessionId}`], root)
-        return send(res, 200, { ok: true, outing: r.outing, workspaces: [] })
+        const equipped = mountedCount(liveAgentOf(ctx, sessionId)) > 0
+        logLine('info', ['出门：装配完成', wsTitle || wsId, `会话 ${sessionId}`, equipped ? '装备挂上了' : '装备一段都没挂上'], root)
+        return send(res, 200, { ok: true, outing: r.outing, reused: Boolean(reuseId), sessionId, tripNo, equipped, workspaces: [] })
       }
 
       send(res, 400, { error: 'action 只能是 start 或 end' })
@@ -1314,7 +1597,8 @@ export function registerObserve(ctx, deps = {}) {
             const h = a?.session?.header ?? a?.session ?? {}
             sessions.push({
               sessionId: sid,
-              title: String(h.title ?? h.name ?? '').slice(0, 80),
+              // 名字来自 session/title 事件（sessionTitle 服务）；header.title 只是旧版本的退路。
+              title: clipTitle(titleOfAgent(ctx, a) || h.title || h.name || ''),
               cwd: cwdOf(a),
             })
           }
@@ -1350,10 +1634,23 @@ export function registerObserve(ctx, deps = {}) {
         return send(res, 200, { ok: true, possession: r.possession, section: r.section ?? '' })
       }
       if (b.action === 'end') {
-        const r = await releasePossession(root, { sessionId: b.sessionId ?? '', log })
+        // 结束时往那条对话补一条交接句：历史删不掉，只能补一句「已经还给你了」。
+        // 起因：2026-10-29 用户 m00924 真机发现请走之后那条对话还自称是大肥鱼。
+        let agent = null
+        try {
+          const reg = ctx.get?.('agents')
+          const wantSid = String(b.sessionId ?? '')
+          const curSid = wantSid || String(activePossessionOf(await readPossessions(root))?.sessionId ?? '')
+          agent = curSid ? reg?.get?.(curSid) ?? null : null
+        } catch { /* 拿不到活 agent 就只撤挂载，不写交接句 */ }
+        const r = await releasePossession(root, {
+          sessionId: b.sessionId ?? '',
+          log,
+          agent,
+        })
         if (!r.ok) return send(res, r.code ?? 409, { ok: false, why: r.why })
         logLine('info', ['请神结束：', r.possession?.title || r.possession?.sessionId || ''], root)
-        return send(res, 200, { ok: true, possession: r.possession })
+        return send(res, 200, { ok: true, possession: r.possession, note: r.note })
       }
       send(res, 400, { error: 'action 只能是 start 或 end' })
     }],
@@ -1495,6 +1792,26 @@ export function registerObserve(ctx, deps = {}) {
   }
 }
 
+/**
+ * 把一条已经存在的会话恢复成活的 agent（0.6.27，用户 m03372）。
+ *
+ * 为什么不用 `sc.resume`：真机上 `sessionController` 是带 `@Remote` 装饰的服务，
+ * 暴露面只有 list/search/create/selectModel/modelCatalog/rename/fork/prompt/
+ * attachment/updateQueue/cancel/page/follow/projections/control，**没有 resume**；
+ * 0.6.26 直接调它，出门每次都 500「宿主没有 sessionController.resume」。
+ * 正确入口 `resolveAgent(sessionId)` 内部 resolve → resume，并发恢复会去重，
+ * 返回 `{ agent }`，失败返回 `{ error }`（session/not-found、session/writer-held…）。
+ */
+export async function resolveSessionAgent(sc, sessionId) {
+  const got = typeof sc?.resolveAgent === 'function'
+    ? await sc.resolveAgent(sessionId)
+    : (typeof sc?.agents?.resolveAgent === 'function' ? await sc.agents.resolveAgent(sessionId) : null)
+  if (got === null) throw new Error('宿主没有 sessionController.resolveAgent，接不回上次那条会话')
+  if (got?.error) throw got.error
+  if (!got?.agent) throw new Error('宿主说恢复好了，但没把那条会话的 agent 交出来')
+  return got.agent
+}
+
 /** 比对路径用：Windows 大小写不敏感。只比对，不做文件访问。 */
 function pathKey(p) {
   const s = String(p ?? '').replace(/\\/g, '/').replace(/\/+$/, '')
@@ -1524,43 +1841,7 @@ function isPluginSource(p) {
  * 代价（写进 UI，不藏着）：沙箱的写权限跟工作区走，她在口袋里写不进
  * `02-我的项目` / `03-我的文档`——要交付就从口袋搬。这条取舍无法两全。
  */
-const POCKET_TITLE = '出门口袋'
-
-/** 口袋路径：配置 `outingPocket` 优先；缺省放用户目录下（ASCII，避开中文路径那条老坑）。 */
-function pocketDirPath(config) {
-  const raw = String(config?.outingPocket ?? '').trim()
-  if (raw) return raw
-  return join(homedir(), 'outing-pocket')
-}
-
-/**
- * 建好口袋目录，并登记成工作区（登记失败也能出门：`sc.create({ cwd })` 是退路）。
- * `registered:false` 时 UI 会写明——那时记忆分区可能落到「未知工作区」。
- */
-async function ensurePocket(ctx, root, config) {
-  const dir = pocketDirPath(config)
-  try {
-    fs.mkdirSync(dir, { recursive: true })
-  } catch (err) {
-    return { ok: false, why: `建口袋目录失败：${String(err?.message ?? err).slice(0, 140)}`, dir }
-  }
-  const reg = safeGet(ctx, 'workspaceRegistry')
-  let wsId = ''
-  try {
-    const list = typeof reg?.list === 'function' ? reg.list() : []
-    const found = list.find((w) => w && pathKey(w.path) === pathKey(dir))
-    wsId = String(found?.id ?? found?.workspaceId ?? '')
-  } catch { /* 列不出来就试着建 */ }
-  if (!wsId && typeof reg?.create === 'function') {
-    try {
-      const ws = await reg.create(dir, POCKET_TITLE)
-      wsId = String(ws?.id ?? ws?.workspaceId ?? '')
-    } catch (err) {
-      return { ok: true, wsId: '', dir, registered: false, why: `登记工作区失败：${String(err?.message ?? err).slice(0, 120)}` }
-    }
-  }
-  return { ok: true, wsId, dir, registered: Boolean(wsId) }
-}
+// 口袋的目录与工作区登记在 lib/pocket.js（0.6.16 搬出去，路由层直接用假 registry 就能测）。
 
 /**
  * 出门首轮的那句话。

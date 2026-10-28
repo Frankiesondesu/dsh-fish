@@ -1,6 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtemp, rm, readFile } from 'node:fs/promises'
+import { writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -177,5 +178,43 @@ test('改口规则写在 growth_commit 的说明里（2026-10-24 用户选方案
     assert.ok(desc.includes('用 revise 带上那句的 id'), `工具说明里要有这句，实际：${desc}`)
     assert.ok(desc.includes('如果你在修正之前说过的话'), '要说明这是"修正旧话"的场景')
     assert.ok(desc.includes('type=revise'), '也要保留原来那句 type=revise 的说法')
+  })
+})
+
+test('旅行日记：出门那趟写的日记带趟次标记，家里写的不带', async () => {
+  await withRoot(async (root) => {
+    const ctx = fakeCtx()
+    registerCapture(ctx, { root })
+    const tool = ctx.regs.get('growth_commit')
+
+    // 一趟进行中的出门，指向 session-x（cwd 在自家下面，写入守卫照常放行）
+    writeFileSync(
+      join(root, 'outings.json'),
+      JSON.stringify({
+        version: 1,
+        outings: [{
+          sessionId: 'session-x',
+          workspaceId: 'w-1',
+          workspaceName: '素材区',
+          cwd: join(root, 'ws'),
+          startedAt: 1_700_000_000_000,
+          status: 'active',
+        }],
+      }),
+      'utf8',
+    )
+
+    const out = await tool.execute({ type: 'diary', text: '今天在外面看见一条河。' }, { session: { header: { id: 'session-x' } } })
+    assert.equal(out.ok, true, '在外面写日记要能写')
+    const home = await tool.execute({ type: 'diary', text: '今天在家。' })
+    assert.equal(home.ok, true)
+
+    const { events } = await readEvents(root)
+    const metas = events.filter((e) => e.type === 'meta').map((e) => String(e.text))
+    assert.ok(
+      metas.some((t) => t === 'diary:2023-11-15 trip:session-x@1700000000000' || /^diary:\S+ trip:session-x@1700000000000$/.test(t)),
+      '出门那篇要带趟次标记',
+    )
+    assert.ok(metas.some((t) => /^diary:\S+$/.test(t) && !t.includes('trip:')), '家里那篇不带趟次标记')
   })
 })

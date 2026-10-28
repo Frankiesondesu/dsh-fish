@@ -20,6 +20,7 @@ import {
   letterMark,
   letterIds,
   lettersToday,
+  lettersSince,
   leaveLetter,
   registerLetter,
 } from '../lib/letter.js'
@@ -261,4 +262,44 @@ test('执行 her_leave 后落库，且不会因为返回值暴露额度', async 
     const { events } = await readEvents(root)
     assert.ok(events.some((e) => e.type === 'utterance'))
   })
+})
+
+// ------------------------------------------------------------------
+// 0.6.16（用户 m01677「留话也做」）：出门页要把这趟留的话摊开
+// ------------------------------------------------------------------
+
+test('lettersSince：只取这段时间里、这条会话留下的那几句', () => {
+  const events = [
+    { type: 'utterance', id: 'e1', ts: 1000, text: '屋里那盏灯我留着', sessionId: 'session-out' },
+    { type: 'meta', text: 'letter:2026-10-29:e1' },
+    { type: 'utterance', id: 'e2', ts: 2000, text: '今天的风很轻', sessionId: 'session-home' },
+    { type: 'meta', text: 'letter:2026-10-29:e2' },
+    { type: 'utterance', id: 'e3', ts: 3000, text: '不是留话，是普通的一句话' },
+    { type: 'utterance', id: 'e4', ts: 4000, text: '回来给你带块石头', sessionId: 'session-out' },
+    { type: 'meta', text: 'letter:2026-10-29:e4' },
+  ]
+  // 按会话筛：只看她在外面那条写的
+  const out = lettersSince(events, { since: 500, sessionId: 'session-out' })
+  assert.deepEqual(out.map((x) => x.text), ['屋里那盏灯我留着', '回来给你带块石头'])
+  // 按时间筛：since 之后的不含更早那条
+  assert.deepEqual(lettersSince(events, { since: 2500, sessionId: 'session-out' }).map((x) => x.text), ['回来给你带块石头'])
+  // 没打标的普通发言不算留话
+  assert.ok(!lettersSince(events, {}).some((x) => /普通的一句话/.test(x.text)))
+  // limit 生效且保留最近的
+  assert.deepEqual(lettersSince(events, { limit: 1 }).map((x) => x.text), ['回来给你带块石头'])
+})
+
+// 2026-10-29 真机事故：真实事件流的 ts 是 ISO 字符串（schema.validateEvent 写的），
+// 这里原先用 Number(e.ts) 比较，ISO 转数字是 NaN → 出门页「她留的话」永远是空的。
+test('lettersSince：事件流里的 ISO 字符串 ts 也要算数（2026-10-29 真机：留话永远空）', () => {
+  const events = [
+    { type: 'utterance', id: 'e1', ts: '2026-10-29T20:00:00.000Z', text: '出门前留的', sessionId: 'session-out' },
+    { type: 'meta', text: 'letter:2026-10-29:e1' },
+    { type: 'utterance', id: 'e2', ts: '2026-10-29T21:30:00.000Z', text: '在外面留的', sessionId: 'session-out' },
+    { type: 'meta', text: 'letter:2026-10-29:e2' },
+  ]
+  const since = Date.parse('2026-10-29T21:14:33.136Z')
+  const out = lettersSince(events, { since, sessionId: 'session-out' })
+  assert.deepEqual(out.map((x) => x.text), ['在外面留的'])
+  assert.equal(out[0].ts, Date.parse('2026-10-29T21:30:00.000Z'), 'ts 统一回毫秒')
 })

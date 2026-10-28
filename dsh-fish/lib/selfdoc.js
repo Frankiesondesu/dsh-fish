@@ -127,7 +127,13 @@ export async function writeSelfDoc(root = rootDir(), { log, exec, tenant } = {})
     return { ok: false, changed: false, file, why: tenant.why || '这个家被另一个实例占着' }
   }
   if (exec) {
-    const res = checkCaller(root, exec, { herDir: join(paths(root).root, 'home'), tool: '身份文件' })
+    // 身份文件不享「出门也放行」那条例外（2026-10-29）：她出门时写回自己家的是事件，
+    // 不是身份；身份被外面那条会话改了，回家就说不清哪份是她自己。
+    const res = checkCaller(root, exec, {
+      herDir: join(paths(root).root, 'home'),
+      tool: '身份文件',
+      outsideOk: false,
+    })
     if (!res.ok) {
       log?.('selfdoc skipped: caller outside root', res.cwd)
       return { ok: false, changed: false, file, why: res.why }

@@ -14,7 +14,10 @@ import { join } from 'node:path'
 import {
   awayNow, awayLine, endOuting, readOutings, snapshotEvents, startOuting, verifyEvents,
   activeOutingSync, startPossession, endPossession, bindOutingSession, abortOuting,
+  lastOutingForCwd, outingsOfSession, rejectNoteText, sessionIsHers, tripDays, tripNoOf,
+  pendingOf, settlePending,
 } from '../lib/outing.js'
+import { resolveSessionAgent } from '../lib/observe.js'
 
 function tmp() {
   const root = mkdtempSync(join(tmpdir(), 'fish-outing-'))
@@ -217,4 +220,172 @@ test('已经绑了会话的那条不能被当空壳撤掉', async () => {
   } finally {
     done()
   }
+})
+
+// ------------------------------------------------------------------
+// 0.6.16（用户 m01613 / m01677）：复用同一趟、驳回话术、想念天数
+// ------------------------------------------------------------------
+
+test('想念天数只按整天算：5 分钟是 0 天，25 小时是 1 天', () => {
+  const o = { startedAt: 1_700_000_000_000, endedAt: 1_700_000_000_000 + 5 * 60_000 }
+  assert.equal(tripDays(o), 0)
+  assert.equal(tripDays({ startedAt: 1_700_000_000_000, endedAt: 1_700_000_000_000 + 25 * 3600_000 }), 1)
+  assert.equal(tripDays({}), 0)
+  assert.equal(tripDays({ startedAt: Date.now() - 5 * 60_000 }), 0, '还在外面就从现在算，不四舍五入成 1 天')
+})
+
+test('复用同一趟：找的是同一个工作区、已经结束、带会话 id 的那条', () => {
+  const cwd = 'D:/work/a'
+  const outings = [
+    { sessionId: 's-old', cwd, status: 'done', startedAt: 100, endedAt: 200 },
+    { sessionId: 's-live', cwd, status: 'active', startedAt: 300 },
+    { sessionId: 's-other', cwd: 'D:/work/b', status: 'done', startedAt: 400, endedAt: 500 },
+    { sessionId: '', cwd, status: 'done', startedAt: 600, endedAt: 700 },
+  ]
+  const last = lastOutingForCwd({ outings }, cwd)
+  assert.equal(last.sessionId, 's-old', '正在外面那趟不能拿来「接着上次」，没 id 的也不算')
+  assert.equal(lastOutingForCwd({ outings }, 'D:/work/b').sessionId, 's-other')
+  assert.equal(lastOutingForCwd({ outings }, 'D:/nope'), null)
+  // 路径比对要抹平反斜杠与大小写（Windows）
+  const bs = String.fromCharCode(92)
+  assert.equal(lastOutingForCwd({ outings }, ["d:", "WORK", "a"].join(bs))?.sessionId, 's-old')
+})
+
+test('一条会话算不算她的：只看有没有 active 记录指着它', () => {
+  const outings = [
+    { sessionId: 's1', status: 'done' },
+    { sessionId: 's1', status: 'active' },
+    { sessionId: 's2', status: 'done' },
+  ]
+  assert.equal(sessionIsHers({ outings }, 's1'), true)
+  assert.equal(sessionIsHers({ outings }, 's2'), false)
+  assert.equal(sessionIsHers({ outings }, ''), false)
+  assert.equal(outingsOfSession({ outings }, 's1').length, 2)
+})
+
+test('驳回话术：只否定那几条，不否定整趟，也不带惩罚口吻', () => {
+  const text = rejectNoteText({ items: [{ text: '  我随便翻了一下\n桌上的笔记 ' }, { text: '我还写了个脚本' }], total: 5 })
+  assert.match(text, /这趟里我不认这几条（一共 5 条，挑出这几条说）：/)
+  assert.match(text, /「我随便翻了一下 桌上的笔记」「我还写了个脚本」/)
+  assert.match(text, /它们不算你，别的算/)
+  assert.ok(!/不应该|不许|惩罚|下不为例/.test(text), '不能写成训她')
+  // 没有条目就不写，别留一句空话
+  assert.equal(rejectNoteText({ items: [], total: 0 }), '')
+  assert.equal(rejectNoteText({}), '')
+})
+
+// ------------------------------------------------------------------
+// 0.6.26（用户 m03194）：复用的那趟要能说清「第几趟」，装配失败不能留幽灵记录
+// ------------------------------------------------------------------
+
+test('第几趟：同一条会话复用两次，第二次就是第 2 趟', () => {
+  const outings = [
+    { sessionId: 's1', startedAt: 100, status: 'done', endedAt: 150 },
+    { sessionId: 's1', startedAt: 300, status: 'active' },
+    { sessionId: 's2', startedAt: 400, status: 'done', endedAt: 450 },
+  ]
+  assert.equal(tripNoOf({ outings }, 's1', 300), 2)
+  assert.equal(tripNoOf({ outings }, 's1', 100), 1)
+  assert.equal(tripNoOf({ outings }, 's2', 400), 1)
+  assert.equal(tripNoOf({ outings }, 's9', 0), 0, '没出过门的会话没有趟次')
+  assert.equal(tripNoOf({}, 's1', 0), 0)
+})
+
+test('装配失败可以把已经绑了会话的那趟强制撤掉（0.6.25 真机：幽灵出门）', async () => {
+  const { root, done } = tmp()
+  try {
+    await startOuting(root, { sessionId: 'session-x', cwd: join(root, 'ws'), now: 1_700_000_000_000 })
+    const a = await abortOuting(root, { force: true })
+    assert.equal(a.ok, true)
+    assert.equal(activeOutingSync(root), null, '撤掉之后不能还留着一条 active')
+  } finally {
+    done()
+  }
+})
+
+test('出门 start：先写日志再装配，装配失败强制撤掉，不留幽灵记录', () => {
+  const src = readFileSync(new URL('../lib/observe.js', import.meta.url), 'utf8')
+  assert.ok(src.includes('（接回第 ${tripNo} 趟）'), '复用成功时日志要写清是第几趟')
+  assert.ok(src.includes('abortOuting(root, { force: true })'), '装配失败要能把带 sessionId 的这条撤掉')
+  assert.ok(src.includes('装备挂上了'), '装配完要再写一行，说明装备到底挂上没有')
+  // 提前那行日志必须在「挂装备」之前，否则中途抛错又会只剩台账。
+  const logAt = src.indexOf("（接回第 ${tripNo} 趟）")
+  const attachAt = src.indexOf('attachIdentity(live, root, { frozen: identity })')
+  assert.ok(logAt > 0 && attachAt > 0 && logAt < attachAt, '日志要排在装配之前')
+})
+
+test('接回上次那趟：这版宿主没有 sessionController.resume，要走 resolveAgent（0.6.27 真机 500）', async () => {
+  const calls = []
+  const agent = { id: 'a1' }
+  // 正常：resolveAgent 返回 { agent }
+  const got = await resolveSessionAgent({
+    resolveAgent: async (sid) => { calls.push(sid); return { agent } },
+  }, 'session-x')
+  assert.equal(got, agent)
+  assert.deepEqual(calls, ['session-x'])
+  // 宿主给的是 { error }：原样抛出去，由上层收口撤掉这趟
+  await assert.rejects(
+    () => resolveSessionAgent({ resolveAgent: async () => ({ error: new Error('session/not-found') }) }, 's1'),
+    /session\/not-found/,
+  )
+  // 只暴露在 agents 子对象上也要能接
+  assert.equal(await resolveSessionAgent({ agents: { resolveAgent: async () => ({ agent }) } }, 's2'), agent)
+  // 一个入口都没有：要说人话，不是 undefined is not a function
+  await assert.rejects(() => resolveSessionAgent({}, 's3'), /resolveAgent/)
+  // 源码里不允许再直接调不存在的 sc.resume
+  const src = readFileSync(new URL('../lib/observe.js', import.meta.url), 'utf8')
+  assert.ok(!src.includes('sc.resume('), '不要再调这版宿主没有的 sc.resume')
+  assert.ok(src.includes('await resolveSessionAgent(sc, reuseId)'), '复用分支要走 resolveSessionAgent')
+})
+
+test('等复核的那趟：能找出来、复核通过就收下，结束时间不重写（0.6.32 真机：pending 成了死路）', async () => {
+  const { root, done } = tmp()
+  try {
+    const now = 1_700_000_000_000
+    assert.equal(pendingOf({}), null, '没有等复核的时候要返回 null，不是抛错')
+    await startOuting(root, {
+      ...base(root),
+      sessionId: 's-a',
+      baseline: snapshotEvents(join(root, 'events.jsonl')),
+      identity: '',
+      now,
+    })
+    await endOuting(root, { sessionId: 's-a', status: 'pending', kept: null, now: now + 60_000 })
+    const pend = pendingOf(await readOutings(root))
+    assert.ok(pend, '被拒收那趟要能找回来')
+    assert.equal(pend.sessionId, 's-a')
+    assert.equal(pend.kept, null)
+
+    const wrong = await settlePending(root, { sessionId: 's-b' })
+    assert.equal(wrong.ok, false, '不是这一趟就不能结算')
+    assert.match(wrong.why, /不是这一趟/)
+
+    const ok = await settlePending(root, { sessionId: 's-a' })
+    assert.equal(ok.ok, true)
+    const after = await readOutings(root)
+    const last = after.outings[after.outings.length - 1]
+    assert.equal(last.status, 'done')
+    assert.equal(last.kept, true)
+    assert.equal(last.endedAt, now + 60_000, '结束时间要保留她真正回家的那一刻，不能在复核时被改掉')
+
+    const again = await settlePending(root, {})
+    assert.equal(again.ok, false, '已经结算过就不能再结一次')
+    assert.match(again.why, /没有等复核/)
+  } finally { done() }
+})
+
+test('/outing 复核接口：GET 带回 pendingReview，POST action=review 通过后收下（0.6.32）', () => {
+  const observe = readFileSync(new URL('../lib/observe.js', import.meta.url), 'utf8')
+  assert.ok(observe.includes('pendingOf, settlePending'), '复核用的两个函数要 import 进来')
+  assert.ok(observe.includes("action === 'review'"), 'POST 要有 review 分支')
+  assert.ok(observe.includes('pendingReview'), 'GET 要把等复核的那趟带回界面')
+  assert.ok(observe.includes('复核：通过，这趟收下了'), '通过要留一行日志，方便查')
+  assert.ok(observe.includes('复核：还是对不上'), '没通过也要留一行')
+
+  const client = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')
+  assert.ok(client.includes('doReviewPending'), '界面上要有复核这个动作')
+  assert.ok(client.includes('复核一次'), '按钮要写人话')
+  assert.ok(client.includes('上一趟没结算'), '要有一张卡告诉人上一趟卡在哪')
+  assert.ok(client.includes('等复核'), '台账状态词用「等复核」，不是「等确认」')
+  assert.ok(!client.includes('她留在外面，等你确认过再说'), 'pending 之后她其实已经回家了，旧文案会骗人')
 })

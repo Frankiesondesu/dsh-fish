@@ -145,8 +145,21 @@ test('组件在"还没有数据"时也能渲染，不抛错', async () => {
   // 备用入口是条件分支：home 还没读到时显示「读取中」，所以看源码而不是树。
   const src0 = await readFile(CLIENT, 'utf8')
   assert.ok(src0.includes('备用说话入口'), '屋子没建起来时要有备用入口')
-  // 信箱在「记忆」页，默认停在「状态」页 —— 同样看源码。
-  assert.ok((await readFile(CLIENT, 'utf8')).includes('信箱'), '信箱要在')
+  // 「她写的小纸条」（原「信箱」）2026-10-29 搬到「住所」页，夹在日记与自检之间 —— 同样看源码。
+  const src1 = await readFile(CLIENT, 'utf8')
+  const atHomePage = src1.indexOf('const homePage')
+  const atDiary = src1.indexOf("group('日记'", atHomePage)
+  // 卡先定义成常量（在 homePage 之前），再在住所页里按「日记 → 小纸条 → 自检」的顺序摆进去。
+  const atNote = src1.indexOf("groupFull('她写的小纸条'")
+  const atUse = src1.indexOf('        inboxCard,', atHomePage)
+  const atCheck = src1.indexOf("group('本插件工作自检'")
+  assert.ok(atNote > 0, '「她写的小纸条」卡要在')
+  assert.ok(atUse > 0 && atUse > atDiary, '小纸条要排在日记下面')
+  assert.ok(atCheck > atUse, '小纸条要排在插件自检上面')
+  // 描述里的那句是要紧的：她留下的东西可能代表她当前的状态。
+  assert.ok(src1.includes('特意留给你的话。某种意义上代表她当前的状态，可能含有关键信息。'), '小纸条的描述要在')
+  // 老名字不该再出现在界面上（注释除外）：卡片标题已经换掉了。
+  assert.ok(!/groupFull\('信箱'/.test(src1), '不能再有「信箱」这张卡')
 })
 
 test('组件在"有数据"时把关键信息渲染出来', async () => {
@@ -464,7 +477,7 @@ test('用户改过的标签已固化：阶段四行、叫法、记忆三项（20
     '3 主动 · 两次推翻自己之前的判断/认知，形成新的正确认知',
     '4 整合 · 回顾过去经历，有意识地发现自己的改变',
     '已成长天数', '当前阶段', '下一个成长瓶颈', '规则约束',
-    '特意写给你的信。某种意义上代表她当前的状态，可能含有关键信息。',
+    '特意留给你的话。某种意义上代表她当前的状态，可能含有关键信息。',
     '认知重构', '勇于拒绝',
   ]) {
     assert.ok(src.includes(s), `源码里缺少用户定的这句：${s}`)
@@ -560,4 +573,21 @@ test('刷视频记录按条翻页：每页条数随实际量自适应，日期�
   assert.ok(src.includes('const histPager = histPages > 1'), '一页就不出翻页条')
   assert.ok(src.includes('histPages > 1\n            ? h('), '下面的翻页条同样只在多页时出现')
   assert.ok(src.includes('一页 ${histPageSize} 条'), '页码旁边标出这一页有几条')
+})
+
+// ---------------------------------------------------------------------------
+// 2026-10-29：用户 m01952「多篇的时候会出现翻页键」
+// ---------------------------------------------------------------------------
+
+test('日记翻页：日期 ≥ 2 才出「← 更早 / 更晚 →」，一天时只显示日期（m01952）', async () => {
+  const src = await readFile(CLIENT, 'utf8')
+
+  assert.ok(src.includes('diaryDates.length > 1'), '多天才出翻页条，一天时不出')
+  assert.ok(src.includes("'← 更早'") && src.includes("'更晚 →'"), '两个方向都要有按钮')
+  assert.ok(src.includes('setDiaryDay(diaryIdx + 1)'), '「更早」= 下标加一（dates 是新→旧）')
+  assert.ok(src.includes('setDiaryDay(diaryIdx - 1)'), '「更晚」= 下标减一')
+  assert.ok(src.includes('disabled: diaryIdx >= diaryDates.length - 1'), '翻到最早一篇就禁用「更早」')
+  assert.ok(src.includes('disabled: diaryIdx <= 0'), '翻到最新一篇就禁用「更晚」')
+  // 一天一篇的语义没变：翻的是「天」，同日追加的那几段合成同一页
+  assert.ok(!src.includes('diarySegs'), '别为同日追加再加一级翻页')
 })

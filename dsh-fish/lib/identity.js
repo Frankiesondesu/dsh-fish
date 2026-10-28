@@ -26,12 +26,17 @@
 
 import { existsSync, readFileSync, statSync } from 'node:fs'
 import { selfDocPath } from './selfdoc.js'
-import { cwdOf, isHerHome } from './restrict.js'
+import { cwdOf, isHerHome, currentToolSurface } from './restrict.js'
 import { activeOutingSync, bindOutingSession } from './outing.js'
+import { deliverQueued } from './sessionnote.js'
 
 /** 段名与顺序：放在宿主自己的段之后、`complete` 段之前（order 越大越靠后）。 */
 export const IDENTITY_SECTION = 'fish:identity'
 export const IDENTITY_ORDER = 8500
+
+/** 「手边有什么」段（2026-10-29，用户 m01276）：收不窄的工具靠提示词说清。 */
+export const TOOLS_SECTION = 'fish:tools'
+export const TOOLS_ORDER = 8600
 
 /**
  * 「这一次的处境」段（2026-10-25 晚）。
@@ -102,6 +107,69 @@ export function resetIdentityCache() {
 }
 
 /**
+ * 出门挂在某条会话上的东西（身份段、处境段、兜底守卫）。
+ *
+ * 0.6.16 起要能**当场拆掉**：一条会话算不算她的，只看台账里还有没有一趟
+ * 进行中的出门指向它；出门结束那一刻就拆，不等进程退出、更不靠重启。
+ * 不记下来就只能等 agent 销毁——那期间它仍顶着冻结身份段。
+ */
+const outsideMounts = new WeakMap()
+
+/** 测试用：某条 agent 上现在挂着几段。 */
+export function mountedCount(agent) {
+  const m = outsideMounts.get(agent)
+  return m ? m.sections.length + (m.guard ? 1 : 0) : 0
+}
+
+function remember(agent, kind, dispose) {
+  if (!agent || typeof dispose !== 'function') return
+  let m = outsideMounts.get(agent)
+  if (!m) {
+    m = { sections: [], guard: null }
+    outsideMounts.set(agent, m)
+  }
+  if (kind === 'guard') m.guard = dispose
+  else m.sections.push(dispose)
+}
+
+/**
+ * 拆掉挂在这条会话上的出门装备（身份段 / 处境段 / 兜底守卫）。
+ * @returns {{ ok: boolean, removed: number, why?: string }}
+ */
+export function detachOutside(agent) {
+  const m = outsideMounts.get(agent)
+  if (!m) return { ok: false, removed: 0, why: '这一条没挂过出门装备' }
+  outsideMounts.delete(agent)
+  let removed = 0
+  for (const fn of [...m.sections, m.guard]) {
+    if (typeof fn !== 'function') continue
+    try { fn(); removed += 1 } catch { /* 已经拆过的就算了 */ }
+  }
+  return { ok: true, removed }
+}
+
+/** 找一条活着的会话对应的 agent（宿主 agents 注册表）。拿不到就 null，不抛。 */
+export function liveAgentOf(ctx, sessionId) {
+  const sid = String(sessionId ?? '')
+  if (!sid) return null
+  try {
+    const reg = ctx?.get?.('agents') ?? null
+    if (!reg) return null
+    const want = sid.replace(/^session-/, '')
+    if (typeof reg.get === 'function') {
+      const hit = reg.get(sid) ?? reg.get(want) ?? reg.get(`session-${want}`)
+      if (hit) return hit
+    }
+    const list = typeof reg.list === 'function' ? reg.list() : []
+    for (const a of list) {
+      const id = String(a?.session?.header?.id ?? a?.session?.id ?? '')
+      if (id === sid || id.replace(/^session-/, '') === want) return a
+    }
+  } catch { /* 注册表不可用就当作不在线 */ }
+  return null
+}
+
+/**
  * 把身份段挂到某个 agent 的 system prompt 上。
  * @param {object} agent
  * @param {string} root
@@ -114,20 +182,32 @@ export function attachIdentity(agent, root, { frozen = '' } = {}) {
   }
   try {
     const snapshot = String(frozen ?? '')
-    sp.section({
+    // 宿主的 section() 返回的是精确的 effect disposer（0.6.16 从 asar 源码核实），
+    // 记下来才能在回家那一刻拆掉——之前直接丢掉返回值，只能等 agent 销毁。
+    remember(agent, 'section', sp.section({
       name: IDENTITY_SECTION,
       order: IDENTITY_ORDER,
       // 出门时 `frozen` 是出门那一刻的只读副本：她在外面读到的是「离开时的自己」，
       // 而不是家里随时可改的那份文件 —— 否则人已经出去了，身份还能被自己在别处改写。
       text: () => (snapshot ? snapshot : identityText(root)),
-    })
+    }))
     // 「这一次的处境」单独一段：平时是空串（等于不存在），唤醒前才填。
     // 它不进对话历史，所以他看不到系统在跟她说些什么。
-    sp.section({
+    remember(agent, 'section', sp.section({
       name: WAKE_SECTION,
       order: WAKE_ORDER,
       text: () => wakeText,
-    })
+    }))
+    // 「手边有什么」单独一段（2026-10-29，用户 m01276）。
+    // 有些工具我们收不窄——注册在 agent 自己作用域里的（ops_*、Agent Teams）
+    // 照样会出现在她的工具表里，schema 有名字她就会当成「我能用」。
+    // 这一段把「哪几样真是我的」说死；越界调用由 guard 回一句「这件事我做不到」。
+    // 白名单变了下一轮就生效（text 是函数），不需要重建会话。
+    remember(agent, 'section', sp.section({
+      name: TOOLS_SECTION,
+      order: TOOLS_ORDER,
+      text: () => currentToolSurface(),
+    }))
     return { ok: true }
   } catch (err) {
     return { ok: false, why: String(err?.message ?? err).slice(0, 200) }
@@ -213,6 +293,8 @@ export function attachAwayGuard(agent, { root, herDir, log } = {}) {
       }
       return undefined
     })
+    // 两道都记：agent 销毁时靠 effect，回家那一刻靠 detachOutside 主动拆。
+    remember(agent, 'guard', dispose)
     try { agent.ctx.effect?.(() => dispose) } catch { /* 没 effect 就靠父级回收 */ }
     return { ok: true }
   } catch (err) {
@@ -239,13 +321,20 @@ export function registerIdentity(ctx, { root, herDir, log } = {}) {
       const home = isHerHome(agent, herDir)
       // 出门那条会话怎么认出来（三种都认：`agent/created` 的时机不一定带 cwd）：
       // ① 台账里已经记了会话 id，对上了；
-      // ② cwd 就是出门那个工作区；
+      // ② cwd 就是出门那个工作区 —— **只在台账还没绑 id 的时候用**；
       // ③ 台账刚写、id 还空着（start 路由「先记账再建会话」），而这条会话还没有 cwd。
+      //
+      // ②原来是一直生效的，2026-10-29 真机发现这会把她身上的东西挂到**同一个工作区里
+      // 别的会话**上：只要你也在这个工作区开会话，身份段和兜底守卫就会挂到你头上，
+      // 你连自己的记忆文件都读不了。id 一旦绑上，就只有那条会话算她的。
       const sidMatch = Boolean(
         outing?.sessionId && sid &&
         (sid === outing.sessionId || sid === String(outing.sessionId).replace(/^session-/, '')),
       )
-      const cwdMatch = Boolean(outing?.cwd && flatPath(cwd) && flatPath(cwd) === flatPath(outing.cwd))
+      const cwdSame = Boolean(outing?.cwd && flatPath(cwd) && flatPath(cwd) === flatPath(outing.cwd))
+      // cwd 这条只在两种情况下算数：台账还没绑 id；或者宿主这次压根没给 id
+      // （没 id 就没法按 id 判，只能靠 cwd）。两边都有 id 却不相等，就**不是**她。
+      const cwdMatch = cwdSame && (!outing?.sessionId || !sid)
       const starting = Boolean(outing && !outing.sessionId && !cwd)
       const isOuting = sidMatch || cwdMatch || starting
       if (!home && !isOuting) {
@@ -269,6 +358,17 @@ export function registerIdentity(ctx, { root, herDir, log } = {}) {
         state.ok = false
         state.why = r.why ?? 'unknown'
         log?.(`[dsh-fish] 身份段没挂上：${state.why}`)
+      }
+      // 排队的话（0.6.16 的驳回话术）：回家结算时家里那条会话可能没开着，
+      // 那句「这趟里我不认这几条」会先排进 session-notes.json 等下一次。
+      // 2026-10-29 修：deliverQueued 早就写好了，却从来没有人调用 ——
+      // 排队的句子一直躺在文件里，她永远不会看到。
+      if (home) {
+        void deliverQueued(agent, root)
+          .then((q) => {
+            if (q?.delivered) log?.(`[dsh-fish] 补上了排队的话 ${q.delivered} 句`)
+          })
+          .catch(() => {})
       }
     } catch (err) {
       state.why = String(err?.message ?? err).slice(0, 200)

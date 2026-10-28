@@ -18,7 +18,7 @@
  */
 
 import { toJsonSchema } from './toolschema.js'
-import { rootDir, readDaily, listDiary } from './store.js'
+import { rootDir, readDaily, listDiary, DAILY_JOIN } from './store.js'
 
 import { defineTool } from './tool.js'
 
@@ -41,9 +41,17 @@ export function renderDiary({ date = '', text = '', dates = [], why = '' } = {})
     return '你还没写过日记。'
   }
   let body = String(text)
+  const joined = body.includes(DAILY_JOIN)
   const cut = body.length > DIARY_READ_MAX
-  if (cut) body = body.slice(0, DIARY_READ_MAX)
-  return [`${date} 那天你写的：`, body, cut ? `\n（后面还有，这里只到 ${DIARY_READ_MAX} 字）` : ''].join('\n').trim()
+  // 同日追加之后，最新一段在**末尾**：截断要留尾巴，否则她看到的是早上那段，
+  // 晚上补的那段被切掉，等于「刚写的自己读不到」。
+  if (cut) body = joined ? body.slice(-DIARY_READ_MAX) : body.slice(0, DIARY_READ_MAX)
+  const note = cut
+    ? joined
+      ? `\n（当天写了好几段，这里只留了最后 ${DIARY_READ_MAX} 字）`
+      : `\n（后面还有，这里只到 ${DIARY_READ_MAX} 字）`
+    : ''
+  return [`${date} 那天你写的：`, body, note].join('\n').trim()
 }
 
 /**

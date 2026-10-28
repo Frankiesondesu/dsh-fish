@@ -17,7 +17,7 @@
 
 import { readFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
-import { homedir } from 'node:os'
+import { homedir, tmpdir } from 'node:os'
 import { writeAtomic } from './store.js'
 
 /** 记录文件的绝对路径（数据目录之外）。测试用 DSH_FISH_HOMES 指到临时目录。 */
@@ -32,6 +32,14 @@ export function normRoot(p) {
   // 剥不掉，于是 `…\Home` 与 `…\Home\` 会被判成「换了家」。两种分隔符都剥。
   while (s.length > 1 && /[\\/]$/.test(s)) s = s.slice(0, -1)
   return s.toLowerCase()
+}
+
+/** 这个路径是不是在系统的临时目录里（归一化后按前缀比，两种分隔符都认）。 */
+function underTemp(p) {
+  const flat = (s) => normRoot(s).replace(/\\/g, '/')
+  const t = flat(tmpdir())
+  const n = flat(p)
+  return n === t || n.startsWith(t + '/')
 }
 
 /** 读不到、读坏了、字段不对，一律当成「没有记录」，绝不抛。 */
@@ -59,6 +67,16 @@ export async function noteRoot(root, { now = () => Date.now(), file = homesFile(
   const to = resolve(String(root ?? ''))
   const prev = readHomesSync(file)
   const from = prev.lastRoot
+
+  // 2026-10-29 修：临时目录里的家不记进**默认**（真实）账本。
+  // 那天全量测试（test/boot.test.mjs 用 mkdtemp 造 root 再 apply）往真实账本里灌了
+  // 20 个 Tempon\fish-boot-*，之后每次真启动都把最后一条临时家当成「上次的家」，
+  // 于是每次启动都记一条假「家换了」，还往她的事件流里写假 meta。
+  // 测试自己设 DSH_FISH_HOMES 才是正解；这一条是防线，不是替代。
+  if (!process.env.DSH_FISH_HOMES && file === homesFile() && underTemp(to)) {
+    return { ok: true, skipped: 'temp', changed: false, from, to, homes: prev.homes }
+  }
+
   const changed = Boolean(from) && normRoot(from) !== normRoot(to)
   const at = new Date(now()).toISOString()
 

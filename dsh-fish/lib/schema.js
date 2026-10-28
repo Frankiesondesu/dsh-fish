@@ -106,6 +106,21 @@ function increment(prev) {
   return randomPart()
 }
 
+/**
+ * 事件的毫秒时间戳。两种形态都认：数值（老测试夹具）、ISO 字符串（真实事件流）。
+ *
+ * 2026-10-29 真机事故：`validateEvent` 把 ts 写成 `new Date(now).toISOString()`，
+ * 而两处读者按 `Number(ev.ts)` 比较——ISO 字符串转数字是 NaN，任何比较恒为 false，
+ * 于是「回家审查」永远是 0 条、「出门页里她留的话」永远是空的。
+ * 凡是拿 ts 做时间比较，都必须走这里，别再直接 Number(ts)。
+ */
+export function tsMs(ev) {
+  const raw = ev?.ts
+  if (typeof raw === 'number') return Number.isFinite(raw) ? raw : 0
+  const t = Date.parse(String(raw ?? ''))
+  return Number.isFinite(t) ? t : 0
+}
+
 /** 从 id 反解时间（观测台排序用，不依赖 ts 字段） */
 export function idTime(id) {
   const body = String(id).replace(/^ev_/, '').slice(0, 10)

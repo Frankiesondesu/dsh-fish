@@ -50,6 +50,11 @@ const REPORT_WAIT_MS = 90_000
 // 她仍会去猜。
 const WAKE_HINT = '对话里那条括号里的短句不是用户说的话，是叫醒你的信号。不用回应它，也不用问它什么意思——这一轮是你自己的。'
 
+// 当天最后一次叫醒里多给一句处境（2026-10-29，用户 m01296 B）。
+// 只给「到今天了」这个时间感，不派活、不提日记——写不写由她自己决定。
+// 提了就成了工单，正是 2026-10-26 用户 m00928「叫醒仅仅只是叫醒」要去掉的东西。
+const DAY_END_CUE = '（今天到这里了。这一刻是我自己的。）'
+
 /**
  * 唤醒时对话里唯一出现的那句话（2026-10-25 晚）。
  *
@@ -467,6 +472,16 @@ async function wake(ctx, root, model, config, decision, dk, log, deps = {}) {
   // 的动态段 `fish:wake`，对话里只留一句极短的触发语把这一轮点起来。
   // 这样对话框里不会再出现「你该醒了」「这次推给你的是……」这些系统的话。
   // 注意：`setWakeSection` 要等会话确定之后再设，否则提前 return 会留下脏段落。
+  // ---- 今天最后一段：只给时机，不派活（2026-10-29，用户 m01296 B）----
+  // 日记的「做法」常驻身份文档，但一整天没有一个「到今天了」的节点，于是三天零篇。
+  // 这里只在当天最后一次叫醒里加一句处境：写不写、写什么，由她自己定。
+  // 上限取两个闸门里更小的那个（plan() 同时看 daily.events 与 wakesPerDay）。
+  // 手动唤醒不占这个「最后一段」的位置太多说，照常参与判断即可。
+  try {
+    const evs = deps.events ?? (await readEvents(root).catch(() => ({ events: [] }))).events
+    if (isLastWakeOfDay(config, todayCounts(evs, dk))) parts.push('', DAY_END_CUE)
+  } catch { /* 一句时机不该拖垮一次唤醒 */ }
+
   const content = parts.filter(Boolean).join('\n').trim()
   // 空正文就别唤醒：没有处境可讲，起了也是空转。
   if (!content) {
@@ -674,6 +689,21 @@ export function todayCounts(events = [], dk) {
     if (tpl?.asks) questions++
   }
   return { dateKey: dk, sent, questions, proactive }
+}
+
+/**
+ * 这一醒是不是「今天最后一段」（2026-10-29，用户 m01296 B）。
+ *
+ * plan() 的两个闸门同时生效：`daily.events` 管当天事件数、`wakesPerDay` 管主动唤醒数，
+ * 所以当天真正还能醒几次由两者里更小的那个决定。这里按同一口径回答一句话：
+ * 已经醒过 `counts.sent` 次，加上这一次是否就顶到上限。
+ *
+ * 只用于「给个时机」，不参与该不该醒的判断——判断在 plan() 里，别把两件事混成一件。
+ */
+export function isLastWakeOfDay(config, counts) {
+  const cap = Math.min(Number(config?.daily?.events ?? 1), Number(config?.wakesPerDay ?? 1))
+  if (!Number.isFinite(cap) || cap <= 0) return false
+  return Number(counts?.sent ?? 0) + 1 >= cap
 }
 
 /**

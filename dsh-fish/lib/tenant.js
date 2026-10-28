@@ -22,6 +22,8 @@ import { join, resolve } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { hostname } from 'node:os'
 
+import { activeOutingSync } from './outing.js'
+
 /** 占用声明文件名（放在 root 里，跟着数据目录一起搬走）。 */
 export const TENANT_FILE = 'instance.json'
 
@@ -118,7 +120,7 @@ export function callerOf(exec) {
  * @param {object} opts { herDir, tool } herDir = root/her，她的会话 cwd 落在这里
  * @returns {{ok:boolean, sessionId:string, cwd:string, system?:boolean, unknownCwd?:boolean, why?:string}}
  */
-export function checkCaller(root, exec, { herDir = '', tool = 'growth_commit' } = {}) {
+export function checkCaller(root, exec, { herDir = '', tool = 'growth_commit', outsideOk = true } = {}) {
   const { sessionId, cwd } = callerOf(exec)
   // 1) 没有会话：定时器 / 测试 / 系统侧写入。这些本来就发生在 root 内部，放行。
   if (!sessionId && !cwd) {
@@ -132,6 +134,21 @@ export function checkCaller(root, exec, { herDir = '', tool = 'growth_commit' } 
   // 3) cwd 必须在这个家里（root 或 root/her）。
   if (isInside(cwd, root) || (herDir && isInside(cwd, herDir))) {
     return { ok: true, sessionId, cwd }
+  }
+  // 3.5) 外面这一条：出门时她的会话 cwd 在别人的工作区里，但她写的事件还是要写回
+  //      自己的屋子（不然回家审查什么都没有、旅行日记也永远写不出来）。
+  //      判据不是 cwd，而是「这条会话正是当前那趟出门的会话」——两窝鱼互写仍然被挡。
+  //      身份文件那条调用显式传 outsideOk:false：她出门时不能改自己的身份。
+  if (outsideOk && sessionId) {
+    let active = null
+    try {
+      active = activeOutingSync(root)
+    } catch {
+      active = null
+    }
+    if (active && String(active.sessionId ?? '') === sessionId) {
+      return { ok: true, sessionId, cwd, outside: true }
+    }
   }
   return {
     ok: false,

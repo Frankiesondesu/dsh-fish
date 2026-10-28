@@ -102,3 +102,42 @@ test('deriveSelf：一条标记可以带多个 id（空白或逗号分隔都认�
   const m = deriveSelf(events, { now: 1_400 })
   assert.deepEqual(m.refusals.map((x) => x.id), ['ev_b'])
 })
+
+/**
+ * 2026-10-29 真机事故（用户 m03011）：她明明用 growth_commit 写了
+ * `ev_01M625WYHEECKM2YEGVZNC2232`，回家审查还是「这趟多出 0 条」。
+ *
+ * 根因不在判据的语义，而在时间字段的形态：schema 把 `ts` 写成
+ * `new Date(now).toISOString()`（`"2026-10-29T21:15:46.610Z"`），而
+ * `eventsSince` 当时用 `Number(ev.ts) >= at` —— `Number("2026-10-29T…")` 是 NaN，
+ * 比较恒为 false，真实事件流里的条目一条都进不来。
+ * 测试夹具一直用数值 ts（1_000、1_100），所以从没照出这个坑。
+ */
+test('eventsSince：真实事件流里的 ISO 字符串 ts 也要算数（2026-10-29 真机：审查永远 0 条）', () => {
+  const { root, done } = tmp()
+  try {
+    const start = Date.parse('2026-10-29T21:14:33.136Z')
+    const list = [
+      { ...ev('ev_old', 0, 'utterance', '出门前写的'), ts: '2026-10-29T21:00:00.000Z' },
+      { ...ev('ev_new', 0, 'utterance', '出门时写的'), ts: '2026-10-29T21:16:02.000Z' },
+      { ...ev('ev_diary', 0, 'meta', 'diary:2026-10-29 trip:x'), ts: '2026-10-29T21:17:00.000Z' },
+    ]
+    const file = writeEvents(root, list)
+    const r = eventsSince(file, start)
+    assert.equal(r.ok, true)
+    assert.equal(r.total, 2, '出发之后的 ISO 事件都要进来')
+    assert.deepEqual(r.items.map((x) => x.id), ['ev_new', 'ev_diary'])
+    assert.equal(r.items[0].ts, Date.parse('2026-10-29T21:16:02.000Z'), 'ts 统一回毫秒，UI 才排得对')
+  } finally {
+    done()
+  }
+})
+
+test('tsMs：数值、ISO 字符串、坏值三种都给毫秒（不抛）', async () => {
+  const { tsMs } = await import('../lib/schema.js')
+  assert.equal(tsMs({ ts: 1_700_000_000_000 }), 1_700_000_000_000)
+  assert.equal(tsMs({ ts: '2026-10-29T21:16:02.000Z' }), Date.parse('2026-10-29T21:16:02.000Z'))
+  assert.equal(tsMs({ ts: '不是时间' }), 0)
+  assert.equal(tsMs({}), 0)
+  assert.equal(tsMs(null), 0)
+})

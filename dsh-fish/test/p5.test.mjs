@@ -4,8 +4,9 @@
  * 守四件事：
  *   1. **三个时段各自独立**：把"醒来时间"改坏，不能顺手把"上网时间"也改掉。
  *   2. **上网时段真的生效**：不在时段里就不许碰 B 站接口（不是先请求再丢弃）。
- *   3. **保存不会被 400 挡回来**：观测台提交的 chat / memory / window / browse.window
- *      必须在 /config 的白名单里。曾漏登记过一次，界面点"保存"直接报错。
+ *   3. **保存不会被 400 挡回来**：观测台提交的 chat / memory / window / browse.window /
+ *      bili 必须在 /config 的白名单里。曾漏登记过两次，界面点"保存"直接报错。
+ *      现在有一条用例直接从 client.js 的 buildConfig() 反查这张白名单，不再靠手写清单。
  *   4. **设置界面文案不带性别代词**：她/他 在面向用户的字符串里必须为零。
  */
 
@@ -20,9 +21,11 @@ import { tmpdir } from 'node:os'
 import { normalizeConfig, inWindow, DEFAULTS } from '../lib/settings.js'
 import { lookBeforeWake } from '../lib/scheduler.js'
 import { registerObserve } from '../lib/observe.js'
+import { HER_TOOLS, rememberFromView } from '../lib/restrict.js'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const CLIENT = join(HERE, '..', 'lib', 'client.js')
+const OBSERVE = join(HERE, '..', 'lib', 'observe.js')
 
 test('默认配置里上网时段是独立的一项', () => {
   const cfg = normalizeConfig({})
@@ -130,6 +133,9 @@ test('/config 白名单收下观测台提交的全部环境键（含 chat 与 me
       avoid: { keywords: ['恐怖'] },
       window: ['19:00', '22:00'],
       browse: { enabled: true, perDay: 2, topN: 5, danmaku: 3, window: ['08:30', '22:30'] },
+      // bili 是 2026-10-29 用户真机踩到的：0.6.5 加了这两个设置项，
+      // 客户端整表提交一直带着它们，白名单漏登记 → 改任何一项都报 400。
+      bili: { minIntervalMs: 900, jitterMs: 300 },
       notify: { enabled: false },
       chat: { rotateAfter: 30 },
       memory: { docBudget: 1500 },
@@ -156,9 +162,34 @@ test('/config 白名单收下观测台提交的全部环境键（含 chat 与 me
     assert.deepEqual(payload.config.window, ['19:00', '22:00'])
     assert.equal(payload.config.chat.rotateAfter, 30)
     assert.equal(payload.config.memory.docBudget, 1500)
+    assert.equal(payload.config.bili.minIntervalMs, 900, '请求间隔必须真的存进去')
+    assert.equal(payload.config.bili.jitterMs, 300, '请求抖动必须真的存进去')
   } finally {
     await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
   }
+})
+
+test('观测台提交的每个顶层键都在 /config 白名单里（防漂移）', async () => {
+  // 2026-10-29 用户真机报「没保存：不允许修改：bili」：0.6.5 加了 bili 两个设置项，
+  // 客户端整表提交带着它，服务端白名单没登记 → **每一项设置都存不进去**。
+  // 上一版回归测试手写了一份 patch 形状，自己也会漏，所以这里改成互相反查：
+  //   客户端 buildConfig() 的顶层键 ←→ 服务端 allowed 数组，缺一个就红。
+  const client = await readFile(CLIENT, 'utf8')
+  const start = client.indexOf('const buildConfig = () => ({')
+  assert.ok(start > 0, '找不到 buildConfig()')
+  const end = client.indexOf('\n      })', start)
+  assert.ok(end > start, '找不到 buildConfig() 的结尾')
+  // 顶层键缩进 8 空格；子键缩进更深，正好靠缩进区分开。
+  const keys = [...client.slice(start, end).matchAll(/^ {8}([a-zA-Z]+):/gm)].map((m) => m[1])
+  assert.ok(keys.length >= 10, `buildConfig() 只解析出 ${keys.length} 个顶层键，缩进可能变了`)
+
+  const server = await readFile(OBSERVE, 'utf8')
+  const m = server.match(/const allowed = \[([^\]]+)\]/)
+  assert.ok(m, '找不到 /config 的白名单')
+  const allowed = [...m[1].matchAll(/'([^']+)'/g)].map((x) => x[1])
+
+  const missing = keys.filter((k) => !allowed.includes(k))
+  assert.deepEqual(missing, [], `这些键客户端会提交、服务端会 400 挡回来：${missing.join(', ')}`)
 })
 
 test('白名单仍然挡得住"指向她本人"的键', async () => {
@@ -176,9 +207,13 @@ test('白名单仍然挡得住"指向她本人"的键', async () => {
       on: (ev, fn) => { if (ev === 'data') fn(Buffer.from(body, 'utf8')); if (ev === 'end') fn() },
     }
     let status = 0
-    const res = { writeHead: (s) => { status = s }, end: () => {}, setHeader: () => {} }
+    let payload = null
+    const res = { writeHead: (s) => { status = s }, end: (s) => { payload = JSON.parse(s || '{}') }, setHeader: () => {} }
     await route.handler(req, res)
     assert.equal(status, 400)
+    // 报错会原样显示在界面上：得是人话，不能是「不允许修改：persona」那种开发者口吻。
+    assert.match(payload.error, /这一版还不支持保存/, `报错要能看懂：${payload.error}`)
+    assert.doesNotMatch(payload.error, /不允许修改/, '别再用「不允许修改」这种说法')
   } finally {
     await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
   }
@@ -201,4 +236,51 @@ test('设置界面面向用户的文案里不出现男字旁的「他」', async
     if (/他/.test(shorn)) bad.push(m[2].slice(0, 40))
   }
   assert.deepEqual(bad, [], '面向用户的字符串里不许出现「他」')
+})
+
+test('own 层的 ops_* 能存进白名单，且 /tools 会说明「收窄挡不住它」（2026-10-29）', async () => {
+  // 用户真机：想把 dsh-ops 的 ops_bash 写进白名单，输入框一直报「名字不存在」。
+  // 原因是 knownToolNames 只收 restrictableNames，而 ops_* 注册在 agent 自身作用域。
+  // 现在收 restrictable ∪ visible；但下给 restrict() 的仍然只有收得窄的那批。
+  const root = await mkdtemp(join(tmpdir(), 'fish-p5e-'))
+  try {
+    rememberFromView({
+      restrictableNames: new Set([...HER_TOOLS]),
+      visible: new Map([...HER_TOOLS.map((n) => [n, {}]), ['ops_bash', {}]]),
+    })
+    const ctx = fakeCtx(root)
+    ctx.cfg.connection = { requestRejection: () => null }
+    registerObserve(ctx, { root })
+
+    const tools = ctx.routes.find((r) => String(r.path || '').endsWith('/tools'))
+    let payload = null
+    const res = {
+      writeHead: () => {},
+      end: (s) => { payload = JSON.parse(s || '{}') },
+      setHeader: () => {},
+    }
+    await tools.handler({ method: 'GET', url: '/dsh-fish/tools', headers: {} }, res)
+    assert.ok(payload.known.includes('ops_bash'), '白名单校验必须认得这个名字')
+    assert.deepEqual(payload.ownLayer, ['ops_bash'], 'own 层名单用来解释「加进来只是让守卫放行」')
+
+    const config = ctx.routes.find((r) => String(r.path || '').endsWith('/config'))
+    const body = JSON.stringify({ tools: { restrict: true, allow: ['ops_bash', 'read_image'] } })
+    const req = {
+      method: 'POST',
+      url: '/dsh-fish/config',
+      headers: { 'content-type': 'application/json' },
+      on: (ev, fn) => { if (ev === 'data') fn(Buffer.from(body, 'utf8')); if (ev === 'end') fn() },
+    }
+    let status = 0
+    let saved = null
+    await config.handler(req, {
+      writeHead: (s) => { status = s },
+      end: (s) => { saved = JSON.parse(s || '{}') },
+      setHeader: () => {},
+    })
+    assert.equal(status, 200, `ops_bash 该存得进去：${JSON.stringify(saved)}`)
+    assert.deepEqual(saved.config.tools.allow, ['ops_bash', 'read_image'])
+  } finally {
+    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
+  }
 })

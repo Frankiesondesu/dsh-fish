@@ -146,6 +146,36 @@ test('她把会话归档了：不自动重建，明说要才重建（0.6.8）', 
   } finally { await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) }
 })
 
+test('用户把会话解除归档了：插件要当场认回来，而不是一直等她点「重新搭一间」（0.6.29）', async () => {
+  const root = await tmpRoot()
+  try {
+    const { ctx, sessions, created } = fakeCtx()
+    const a = await bootstrapHome(ctx, { root })
+    assert.equal(a.ok, true, a.why)
+    const ws = sessions.get(a.wsId)
+    const oldId = ws.sessionIds[0]
+    const reg = ctx.get('workspaceRegistry')
+
+    // 用户在侧栏归档它
+    ws.sessionIds = []
+    reg.archivedSessionIds = [oldId]
+    const gone = await ensureTalkSession(ctx, { root, wsId: a.wsId })
+    assert.equal(gone.archived, true)
+    assert.equal(String((await homeStatus(root)).status), 'archived')
+
+    // 用户又把它从「已归档」里放回来了（宿主侧不再是归档态）
+    reg.archivedSessionIds = []
+    ws.sessionIds = [oldId]
+
+    const back = await ensureTalkSession(ctx, { root, wsId: a.wsId })
+    assert.equal(back.ok, true, back.why)
+    assert.equal(back.sessionId, oldId, '认回来必须是原来那条，不是新开一条')
+    assert.equal(back.reused, true)
+    assert.equal(String((await homeStatus(root)).status), '', '认回来之后归档标记要清掉')
+    assert.equal(created.length, 1, '不该多建一条会话')
+  } finally { await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) }
+})
+
 test('刚建出来的会话：宿主索引还没列出来也先复用（10 分钟宽限）', async () => {
   const root = await tmpRoot()
   try {

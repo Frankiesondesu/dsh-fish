@@ -147,11 +147,37 @@ async function ensureTalkSessionOnce(ctx, { root = rootDir(), wsId, title = TITL
 
   // ---- 用户自己收起来的那一局：不重开，除非明说要 ----
   if (saved?.sessionId && String(saved.status ?? '') === 'archived' && force !== true) {
-    return {
-      ok: false,
-      archived: true,
-      sessionId: String(saved.sessionId),
-      why: '这个家的会话被收起来了（已归档）；要重新搭一间，用「重新搭一间」',
+    // 2026-10-29（用户 m03508）：他把那条会话从「已归档」里放回来了，插件却还拿着
+    // home.json 里的 archived 标记，一直当她「收起来了」。宿主那边已经把她放回正常
+    // 列表（在 ws.sessionIds 里、且不在 archivedSessionIds 里）时当场认回来：
+    // 清掉标记、走下面的正常复用，数据一条不动。
+    // 反过来，只要宿主还说她在归档里，就继续等用户点「重新搭一间」——
+    // 不然「我收起来了」这句话又会被插件自己推翻。
+    let restored = false
+    try {
+      const ws = reg?.get?.(wsId)
+      const archived = Array.isArray(reg?.archivedSessionIds) ? reg.archivedSessionIds : []
+      restored = Array.isArray(ws?.sessionIds)
+        && ws.sessionIds.includes(saved.sessionId)
+        && !archived.includes(saved.sessionId)
+    } catch { restored = false }
+
+    if (restored) {
+      try {
+        const next = { ...saved }
+        delete next.status
+        delete next.archivedAt
+        await writeAtomic(homeFile(root), JSON.stringify(next, null, 2))
+        saved.status = ''
+        saved.archivedAt = null
+      } catch { /* 写不下来就只这一次认回来，下次再判一次 */ }
+    } else {
+      return {
+        ok: false,
+        archived: true,
+        sessionId: String(saved.sessionId),
+        why: '这个家的会话被收起来了（已归档）；要重新搭一间，用「重新搭一间」',
+      }
     }
   }
 

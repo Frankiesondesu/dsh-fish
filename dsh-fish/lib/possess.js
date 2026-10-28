@@ -29,6 +29,8 @@ import {
   possessionsFile,
 } from './outing.js'
 import { cwdOf, isHerHome } from './restrict.js'
+// 名字要读 session/title 事件；header 里是空的（2026-10-29 用户 m00761）。
+import { titleOfAgent, clipTitle } from './sessiontitle.js'
 
 /** 宿主自己的两段人格段：同名覆盖才叫「换人」。 */
 export const PERSONA_PREFIX_SECTION = 'deployment:persona-prefix'
@@ -183,7 +185,7 @@ export async function possessInto(ctx, { root, herDir, sessionId, log } = {}) {
   const cur = activePossessionOf(await readPossessions(root))
   if (cur && cur.sessionId === sid) return { ok: true, already: true, possession: cur }
   const header = agent?.session?.header ?? agent?.session ?? {}
-  const title = String(header.title ?? header.name ?? '').trim()
+  const title = clipTitle(titleOfAgent(ctx, agent) || header.title || header.name || '')
   const cwd = cwdOf(agent)
   const rec = { sessionId: sid, title, cwd, identity: identityText(root), now: Date.now() }
   const r = attachPossession(agent, { root, herDir, rec, log })
@@ -197,8 +199,53 @@ export async function possessInto(ctx, { root, herDir, sessionId, log } = {}) {
   return { ok: true, possession: saved.possession, section: r.section }
 }
 
-/** 结束请神（路由用）：先撤挂载，再把台账收尾。 */
-export async function releasePossession(root, { sessionId = '', log } = {}) {
+/**
+ * 请神结束时写进那条对话的交接句（2026-10-29 用户 m00924 真机发现）。
+ *
+ * 为什么需要它：请神段每轮现组装、撤销即生效，**但那条对话的历史是 append-only**——
+ * 她以自己身份说过的话留在里面，模型下一轮读到自己上一句「我是大肥鱼」，就会顺着演。
+ * 删不掉旧消息，唯一能做的是往里补一条明确的「已经还给你了」，让下一轮的上下文里
+ * 出现交接事实，而不是让她自己对着自己续戏。
+ * 2026-10-29 用户 m02381：原来让人在结束时写一句「临走留言」，读起来像她要留话，
+ * 太绕；整块删掉，只留这两句标准交接。
+ * @returns {string}
+ */
+export function releaseNoteText() {
+  return [
+    '（大肥鱼回去了，这条对话还给你。）',
+    '请神期间她说过的话仍留在上面的历史里；想完全干净，开一条新对话最稳。',
+  ].join('\n')
+}
+
+/**
+ * 往那条对话里追加一条可见的用户消息当交接句。永不抛：写不进去不影响请神结束。
+ * @param {object} agent
+ * @returns {{ ok: boolean, why?: string }}
+ */
+export function appendReleaseNote(agent) {
+  try {
+    const session = agent?.session
+    if (!session || typeof session.append !== 'function') {
+      return { ok: false, why: '那条对话已经收起来了，写不进去' }
+    }
+    session.append('user/message', {
+      id: `fish-release-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      role: 'user',
+      source: { kind: 'user' },
+      content: [{ type: 'text', text: releaseNoteText() }],
+    }, { surfaceOp: 'append' })
+    return { ok: true }
+  } catch (err) {
+    return { ok: false, why: String(err?.message ?? err).slice(0, 200) }
+  }
+}
+
+/**
+ * 结束请神（路由用）：先撤挂载，再把台账收尾，最后往那条对话补一条交接句。
+ * @param {string} root
+ * @param {{ sessionId?: string, log?: Function, agent?: object|null }} opts
+ */
+export async function releasePossession(root, { sessionId = '', log, agent = null } = {}) {
   const data = await readPossessions(root)
   const cur = activePossessionOf(data)
   if (!cur) return { ok: false, code: 409, why: '她本来就没上身' }
@@ -209,7 +256,10 @@ export async function releasePossession(root, { sessionId = '', log } = {}) {
   const r = await endPossession(root, { sessionId: cur.sessionId, now: Date.now() })
   if (!r.ok) return { ok: false, code: 409, why: r.why }
   logLineSafe(log, `[dsh-fish] 请神结束：${cur.title || '未命名对话'}`)
-  return { ok: true, possession: r.possession }
+  // 台账收好之后再补交接句：即便这句写不进去，请神本身也已经结束了。
+  const note = agent ? appendReleaseNote(agent) : { ok: false, why: '那条对话现在没开着' }
+  if (agent && !note.ok) logLineSafe(log, `[dsh-fish] 请神结束但没写进交接句：${note.why}`)
+  return { ok: true, possession: r.possession, note }
 }
 
 function logLineSafe(log, msg) {
