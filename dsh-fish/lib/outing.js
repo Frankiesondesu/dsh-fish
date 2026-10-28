@@ -1,0 +1,417 @@
+/**
+ * lib/outing.js —— 出门台账与请神名单。
+ *
+ * 设计见 `docs/E-出门与请神-方案.md`（0.6.3 起）。这里只放**事实记录**与判据，
+ * 不放会话创建、不放 UI、不放提示词——那些分别在 home.js / client.js / persona.js。
+ *
+ * 为什么另开一个文件而不是塞进 `lib/away.js`：
+ * `away.js` 回答的是「你不在的那些天里她怎么过的」（空档期汇总，只读历史）；
+ * 这里回答的是「她此刻在不在家、在谁的地盘上」（当下状态 + 一份外部台账）。
+ * 两个语义混在一个文件里，半年后没人分得清哪行是哪个意思。
+ *
+ * 两条台账都是**独立 json**，不碰 `events.jsonl` 的结构：
+ * - `outings.json`     出门（去别的工作区新开一条她的会话）
+ * - `possessions.json` 请神（上身到一条已有对话）
+ * 都不新增事件 type——宿主只允许 `plugin:` 的 ignorable 记录，出门标记一律走 meta。
+ */
+import { createHash } from 'node:crypto'
+import { closeSync, openSync, readFileSync, readSync, statSync } from 'node:fs'
+import { join } from 'node:path'
+
+import { readJson, writeAtomic } from './store.js'
+
+export const OUTING_SCHEMA = 1
+
+/** 出门台账路径。放在 herRoot 下，和 state.json 同级。 */
+export function outingsFile(root) {
+  return join(root, 'outings.json')
+}
+
+/** 请神名单路径。 */
+export function possessionsFile(root) {
+  return join(root, 'possessions.json')
+}
+
+function emptyOutings() {
+  return { version: OUTING_SCHEMA, outings: [] }
+}
+
+function emptyPossessions() {
+  return { version: OUTING_SCHEMA, possessions: [] }
+}
+
+/**
+ * 读台账。坏档不抛——出门这件事坏了，插件其余部分还得能跑。
+ * 返回的 outings 一定按 startedAt 升序（新的在后），UI 只看最后几条。
+ */
+export async function readOutings(root) {
+  const raw = await readJson(outingsFile(root), null)
+  const list = Array.isArray(raw?.outings) ? raw.outings : []
+  const outings = list
+    // 出门是「先记一笔、再建会话」：刚写下的那条还没有会话 id（等 agent/created 补上）。
+    // 按 sessionId 过滤会把它当坏档丢掉，而 identity.js 的钩子读的正是这个文件——
+    // 0.6.3 真机第一趟身份段/兜底守卫没挂上，根因就在这里。
+    .filter((o) => o && typeof o === 'object' && (o.sessionId || o.status === 'active'))
+    .map((o) => ({
+      sessionId: String(o.sessionId),
+      workspaceId: String(o.workspaceId ?? ''),
+      workspaceName: String(o.workspaceName ?? ''),
+      cwd: String(o.cwd ?? ''),
+      startedAt: Number(o.startedAt) || 0,
+      endedAt: o.endedAt ? Number(o.endedAt) : 0,
+      status: String(o.status ?? 'active'),
+      baseline: o.baseline && typeof o.baseline === 'object' ? o.baseline : null,
+      kept: o.kept === undefined ? null : Boolean(o.kept),
+      identity: String(o.identity ?? ''),
+    }))
+    .sort((a, b) => a.startedAt - b.startedAt)
+  return { version: Number(raw?.version) || OUTING_SCHEMA, outings }
+}
+
+export async function readPossessions(root) {
+  const raw = await readJson(possessionsFile(root), null)
+  const list = Array.isArray(raw?.possessions) ? raw.possessions : []
+  const possessions = list
+    .filter((p) => p && typeof p === 'object' && p.sessionId)
+    .map((p) => ({
+      sessionId: String(p.sessionId),
+      title: String(p.title ?? ''),
+      cwd: String(p.cwd ?? ''),
+      startedAt: Number(p.startedAt) || 0,
+      endedAt: p.endedAt ? Number(p.endedAt) : 0,
+      status: String(p.status ?? 'active'),
+      baseline: p.baseline && typeof p.baseline === 'object' ? p.baseline : null,
+      identity: String(p.identity ?? ''),
+    }))
+    .sort((a, b) => a.startedAt - b.startedAt)
+  return { version: Number(raw?.version) || OUTING_SCHEMA, possessions }
+}
+
+async function writeOutings(root, data) {
+  await writeAtomic(outingsFile(root), JSON.stringify(data, null, 2))
+}
+
+async function writePossessions(root, data) {
+  await writeAtomic(possessionsFile(root), JSON.stringify(data, null, 2))
+}
+
+/** 正在外面（出门）的那一条；没有就 null。 */
+export function activeOf({ outings = [] } = {}) {
+  return outings.find((o) => o.status === 'active') ?? null
+}
+
+/** 正在被上身（请神）的那一条；没有就 null。 */
+export function activePossessionOf({ possessions = [] } = {}) {
+  return possessions.find((p) => p.status === 'active') ?? null
+}
+
+/**
+ * 一次读齐「她此刻在哪」。
+ *
+ * `away.kind`：
+ * - `'outing'`      出门中（有 workspaceId / sessionId）
+ * - `'possession'`  请神中（有 sessionId / title）
+ * - `null`          在家
+ *
+ * **不允许同时开**（方案 5）：两条都在 active 时保留先开始的那条，另一条标 `conflict`。
+ * 这里不替 UI 做决定，只把事实摆出来，让设置页能说「她已经出去了」。
+ */
+export async function awayNow(root) {
+  const [{ outings }, { possessions }] = await Promise.all([readOutings(root), readPossessions(root)])
+  const outing = activeOf({ outings })
+  const possession = activePossessionOf({ possessions })
+  if (outing && possession) {
+    const first = outing.startedAt <= possession.startedAt ? 'outing' : 'possession'
+    return {
+      kind: first,
+      outing,
+      possession,
+      conflict: true,
+      why: '出门与请神同时开着：保留先开始的那条，另一条需要手动结束',
+    }
+  }
+  if (outing) return { kind: 'outing', outing, possession: null, conflict: false, why: '' }
+  if (possession) return { kind: 'possession', outing: null, possession, conflict: false, why: '' }
+  return { kind: null, outing: null, possession: null, conflict: false, why: '' }
+}
+
+/**
+ * `events.jsonl` 的基线：字节数 + 尾部 sha256。
+ *
+ * 为什么是「尾部」而不是整文件哈希：她的日记级文件会一直长，整文件哈希每次回家
+ * 都要把几兆读一遍；尾部的稳定性足够发现「有人在后面动过笔」，成本是常数。
+ */
+export function snapshotEvents(file) {
+  try {
+    const st = statSync(file)
+    const tailBytes = Math.min(4096, st.size)
+    const buf = Buffer.alloc(tailBytes)
+    const fd = openSync(file, 'r')
+    try {
+      readSync(fd, buf, 0, tailBytes, st.size - tailBytes)
+    } finally {
+      closeSync(fd)
+    }
+    return {
+      size: st.size,
+      tailSha256: createHash('sha256').update(buf).digest('hex'),
+      at: Date.now(),
+    }
+  } catch {
+    return { size: -1, tailSha256: '', at: Date.now() }
+  }
+}
+
+/**
+ * 回家时比对基线。三态：
+ * - `ok: true`   没动过（大小一致、尾部一致）
+ * - `ok: false`  **动过**：大小变小 / 尾部哈希变了（追加也会改尾部哈希，见 `appended`）
+ * - `appended: n` 允许的正常增长：她这趟用 `growth_commit` 写的事件（合法，不算改）
+ *
+ * 判据刻意保守：**只认「尾部哈希一致 + 大小没缩」为没动过**。
+ * 追加之后尾部哈希必然变，所以「追加算不算篡改」不在这里判——交给审查卡，
+ * 由人看着差异决定收不收（方案 3.5 第④层）。
+ */
+export function verifyEvents(file, baseline) {
+  const now = snapshotEvents(file)
+  if (!baseline || typeof baseline.size !== 'number' || baseline.size < 0) {
+    return { ok: null, checkable: false, why: '出门时没记下基线（文件还不存在？）', before: baseline ?? null, after: now }
+  }
+  if (now.size < 0) {
+    return { ok: false, checkable: true, why: 'events.jsonl 读不到了', before: baseline, after: now }
+  }
+  if (now.size < baseline.size) {
+    return {
+      ok: false,
+      checkable: true,
+      why: `事件流变小了：${baseline.size} → ${now.size} 字节（被删过行）`,
+      before: baseline,
+      after: now,
+    }
+  }
+  const appended = now.size - baseline.size
+  if (appended === 0 && now.tailSha256 !== baseline.tailSha256) {
+    return {
+      ok: false,
+      checkable: true,
+      why: '事件流大小没变但尾部内容变了（被原地改写）',
+      before: baseline,
+      after: now,
+    }
+  }
+  if (appended === 0) return { ok: true, checkable: true, appended: 0, before: baseline, after: now }
+  return {
+    ok: true,
+    checkable: true,
+    appended,
+    why: `这趟新增了 ${appended} 字节（正常写入；尾部必然变，不据此判篡改）`,
+    before: baseline,
+    after: now,
+  }
+}
+
+/**
+ * 开一次出门。已经在家就记一条 active；已经有一条 active 就拒绝（返回 why）。
+ *
+ * @param {string} root
+ * @param {{ sessionId: string, workspaceId?: string, workspaceName?: string, cwd?: string, now?: number, baseline?: object }} rec
+ */
+export async function startOuting(root, rec = {}) {
+  const data = await readOutings(root)
+  const cur = activeOf(data)
+  if (cur) return { ok: false, why: '她已经出门了', outing: cur }
+  // 会话 id 允许先空着：调用方先记账、再 `sc.create()`，因为后者会**同步**触发
+  // 宿主的 `agent/created`；那条钩子必须已经看得到这次出门。建完会话由
+  // `bindOutingSession` 把 id 补上。
+  const sessionId = String(rec.sessionId ?? '').trim()
+  const { possessions } = await readPossessions(root)
+  const possess = activePossessionOf({ possessions })
+  if (possess) return { ok: false, why: '她正在上身，先结束请神再出门', possession: possess }
+  const now = Number(rec.now) || Date.now()
+  const outing = {
+    sessionId,
+    workspaceId: String(rec.workspaceId ?? ''),
+    workspaceName: String(rec.workspaceName ?? ''),
+    cwd: String(rec.cwd ?? ''),
+    startedAt: now,
+    endedAt: 0,
+    status: 'active',
+    baseline: rec.baseline ?? null,
+    kept: null,
+    // 出门那一刻的身份快照：只读，她自己在外面改不了家里的身份文件。
+    // 空串表示那一刻还没写出身份文件（她刚开张时正常，仍会退回实时读盘）。
+    identity: String(rec.identity ?? '').slice(0, 40000),
+  }
+  data.outings.push(outing)
+  await writeOutings(root, data)
+  return { ok: true, outing }
+}
+
+/**
+ * 建完会话后把 id 补进那条「已经记下、还没 id」的出门记录（幂等）。
+ * 在 `startOuting` 与 `sc.create()` 之间只有这一条的 id 是空的，所以不会认错。
+ */
+export async function bindOutingSession(root, { sessionId = '', now = Date.now() } = {}) {
+  const id = String(sessionId ?? '').trim()
+  if (!id) return { ok: false, why: '没有会话 id 可补' }
+  const data = await readOutings(root)
+  const cur = activeOf(data)
+  if (!cur) return { ok: false, why: '没有正在进行的出门' }
+  if (cur.sessionId === id) return { ok: true, outing: cur, bound: false }
+  if (cur.sessionId) return { ok: false, why: '外面那条已经记了别的会话', outing: cur }
+  cur.sessionId = id
+  cur.boundAt = Number(now) || Date.now()
+  await writeOutings(root, data)
+  return { ok: true, outing: cur, bound: true }
+}
+
+/**
+ * 建会话失败时把这条空壳记录撤掉——否则她会「挂在门外」，家里调度也一直暂停。
+ * 只删还没绑定会话、且还在 active 的那条；已经绑定了的不动（那不是空壳）。
+ */
+export async function abortOuting(root) {
+  const data = await readOutings(root)
+  const cur = activeOf(data)
+  if (!cur) return { ok: false, why: '没有正在进行的出门' }
+  if (cur.sessionId) return { ok: false, why: '这条已经绑了会话，不能当空壳撤掉', outing: cur }
+  data.outings = data.outings.filter((o) => o !== cur)
+  await writeOutings(root, data)
+  return { ok: true, removed: true }
+}
+
+/**
+ * 叫她回家。`kept` 是她这趟学到的算不算数：
+ * - `true`  正常并入（事件早已在 events.jsonl 里，只是不再被跳过）
+ * - `false` 驳回（事件盖 `outing-reject:` 标记，`deriveSelf` 跳过）
+ * - `null`  入口不表态（审查卡之前不替人做决定）
+ *
+ * `status` 只允许 `'done'` / `'rejected'` 两种终态；事件流被动过时先走 `'pending'`
+ * （默认拒收、她留在外面等确认，见方案 3.5 第④层）。
+ */
+export async function endOuting(root, { sessionId = '', status = 'done', kept = null, now = Date.now() } = {}) {
+  const data = await readOutings(root)
+  const cur = activeOf(data)
+  if (!cur) return { ok: false, why: '她本来就在家' }
+  if (sessionId && cur.sessionId !== String(sessionId)) {
+    return { ok: false, why: '外面那条不是这一条', outing: cur }
+  }
+  cur.status = String(status)
+  cur.endedAt = Number(now) || Date.now()
+  cur.kept = kept === null ? null : Boolean(kept)
+  await writeOutings(root, data)
+  return { ok: true, outing: cur }
+}
+
+export async function startPossession(root, rec = {}) {
+  const data = await readPossessions(root)
+  const cur = activePossessionOf(data)
+  if (cur) return { ok: false, why: '她已经在一条对话里了', possession: cur }
+  const sessionId = String(rec.sessionId ?? '').trim()
+  if (!sessionId) return { ok: false, why: '没拿到目标会话的 id' }
+  const { outings } = await readOutings(root)
+  const outing = activeOf({ outings })
+  if (outing) return { ok: false, why: '她正在出门，先叫她回家再请神', outing }
+  const now = Number(rec.now) || Date.now()
+  const possession = {
+    sessionId,
+    title: String(rec.title ?? ''),
+    cwd: String(rec.cwd ?? ''),
+    startedAt: now,
+    endedAt: 0,
+    status: 'active',
+    baseline: rec.baseline ?? null,
+    // 请神时也要一份「走时的自己」：上身期间她在别人的对话里，
+    // 读到的应该是被请走那一刻的身份，而不是家里那份随时可改的文件。
+    identity: String(rec.identity ?? '').slice(0, 40000),
+  }
+  data.possessions.push(possession)
+  await writePossessions(root, data)
+  return { ok: true, possession }
+}
+
+export async function endPossession(root, { sessionId = '', status = 'done', now = Date.now() } = {}) {
+  const data = await readPossessions(root)
+  const cur = activePossessionOf(data)
+  if (!cur) return { ok: false, why: '她本来就没上身' }
+  if (sessionId && cur.sessionId !== String(sessionId)) {
+    return { ok: false, why: '上身的那条不是这一条', possession: cur }
+  }
+  cur.status = String(status)
+  cur.endedAt = Number(now) || Date.now()
+  await writePossessions(root, data)
+  return { ok: true, possession: cur }
+}
+
+/**
+ * 同步版：只给 `agent/created` 这种同步钩子用（identity.js）。
+ * 复用同一个文件格式；读不到就当没出门——她最多少挂一段身份，不会崩。
+ */
+/**
+ * 出门这段时间里，事件流多出了什么。
+ *
+ * 只读：不写盘、不改行。按出门那一刻之后的时间筛，把条目摆出来给审查卡。
+ * 不替人判好坏——「这趟算不算数」是人的事，这里只负责让她做过的事看得见。
+ */
+export function eventsSince(file, since, { limit = 300 } = {}) {
+  const at = Number(since) || 0
+  if (!at) return { ok: false, total: 0, items: [], why: '没有出门时间，算不出这一趟多了什么' }
+  let raw = ''
+  try {
+    raw = readFileSync(file, 'utf8')
+  } catch {
+    return { ok: false, total: 0, items: [], why: '读不到事件流' }
+  }
+  const items = []
+  for (const line of raw.split('\n')) {
+    if (!line.trim()) continue
+    let ev = null
+    try { ev = JSON.parse(line) } catch { continue }
+    if (!ev || !(Number(ev.ts) >= at)) continue
+    // 审查标记本身不是她做的事，不进列表。
+    if (ev.type === 'meta' && /^outing-(reject|keep):/.test(String(ev.text ?? ''))) continue
+    items.push({
+      id: String(ev.id ?? ''),
+      ts: Number(ev.ts) || 0,
+      type: String(ev.type ?? ''),
+      verdict: ev.verdict ?? null,
+      // 「顶回来的那条」：她明确拒绝过什么，或者把自己原来那句判成被推翻。
+      // 只收下说得漂亮的，等于把这一趟教坏——用户原话「顶撞你的那条也要留」。
+      pushback: ev.type === 'refusal' || ev.verdict === 'refuted',
+      text: String(ev.text ?? '').slice(0, 400),
+    })
+  }
+  const total = items.length
+  const cap = Math.max(1, Math.min(500, Number(limit) || 300))
+  return { ok: true, total, items: items.slice(-cap), why: '' }
+}
+
+export function activeOutingSync(root) {
+  try {
+    const raw = JSON.parse(readFileSync(join(root, 'outings.json'), 'utf8'))
+    const list = Array.isArray(raw?.outings) ? raw.outings : []
+    return list.find((o) => o && o.status === 'active') ?? null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * 状态卡上那一行。没有 active 就返回空串（调用方据此决定加不加这行）。
+ * 只写时间长度，不写「想念」之类的情绪评价——那是她的事，不是状态卡的。
+ */
+export function awayLine(away, { now = Date.now() } = {}) {
+  if (!away || !away.kind) return ''
+  const since = away.kind === 'outing' ? away.outing?.startedAt : away.possession?.startedAt
+  if (!since) return ''
+  const ms = Math.max(0, now - since)
+  const mins = Math.floor(ms / 60000)
+  const hours = Math.floor(mins / 60)
+  const days = Math.floor(hours / 24)
+  const dur = days >= 1 ? `${days} 天` : hours >= 1 ? `${hours} 小时` : `${Math.max(1, mins)} 分钟`
+  if (away.kind === 'outing') {
+    const where = away.outing?.workspaceName || away.outing?.workspaceId || '别的工作区'
+    return `此刻在外面：${where} · 已 ${dur}`
+  }
+  const where = away.possession?.title || '一条对话'
+  return `此刻在替人说话：${where} · 已 ${dur}`
+}

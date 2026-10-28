@@ -9,6 +9,7 @@
 import { readEvents, appendEvent, rootDir } from './store.js'
 import { loadConfig, dateKey } from './settings.js'
 import { grabFrames } from './video.js'
+import { logLine } from './log.js'
 
 import { defineTool } from './tool.js'
 import { slashed } from './posix.js'
@@ -57,21 +58,34 @@ export function registerWatch(ctx, deps = {}) {
         const bvid = String(args?.bvid ?? '').trim()
         const { config } = await loadConfig(root)
         if (!config?.browse?.enabled) return { ok: false, path: '', text: '', note: '现在打不开。' }
-        if (config?.video?.enabled === false) return { ok: false, path: '', text: '', note: '现在看不了画面。' }
+        if (config?.video?.enabled === false) {
+          // 2026-10-28 起每个失败分支都写一行日志。以前这里一个字都没有，
+          // 用户那边「看不到画面」时导出包里完全查不出是被哪一条挡下的
+          // （另一台机器的排查就卡在这儿，只能靠猜）。
+          logLine('info', ['看画面：设置里关掉了看视频'], root)
+          return { ok: false, path: '', text: '', note: '现在看不了画面。' }
+        }
         if (!/^BV[0-9A-Za-z]{10}$/.test(bvid)) {
+          logLine('info', ['看画面：视频号不合法', bvid || '(空)'], root)
           return { ok: false, path: '', text: '', note: '这不是一个视频号。' }
         }
 
         const ev = await readEvents(root).catch(() => ({ events: [] }))
         const dk = dateKey()
         const cap = Math.max(0, Number(config?.video?.perDay ?? 2))
+        const used = watchedToday(ev.events, dk)
         // 额度用完只说"不想看了"，不报数字——她不该知道有个计数器在管她（N2）
-        if (watchedToday(ev.events, dk) >= cap) {
+        if (used >= cap) {
+          // 日志里可以写数字：这是给人看的，不是给她看的。
+          logLine('info', ['看画面：今日额度已满', `${used}/${cap}`, bvid], root)
           return { ok: false, path: '', text: '', note: '今天不想再看画面了。' }
         }
 
         const r = await grabFrames({ bvid, root, frames: config?.video?.frames })
-        if (!r.ok) return { ok: false, path: '', text: '', note: r.why }
+        if (!r.ok) {
+          logLine('warn', ['看画面：抽帧失败', bvid, r.why ?? ''], root)
+          return { ok: false, path: '', text: '', note: r.why }
+        }
 
         await appendEvent(
           { type: 'meta', text: `watched:${dk} ${bvid}` },
@@ -83,6 +97,8 @@ export function registerWatch(ctx, deps = {}) {
         // C:\... 这种反斜杠写法在客户端解析后取不到文件，图片就显示成「无法预览」
         // （2026-10-26 实测：同一张图 C:\ 版失败、C:/ 版正常）。
         const posix = slashed(r.path)
+        // 成功的这一条也要记：跟日志里「今日额度已满」对得上，才知道额度是怎么用掉的。
+        logLine('info', ['看画面：取到了', bvid, `${used + 1}/${cap}`, posix], root)
         return {
           ok: true,
           path: posix,

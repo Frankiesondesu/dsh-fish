@@ -86,7 +86,10 @@ export function parseWatchIntent(text) {
 export function watchHint(r) {
   if (!r || !r.hasVideo) return ''
   if (r.intent === 'none') return ''
-  const which = r.bvid ? `BV 号是 ${r.bvid}` : '那是条短链，你打不开，要他给 BV 号'
+  // 2026-10-28：短链不再需要他重新给 BV 号——bili_look what=video 认得链接
+  const which = r.bvid
+    ? `BV 号是 ${r.bvid}`
+    : '他给的是一条短链（给 bili_look what=video 就能打开）'
   if (r.intent === 'must') {
     return `他这条消息里有一条视频，${which}。他那句话是在要求你看。先看，再回他。`
   }

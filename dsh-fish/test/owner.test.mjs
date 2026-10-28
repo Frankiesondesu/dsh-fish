@@ -119,6 +119,22 @@ test('saveOwner 落盘 0600，且只存白名单里的键', async () => {
   }
 })
 
+test('saveOwner 认不出 cookie 时也把 mid / 昵称存下（用户 m00802 反馈 2）', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'fish-ow3-'))
+  try {
+    const r = await saveOwner({ mid: '42', nickname: '大号', cookie: '{"cookies":[1,2]}' }, root)
+    assert.equal(r.ok, false)
+    assert.match(r.note, /没认出/)
+    const ow = await readOwner(root)
+    // 关键：不能因为 cookie 解析失败就把整单丢回旧值，否则界面刷新后两格"被顶掉"。
+    assert.equal(ow.mid, '42')
+    assert.equal(ow.nickname, '大号')
+    assert.equal(ow.cookie, undefined)
+  } finally {
+    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
+  }
+})
+
 test('saveOwner 传空 cookie 是「清除」，不是「没传」', async () => {
   const root = await mkdtemp(join(tmpdir(), 'fish-ow2-'))
   try {

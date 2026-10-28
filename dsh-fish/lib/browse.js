@@ -137,7 +137,7 @@ export function fmtCount(n) {
  * 深读一条：详情（简介）+ 标签 + 热评 + 弹幕抽样。
  * 每一项都是独立 try：评论挂了不影响弹幕，弹幕挂了不影响简介。
  */
-export async function absorb(client, v, cfg) {
+export async function absorb(client, v, cfg, o = {}) {
   const out = {
     video: v,
     desc: '',
@@ -150,7 +150,8 @@ export async function absorb(client, v, cfg) {
   }
 
   try {
-    const d = await client.view(v.bvid)
+    // 调用方已经把详情取回来了就不再取一次（what=video 那条路要两次请求变一次）
+    const d = o.view ?? await client.view(v.bvid)
     if (d?.ok && d.data) {
       out.desc = String(d.data.desc ?? '').replace(/\s+/g, ' ').trim().slice(0, 400)
       out.pubdate = d.data.pubdate ?? null
@@ -231,12 +232,14 @@ export function renderItem(p, i) {
 }
 
 /** 拼成整块素材（最后统一套一次 debrief，而不是每条套一层——省 token） */
-export function renderMaterial(packs) {
+export function renderMaterial(packs, o = {}) {
   if (!packs.length) return ''
   const body = packs.map((p, i) => renderItem(p, i)).join('\n\n')
-  const head = `${packs.length} 条。平台按它的算法推的，没有经过你的同意。`
+  const head = o.head === undefined
+    ? `${packs.length} 条。平台按它的算法推的，没有经过你的同意。`
+    : String(o.head)
   const text = debrief(body, 'B站')
-  let out = `${head}\n\n${text}`
+  let out = head ? `${head}\n\n${text}` : text
   if (out.length > MAX_MATERIAL_CHARS) {
     out = out.slice(0, MAX_MATERIAL_CHARS) + '\n\n（后面的内容太长，没加载完。）'
   }
@@ -274,22 +277,55 @@ export function browseCountToday(events, dk = dateKey()) {
  *
  * meta 形状：`browse:2026-10-22 [{"bvid":"BV…","title":"…","up":"…","duration":183,"view":12345}]`
  */
+/** 一条 meta 正文的实用上限（宿主 schema 会拒更长的），分片按这个切 */
+export const BROWSE_CHUNK_MAX = 1800
+
+/** 记账行的两个前缀：第一片 `browse:`，后续分片 `browse-more:`（顺序=事件顺序） */
+const BROWSE_PREFIXES = ['browse:', 'browse-more:']
+
+/**
+ * 从一条 meta 正文里切出「某一天的条目数组」。
+ *
+ * 一次刷站看的那几条装不进一条 meta（单项带封面地址约 350 字），所以记账会分片：
+ * 第一片 `browse:<日期> [...]`，其余 `browse-more:<日期> [...]`。
+ * 读的一方必须两个前缀都认——只认第一个前缀，就只看得见第一片。
+ * 2026-10-28 用户反馈的「累计看过 14 个、抽屉里只有 4 条」正是这个：每次刷站
+ * 只落下前 4 条，其余被静默砍掉。
+ *
+ * @param {string} text meta 正文
+ * @param {string} [dk] 只要这一天；不给就取行里自带的那天
+ * @returns {{dk:string, arr:object[]}|null}
+ */
+export function parseBrowseLine(text, dk) {
+  const t = String(text ?? '')
+  for (const pre of BROWSE_PREFIXES) {
+    if (!t.startsWith(pre)) continue
+    const rest = t.slice(pre.length)
+    const sp = rest.indexOf(' ')
+    if (sp < 0) return null
+    const day = rest.slice(0, sp).trim()
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) return null
+    if (dk && day !== dk) return null
+    const json = rest.slice(sp + 1).trim()
+    if (!json.startsWith('[')) return null
+    try {
+      const arr = JSON.parse(json)
+      return Array.isArray(arr) ? { dk: day, arr } : null
+    } catch {
+      return null // 坏行跳过，不让读的一方崩
+    }
+  }
+  return null
+}
+
 export function itemsFromEvents(events, dk = dateKey()) {
   const out = []
   const seen = new Set()
   for (const e of events ?? []) {
     if (e?.type !== 'meta') continue
-    const t = String(e.text ?? '')
-    if (!t.startsWith(`browse:${dk} `)) continue
-    const json = t.slice(`browse:${dk} `.length).trim()
-    if (!json.startsWith('[')) continue
-    let arr
-    try {
-      arr = JSON.parse(json)
-    } catch {
-      continue // 坏行跳过，不让报告崩
-    }
-    for (const it of Array.isArray(arr) ? arr : []) {
+    const got = parseBrowseLine(e.text, dk)
+    if (!got) continue
+    for (const it of got.arr) {
       const bvid = String(it?.bvid ?? '')
       if (!bvid || seen.has(bvid)) continue
       seen.add(bvid)
@@ -299,7 +335,27 @@ export function itemsFromEvents(events, dk = dateKey()) {
   return out
 }
 
-/** 落一条"今天看了这些"的记账（供报告与配额共用） */export async function recordBrowse(root, dk, picks, model) {
+/**
+ * 把条目切成若干片，每片 JSON 不超过 max 字。
+ * 单项放不进就让它独占一片（不砍字段，宁可略超也不丢数据）。
+ */
+export function chunkBrowseItems(slim, max = BROWSE_CHUNK_MAX) {
+  const chunks = []
+  let cur = []
+  for (const it of slim) {
+    if (cur.length && JSON.stringify([...cur, it]).length > max) {
+      chunks.push(cur)
+      cur = [it]
+    } else {
+      cur = [...cur, it]
+    }
+  }
+  if (cur.length) chunks.push(cur)
+  return chunks
+}
+
+/** 落"今天看了这些"的记账（供报告与配额共用）：条目多就分片写多条 meta */
+export async function recordBrowse(root, dk, picks, model) {
   const slim = (picks ?? []).slice(0, 20).map((p) => ({
     bvid: String(p.bvid ?? ''),
     title: String(p.title ?? '').slice(0, 80),
@@ -309,21 +365,22 @@ export function itemsFromEvents(events, dk = dateKey()) {
     pic: String(p.pic ?? '').slice(0, 200),
   })).filter((p) => p.bvid)
   if (!slim.length) return null
-  let json = JSON.stringify(slim)
-  // meta text 上限 2000（schema 会拒），超了就砍条目而不是砍一半 JSON
-  while (json.length > 1800 && slim.length > 1) {
-    slim.pop()
-    json = JSON.stringify(slim)
+  const meta = { day: Number(model?.day ?? 0), stage: Number(model?.stage ?? 1), source: 'system' }
+  let last = null
+  const chunks = chunkBrowseItems(slim)
+  for (let i = 0; i < chunks.length; i++) {
+    const pre = i === 0 ? 'browse:' : 'browse-more:'
+    try {
+      last = await appendEvent(
+        { type: 'meta', text: `${pre}${dk} ${JSON.stringify(chunks[i])}` },
+        meta,
+        root,
+      )
+    } catch {
+      return last // 分片写失败就停：已落下的算数，不静默改写成半条
+    }
   }
-  try {
-    return await appendEvent(
-      { type: 'meta', text: `browse:${dk} ${json}` },
-      { day: Number(model?.day ?? 0), stage: Number(model?.stage ?? 1), source: 'system' },
-      root,
-    )
-  } catch {
-    return null
-  }
+  return last
 }
 
 /**
@@ -439,6 +496,7 @@ export const LOOK_BRIEF = [
   '  what=home    首页把什么推到你面前',
   '  what=search  搜一个词（要带 keyword）',
   '  what=related 看某个视频之后，平台又接着推什么（要带 bvid）',
+  '  what=video   看指定的那一条（要带 bvid：BV 号，或者他递过来的链接）',
   '它只读，不会留下任何痕迹，也不会让别人知道你在看。',
   '它能给你标题、简介、标签、热评、弹幕——给不了视频画面。',
   '和 growth_commit 一样，你不用它也可以。',
@@ -460,4 +518,7 @@ export const WATCH_RULE = [
   '  他说"可以看""要不要看""有没有兴趣"——那只是问我。我可以不看。',
   '不想看的时候，直接问他：为什么要看这个，这是什么。',
   '我本来就不知道该看什么。问一句不丢人。',
+  '',
+  '看了之后想说什么，就在那一条下面说——不用等平台把它推到我面前。',
+  '没看过的不去说：不是谁递过来的手续，是我不想替自己没读的东西表态。',
 ].join('\n')

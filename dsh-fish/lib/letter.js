@@ -36,6 +36,7 @@ import { refreshSelfDoc } from './selfdoc.js'
 import { Reject } from './schema.js'
 
 import { defineTool } from './tool.js'
+import { guardWrite } from './tenant.js'
 
 /** 一句留话最多多少字。太长就不是"留句话"，是写报告。 */
 export const LETTER_MAX = 500
@@ -78,7 +79,7 @@ export function lettersToday(events, dk = dateKey()) {
  * 留一句话。永不抛（失败只回 note）。
  * @returns {Promise<{ok:boolean, id:string, note:string}>}
  */
-export async function leaveLetter(root, text, { log } = {}) {
+export async function leaveLetter(root, text, { log, sessionId = '' } = {}) {
   const body = String(text ?? '').trim()
   if (!body) return { ok: false, id: '', note: '空白的，没留。' }
   if (body.length > LETTER_MAX) {
@@ -99,7 +100,13 @@ export async function leaveLetter(root, text, { log } = {}) {
 
     const model = deriveSelf(events, { growthDays: config.growthDays })
     const env = { day: model.day, stage: model.stage, source: 'tool' }
-    const ev = await appendEvent({ type: 'utterance', text: body }, env, root)
+    // 跟 growth_commit 一样带上「谁写的」（2026-10-28 用户 m01319）：
+    // 两个家共用一个 root 时，信箱里的话也得认得出是哪一位留的。
+    const ev = await appendEvent(
+      { type: 'utterance', text: body, ...(sessionId ? { sessionId } : {}) },
+      env,
+      root,
+    )
 
     // 打标：source 必须是 system（schema 规定 tool 只能写 HER_TYPES）
     await appendEvent(
@@ -152,8 +159,11 @@ export function registerLetter(ctx, deps = {}) {
         // 头三个字就是旧回执，模型会把工具返回的话当自己的话接着说）。
         render: (_args, out) => [{ type: 'text', text: out.ok ? '[已留]' : `[没留：${out.note}]` }],
       },
-      async execute(args) {
-        const r = await leaveLetter(root, args?.text, { log: deps.log })
+      async execute(args, exec) {
+        // 同 growth_commit：先认「谁在说、说的是哪栋房子」（2026-10-28 用户 m01319）。
+        const who = guardWrite(deps.tenant, exec, 'her_leave')
+        if (!who.ok) return { ok: false, note: who.note }
+        const r = await leaveLetter(root, args?.text, { log: deps.log, sessionId: who.sessionId })
         return { ok: r.ok, note: r.note }
       },
     }),

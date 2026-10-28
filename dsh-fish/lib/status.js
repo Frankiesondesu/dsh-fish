@@ -225,6 +225,23 @@ export function deriveStatus({ events = [], config = {}, now = new Date() } = {}
     }
   }
 
+  // 2026-10-28（用户 m06971）：`quiet:` 是「今天没有该问的事」的解释，不是行动。
+  // 0.6.2 之前调度层每分钟都写一条，一天能写几百条，把时间线整页刷成同一句。
+  // 写入侧已经改成一天一条；旧档里已经堆着的那几百条在这里折叠掉，
+  // 只留当天第一条——事件流只能追加，不能靠删历史来修。
+  //
+  // 按**本地时区**的 dateKey 分组，不能按 ISO 串切前 10 位：
+  // `at` 是 UTC，北京时间 07:25 与 08:00 会落在不同的 UTC 日子里，切串就合并不掉。
+  {
+    const seen = new Set()
+    for (let i = 0; i < timeline.length; i += 1) {
+      if (timeline[i].kind !== 'quiet') continue
+      const day = dateKey(new Date(timeline[i].at))
+      if (seen.has(day)) { timeline.splice(i, 1); i -= 1; continue }
+      seen.add(day)
+    }
+  }
+
   const nextWakeAt = plannedWakeAt && plannedWakeAt > nowMs ? new Date(plannedWakeAt).toISOString() : null
 
   return {

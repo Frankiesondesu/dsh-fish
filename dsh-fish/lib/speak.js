@@ -23,6 +23,7 @@ import { screenOutgoing } from './guard.js'
 import { mentionPrefix } from './owner.js'
 
 import { defineTool } from './tool.js'
+import { guardWrite } from './tenant.js'
 
 /**
  * 说一次。永不抛出。
@@ -72,7 +73,7 @@ function softReason(why) {
   if (w.includes('没开') || w.includes('权限')) return '现在不方便说。'
   if (w.includes('今天说够') || w.includes('今天回够')) return '今天说得够多了。'
   if (w.includes('不是说话的时候')) return '现在不是说话的时候。'
-  if (w.includes('没看')) return '这个你还没看过，先看清楚再说。'
+  if (w.includes('没看')) return '这个你还没看过。想看那一条，就先看一眼再说。'
   if (w.includes('登录') || w.includes('cookie')) return '说不出去，缺了点什么。'
   if (w.includes('拦')) return '说了但没送到，等一下再说。'
   return w.slice(0, 40) || '没说出来。'
@@ -114,7 +115,11 @@ export function registerSpeak(ctx, deps = {}) {
         render: (_args, out) =>
           [{ type: 'text', text: out.ok ? `说出去了：「${out.said}」` : `没说：${out.note}` }],
       },
-      async execute(args) {
+      async execute(args, exec) {
+        // 对外说话更要有「谁在说」的凭据：两个家共用一个 root 时，
+        // 不能让 A 家的她去 B 家的 B 站号上说话（2026-10-28 用户 m01319）。
+        const who = guardWrite(deps.tenant, exec, 'bili_speak')
+        if (!who.ok) return { ok: false, said: '', note: who.note }
         const { config } = await loadConfig(root)
         if (config?.comment?.enabled !== true) return { ok: false, said: '', note: '现在不方便说。' }
         return speakOnce({

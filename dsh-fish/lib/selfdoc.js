@@ -31,6 +31,7 @@ import { personaLine, toolBrief, RECALL_BRIEF, SPEAK_BRIEF, LETTER_BRIEF, DIARY_
 import { LOOK_BRIEF, WATCH_RULE } from './browse.js'
 import { activeCarry } from './home.js'
 import { activeGrants } from './unlock.js'
+import { checkCaller } from './tenant.js'
 
 /** 身份文本的落盘副本。名字刻意不叫 `AGENTS.md`——宿主会读那个名字并注入对话。 */
 export function selfDocPath(root = rootDir()) {
@@ -116,8 +117,22 @@ export function renderSelfDoc(model, { budget, carry, browse = true, speak = fal
  *
  * @returns {Promise<{ok:boolean, changed:boolean, file:string, why?:string}>}
  */
-export async function writeSelfDoc(root = rootDir(), { log } = {}) {
+export async function writeSelfDoc(root = rootDir(), { log, exec, tenant } = {}) {
   const file = selfDocPath(root)
+  // 身份文件只允许 root 对应的那条会话写（2026-10-28 用户 m01319 第三条）。
+  // 她自己的配置变更、定时器刷新都不带 exec —— 那些发生在 root 内部，放行；
+  // 带 exec 的调用必须证明 cwd 在这个家里，否则这一趟就不落盘。
+  // 不抛错：身份文件是派生物，跳过比中断调用方更重要；原因记进日志。
+  if (tenant && tenant.ok === false) {
+    return { ok: false, changed: false, file, why: tenant.why || '这个家被另一个实例占着' }
+  }
+  if (exec) {
+    const res = checkCaller(root, exec, { herDir: join(paths(root).root, 'home'), tool: '身份文件' })
+    if (!res.ok) {
+      log?.('selfdoc skipped: caller outside root', res.cwd)
+      return { ok: false, changed: false, file, why: res.why }
+    }
+  }
   try {
     const { events } = await readEvents(root)
     const { config } = await loadConfig(root)

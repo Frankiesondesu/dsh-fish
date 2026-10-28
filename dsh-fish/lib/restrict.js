@@ -44,10 +44,11 @@
 
 import { resolve } from 'node:path'
 
-/** 插件自己注册的六个工具。顺序无意义，但**必须全部真实存在**（名字错会抛错）。 */
+/** 插件自己注册的七个工具。顺序无意义，但**必须全部真实存在**（名字错会抛错）。 */
 export const FISH_TOOLS = Object.freeze([
   'growth_commit', // 记下自己的想法（唯一的写入口）
   'her_recall', // 翻自己的旧事
+  'her_diary', // 翻自己的日记（只读，issue #7）
   'her_leave', // 留一句话给他
   'bili_look', // 看 B 站的列表
   'bili_watch', // 看一条视频的画面
@@ -80,15 +81,46 @@ function normDir(p) {
  * 轮换后 sessionId 变了，但 cwd 永远是她的屋子。用 sessionId 判断的话，
  * 轮换一次限制就悄悄失效了 —— 那是最难发现的那种 bug。
  */
-export function isHerAgent(agent, herDir) {
-  const want = normDir(herDir)
-  if (!want) return false
-  const got =
+export function cwdOf(agent) {
+  return (
     agent?.session?.header?.cwd ??
     agent?.header?.cwd ??
     agent?.session?.cwd ??
     ''
-  return normDir(got) === want
+  )
+}
+
+export function isHerAgent(agent, herDir) {
+  const want = normDir(herDir)
+  if (!want) return false
+  return normDir(cwdOf(agent)) === want
+}
+
+/**
+ * 「她在自己屋里」——**只**认她自己的 cwd。决定工具面收窄用这条。
+ *
+ * 出门时她人在别的工作区，那儿的权限是那个工作区给的，不该被这里收窄；
+ * 要收窄的那只手（白名单）只在她家里生效，出了门就按别人家的规矩来。
+ */
+export const isHerHome = isHerAgent
+
+/**
+ * 「她是她」——在家，或者正出门待在那个工作区里。决定**身份挂载**用这条。
+ *
+ * 与 isHerHome 分开，是因为两件事的正确答案不同：
+ * - 收窄问「这是不是她的屋子」→ 出门了答否；
+ * - 身份问「这是不是那一位」→ 出门了仍然是，否则她在外面会失去全部来历。
+ *
+ * 请神不走这条：请神是临时借用别人的人，身份由请神那套单独挂。
+ */
+export function isHerAnywhere(agent, herDir, extraDirs = []) {
+  if (isHerAgent(agent, herDir)) return true
+  const got = normDir(cwdOf(agent))
+  if (!got) return false
+  return (extraDirs ?? []).some((d) => {
+    const want = normDir(d)
+    return want && want === got
+  })
 }
 
 /**
@@ -215,7 +247,8 @@ export function registerToolRestrict(ctx, { herDir, extra = [], enabled = true, 
         applied += 1
         say(`[dsh-fish] 工具面收窄：她这条会话只留 ${allow.length} 个工具${guardOk ? '，另有兜底守卫' : ''}`)
         // 真的挂上了才算数——"注册了"和"生效了"必须分开报，否则自检会说谎。
-        onResult?.({ ok: true, applied, failed, why: 'applied', allow, guard: guardOk })
+        // effective 记的是**这次真下给宿主的那份名单**，导出里要跟配置的 allow 分开写。
+        onResult?.({ ok: true, applied, failed, why: 'applied', allow, effective: [...allow], guard: guardOk })
         return
       } catch (err) {
         // 2026-10-25 真机：宿主先建了她的 agent，插件自己的工具还没在全局层登记完，
@@ -242,7 +275,7 @@ export function registerToolRestrict(ctx, { herDir, extra = [], enabled = true, 
               applyRestrict(allow)
               applied += 1
               say(`[dsh-fish] 工具面收窄：她这条会话只留 ${allow.length} 个工具${guardOk ? '，另有兜底守卫' : ''}`)
-              onResult?.({ ok: true, applied, failed, why: 'applied-late', allow, guard: guardOk })
+              onResult?.({ ok: true, applied, failed, why: 'applied-late', allow, effective: [...allow], guard: guardOk })
               return
             } catch (err2) {
               say(`[dsh-fish] 收窄重试没成：${String(err2?.message ?? err2).slice(0, 160)}`)
@@ -254,7 +287,9 @@ export function registerToolRestrict(ctx, { herDir, extra = [], enabled = true, 
             try { agent?.ctx?.effect?.(() => clearTimeout(t)) } catch { /* ignore */ }
           } else {
             say('[dsh-fish] 宿主一直没登记完工具，这次不收窄（只有兜底守卫在拦），下次会话再试')
-            onResult?.({ ok: true, applied: 0, failed, why: 'deferred', allow, guard: guardOk })
+            // 没收窄成功 ⇒ effective 是空的：这一局她看见的是全部工具。
+            // 导出里必须与「配置允许 7 个」区分开，否则又会读成"只留了 7 个"。
+            onResult?.({ ok: true, applied: 0, failed, why: 'deferred', allow, effective: [], guard: guardOk })
           }
         }
         const timer = setTimeout(attempt, retryMs)
@@ -345,7 +380,11 @@ export function adoptKnownFromError(message) {
 // 里的闭包。硬把状态塞进 ctx 当服务用属于滥用（ctx.get 是给真服务的），
 // 而这里要的只是"本进程里那把刀到底挂上没有"——一个模块级单例正好。
 // ---------------------------------------------------------------------------
-let lastState = { ok: false, applied: 0, why: 'not attempted', allow: HER_TOOLS.slice() }
+// `allow` 是**配置**里那份清单（HER_TOOLS + 用户额外放行），`effective` 是**真的交给
+// 宿主 restrict 的那一份**。两者必须分开（2026-10-28 用户点出来的坑）：
+// 0.6.0 那台机器的日志里「允许 7 个」是配置值，实际生效的只有 1 个，
+// 导出里两个数字一样，看日志的人没法判断她到底能看见几个工具。
+let lastState = { ok: false, applied: 0, why: 'not attempted', allow: HER_TOOLS.slice(), effective: [] }
 
 // 「宿主全局认得哪些工具名」的最近一份快照（进程内）。
 // 只有拿到过某个 agent 的全局视角才有值；plugin 自己的 view() 只看得到本插件注册的那几个，
@@ -359,11 +398,15 @@ export function readRestrictState() {
 
 /** 内部：登记一次结论。 */
 function report(r) {
+  const eff = Array.isArray(r?.effective) ? r.effective.map((x) => String(x)) : []
   lastState = {
     ok: Boolean(r?.ok),
     applied: Number(r?.applied ?? 0),
     why: String(r?.why ?? ''),
     allow: r?.allow ?? HER_TOOLS.slice(),
+    // 只有真的下过 restrict 才有值。空数组 = 这一局她看见的是**全部**工具，
+    // 而不是「允许 0 个」——读导出的人必须能一眼分清这两种情况。
+    effective: eff,
     failed: r?.failed ? String(r.failed) : '',
     guard: Boolean(r?.guard),
   }

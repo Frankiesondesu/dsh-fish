@@ -21,14 +21,25 @@ import { wakeNow } from './scheduler.js'
 import { sayToHer } from './say.js'
 import { readInbox, markRead, writeInboxFile } from './inbox.js'
 import { listReports, buildReport } from './report.js'
-import { itemsFromEvents, browseCountToday } from './browse.js'
+import { itemsFromEvents, browseCountToday, parseBrowseLine } from './browse.js'
 import { readAway } from './away.js'
 import { coverPath, fetchCover } from './cover.js'
+import { memoryCooldown } from './bili.js'
 import { avatarFile, avatarInfo, saveAvatar, removeAvatar } from './avatar.js'
 import fs from 'node:fs'
 import { commentCountToday, replyCountToday, herComments, scanReplies } from './comment.js'
 import { describeState, resetAll } from './reset.js'
+// 迁移工作区（2026-10-28，用户 m06510）：把整个数据目录搬到别的盘。
+import { moveRoot, moveStatus } from './move.js'
+import { identityText } from './identity.js'
+import { awayNow, awayLine, startOuting, endOuting, bindOutingSession, abortOuting, readOutings, readPossessions, activePossessionOf, snapshotEvents, verifyEvents, eventsSince } from './outing.js'
+// 请神（2026-10-28）：段名已在 asar 里确认（deployment:persona-prefix / -suffix），
+// 同名段在目标 agent 的 scoped ctx 上覆盖宿主那一段。
+import { possessInto, releasePossession } from './possess.js'
+import { isHerHome, cwdOf } from './restrict.js'
 import { applyHandover, IMPORT_TEMPLATE } from './import.js'
+// 常见问题解答（2026-10-28 用户要求）：设置 → 反馈页的按钮点开，在新窗口里看全文。
+import { FAQ, FAQ_TITLE, renderFaqPage } from './faq.js'
 import { readHomeRecord, retireHomeSessions } from './retire.js'
 import { collectBackup, backupFileName, restoreBackup } from './backup.js'
 import { bootstrapHome, homeStatus, wakeIfBlank } from './home.js'
@@ -38,6 +49,7 @@ import { personaBudget, BELIEF_SHOWN, shownCount } from './persona.js'
 import { buildStances, gatesDone, stanceSummary } from './stance.js'
 import { looksMojibake } from './guard.js'
 import { join } from 'node:path'
+import { homedir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { ensureDataReadme } from './readme.js'
 import { rulesByLayer } from './rules.js'
@@ -56,9 +68,24 @@ import { runChecks } from './selfcheck.js'
 import { readRestrictState, knownToolNames } from './restrict.js'
 import { riskState, clearRisk } from './risk.js'
 import { decodeBase64Image, saveImage } from './media.js'
+// 导出包里要写清「她那条会话用的哪个模型、吃不吃图」——只读探测，失败不影响导出。
+import { resolveHerModel } from './modelinfo.js'
 import { LOG_KEEP, LOG_MAX_BYTES, buildBundle, clearLog, logLine, logsDir, redactConfig, tailLog } from './log.js'
 // 「有没有新版」（2026-10-25 用户要求）：只读、只出网、不落盘。
 import { checkUpdate, REPO_URL, normalizeVersion } from './update.js'
+
+// 安装形态：开发副本（profile 里 link 到仓库）的代码就在仓库里；
+// npm 装出来的一定在某个 node_modules/dsh-fish/ 底下。
+// 「出门」页要真机跑一阵（2026-10-28 用户要求），发布版先不显示，代码与路由都保留。
+function isDevInstall() {
+  try {
+    return !fileURLToPath(import.meta.url).split(/[\\/]/).includes('node_modules')
+  } catch {
+    // 判断不了就当发布版：宁可先藏起来，也别让整页报错。
+    return false
+  }
+}
+const IS_DEV_INSTALL = isDevInstall()
 
 /**
  * 引导文案：别人第一次装，本机没有现成 cookie。
@@ -88,14 +115,10 @@ async function lazyCover(root, bvid) {
     const { events } = await readEvents(root)
     let pic = ''
     for (const e of events) {
-      const t = String(e?.text ?? '')
-      if (!t.startsWith('browse:')) continue
-      const sp = t.indexOf(' ')
-      if (sp < 0) continue
-      let list = []
-      try { list = JSON.parse(t.slice(sp + 1)) } catch { continue }
-      if (!Array.isArray(list)) continue
-      const hit = list.find((it) => it?.bvid === bvid && it?.pic)
+      // 记账分两片（browse: / browse-more:），封面可能落在后面那片
+      const got = parseBrowseLine(e?.text)
+      if (!got) continue
+      const hit = got.arr.find((it) => it?.bvid === bvid && it?.pic)
       if (hit) pic = String(hit.pic)
     }
     if (!pic) {
@@ -214,6 +237,27 @@ export function registerObserve(ctx, deps = {}) {
         grants: activeGrants(events, Date.now()),
         config: { window: config.window, daily: config.daily, diary: { enabled: config.diary.enabled, visible: config.diary.visible }, absenceAfterDays: config.absenceAfterDays },
         meta: { root, skippedLines: skipped, configFresh: fresh, configBroken: broken, dateKey: dateKey(), version: normalizeVersion(deps.version) || String(deps.version ?? '') },
+        // 这个家是谁的（2026-10-28 m01319）：两个工作区指向同一个 root 时，
+        // 设置页要能直接看见「已有一个实例占着」，而不是等她写丢了才发现。
+        tenancy: (() => {
+          const t = deps.tenancy
+          if (!t) return null
+          return {
+            ok: t.tenant?.ok !== false,
+            instanceId: String(t.tenant?.instanceId ?? ''),
+            why: String(t.tenant?.why ?? ''),
+            dataDir: String(t.tenant?.owner?.dataDir ?? t.root ?? root ?? ''),
+          }
+        })(),
+        // 换家留痕（0.6.8）：最近一次启动时真正生效的 root 跟上次不一样时，
+        // 设置页要能看见「这次住的是哪个家、上一个家在哪」，而不是只看到侧栏多一间屋。
+        homes: (() => {
+          const h = deps.tenancy?.homes
+          if (!h) return null
+          return { changed: h.changed === true, from: String(h.from ?? ''), to: String(h.to ?? '') }
+        })(),
+        // 会话被用户收起来了（归档）——设置页据此显示「重新搭一间」，而不是假装一切正常。
+        home: await homeStatus(root),
       })
     }],
 
@@ -291,7 +335,22 @@ export function registerObserve(ctx, deps = {}) {
           }
           patch.tools.allow = check.names
         }
+        const before = await loadConfig(root).catch(() => null)
         const next = await updateConfig(patch, root)
+        // 审计：日记可见性每翻一次就落一行，事后查得到是谁、随哪次提交翻的。
+        // 2026-10-28 用户反馈「开了『让我看日记』插件又自己关」——光靠猜猜不出来，
+        // 至少让下一次发生时日志里有一行可对。
+        const wasVisible = before?.config?.diary?.visible === true
+        const nowVisible = next?.diary?.visible === true
+        if (wasVisible !== nowVisible) {
+          logLine('info', [
+            'diary.visible',
+            wasVisible ? 'on' : 'off',
+            '->',
+            nowVisible ? 'on' : 'off',
+            `by=${Object.keys(patch).join(',')}`,
+          ], root)
+        }
         return send(res, 200, { ok: true, config: next })
       }
       send(res, 405, { error: 'method not allowed' })
@@ -476,6 +535,13 @@ export function registerObserve(ctx, deps = {}) {
           connection: ctx.get?.('connection') ?? ctx.connection,
         },
         tools: ctx.get?.('tools') ?? ctx.tools,
+        // attachments 服务在不在，决定 read_image 注册得上不上（宿主原文：
+        // "read_image registers only while a durable ctx.attachments service is mounted"）。
+        // 有 ctx.get 就是权威答案：查不到 = 真没挂 ⇒ false。
+        // 没有 ctx.get（假环境/预检）就别猜，传 undefined 让自检说「判不准」。
+        attachments: typeof ctx.get === 'function'
+          ? Boolean(ctx.get('attachments'))
+          : (ctx.attachments ? true : undefined),
         client,
         net,
         preset: config?.tools?.preset ?? '',
@@ -560,17 +626,19 @@ export function registerObserve(ctx, deps = {}) {
       } catch { send(res, 404, { error: 'no avatar' }) }
     }],
 
-    // 原理图（2026-10-25）：插件自带的静态 SVG，讲「认知循环」与「遗忘」。
+    // 静态图（2026-10-25 两张原理图；2026-10-28 加反馈页的交流群二维码）。
     // 只放白名单文件名，不做通用文件服务——这是插件自己的说明书，不是文件浏览器。
-    // 用来源：`GET /dsh-fish/media/principle-loop.svg`、`/dsh-fish/media/principle-memory.svg`。
+    // 用来源：`GET /dsh-fish/media/principle-loop.svg`、`/dsh-fish/media/principle-memory.svg`、
+    // `/dsh-fish/media/feedback-qr.jpg`。
     ['/media', async (req, res) => {
-      const m = String(req.url ?? '').match(/^\/dsh-fish\/media\/(principle-[a-z]+\.svg)$/)
+      const m = String(req.url ?? '').match(/^\/dsh-fish\/media\/((?:principle-[a-z]+\.svg)|(?:feedback-qr\.jpg))$/)
       if (!m) { send(res, 404, { error: 'no file' }); return }
       try {
         const file = fileURLToPath(new URL(`../media/${m[1]}`, import.meta.url))
         const buf = fs.readFileSync(file)
+        const isJpg = m[1].endsWith('.jpg')
         res.writeHead(200, {
-          'content-type': 'image/svg+xml; charset=utf-8',
+          'content-type': isJpg ? 'image/jpeg' : 'image/svg+xml; charset=utf-8',
           'content-length': buf.length,
           'cache-control': 'private, max-age=3600',
         })
@@ -585,10 +653,10 @@ export function registerObserve(ctx, deps = {}) {
         try { body = await readBody(req) } catch { body = {} }
         const cleared = Boolean(body?.clear)
         if (cleared) clearRisk(root)
-        send(res, 200, { ...riskState(root), cleared })
+        send(res, 200, { ...riskState(root), memory: memoryCooldown(), cleared })
         return
       }
-      send(res, 200, riskState(root))
+      send(res, 200, { ...riskState(root), memory: memoryCooldown() })
     }],
 
     ['/reports', async (req, res) => {
@@ -918,11 +986,21 @@ export function registerObserve(ctx, deps = {}) {
       } catch (err) {
         checks = { summary: `自检跑不动：${String(err?.message ?? err)}`, items: [] }
       }
+      // 「她看不见画面」有一半原因在模型本身：模型不吃图，采到帧也白搭。
+      // 这一行以前完全没有，导出包里查不出来，所以单独探一次（只读、失败不影响导出）。
+      let model = null
+      try {
+        const h = await homeStatus(root)
+        model = await resolveHerModel(ctx, h?.sessionId)
+      } catch (err) {
+        model = { provider: '', model: '', imageInput: null, why: `读不到：${String(err?.message ?? err)}` }
+      }
       const text = buildBundle(root, {
         checks,
         version: deps.version ?? '',
         restrict: readRestrictState(),
         config: redactConfig(config),
+        model,
         lines,
       })
       // 纯文本直出，不套 JSON：这个接口的产物是给人（和别的 AI）读的，不是给程序解析的。
@@ -939,6 +1017,25 @@ export function registerObserve(ctx, deps = {}) {
       const r = clearLog(root)
       logLine('info', ['日志被手动清空（来自设置页）'], root)
       return send(res, 200, r)
+    }],
+
+    // ---- 迁移工作区（2026-10-28，用户 m06510）----
+    // GET  → 现在住哪、有多少东西、能不能立刻搬（给按钮旁的说明用）
+    // POST { target } → 搬到 target 里（新位置 = <target>\dsh-fish，除非那里已经是一份档）
+    // 语义是「复制 + 验字节 + 写指针 + 旧目录改名封存」，见 lib/move.js 头注释。
+    // **重启 DSH 才生效**：root 是在 apply() 里算一次的东西。
+    ['/move', async (req, res) => {
+      if (req.method === 'GET') {
+        const st = await moveStatus(root)
+        return send(res, 200, { ...st, canPick: true })
+      }
+      if (req.method !== 'POST') return send(res, 405, { error: 'method not allowed' })
+      const raw = await readBody(req, 20_000)
+      let b = null
+      try { b = JSON.parse(raw || '{}') } catch { return send(res, 400, { error: 'body 不是合法 JSON' }) }
+      const r = await moveRoot(ctx, { root, target: b.target, log: (m) => logLine('info', [m], root) })
+      if (!r.ok) return send(res, 409, { ok: false, error: r.why })
+      send(res, 200, r)
     }],
 
     // ---- P4：把她放回第一天 ----
@@ -1015,6 +1112,257 @@ export function registerObserve(ctx, deps = {}) {
       })
     }],
 
+    // ---- 出门 / 请神（0.6.3，方案见 docs/E-出门与请神-方案.md）----
+    // 出门 = 在选中的工作区新开一条**她的**会话，完整权限，首轮由这里递话。
+    // 请神 = 到这个页签的另一半，但 0.6.3 **还没启用**：宿主身份段名要在运行期确认，
+    // 猜一个名字写死等于把她的身份挂到一句不存在的段上（静默失效，最难查）。
+    ['/outing', async (req, res) => {
+      if (req.method === 'GET') {
+        const away = await awayNow(root)
+        const { outings } = await readOutings(root)
+        const { possessions } = await readPossessions(root)
+        // 可选工作区：宿主 registry 里的全部工作区，**排除她自己的家**
+        let workspaces = []
+        let why = ''
+        try {
+          const reg = safeGet(ctx, 'workspaceRegistry')
+          const list = typeof reg?.list === 'function' ? reg.list() : []
+          const homeDir = pathKey(join(paths(root).root, 'home'))
+          workspaces = list
+            .filter((w) => w && pathKey(w.path) !== homeDir)
+            .map((w) => ({
+              id: String(w.id ?? w.workspaceId ?? ''),
+              title: String(w.title ?? ''),
+              path: String(w.path ?? ''),
+              // 插件源码目录：这趟风险最高——她读 lib/rules.js 等于读到完整禁令清单
+              risky: isPluginSource(w.path),
+            }))
+            .filter((w) => w.id)
+          if (!list.length) why = '宿主没有可列的工作区（workspaceRegistry 不可用）'
+        } catch (err) {
+          why = `列工作区失败：${String(err?.message ?? err).slice(0, 120)}`
+        }
+        // 出门口袋：路径、有没有登记成工作区、目录在不在。UI 拿它画「送她去口袋」。
+        let pocket = { path: '', workspaceId: '', registered: false, exists: false }
+        try {
+          const { config } = await loadConfig(root)
+          const dir = pocketDirPath(config)
+          const reg = safeGet(ctx, 'workspaceRegistry')
+          const list = typeof reg?.list === 'function' ? reg.list() : []
+          const found = list.find((w) => w && pathKey(w.path) === pathKey(dir))
+          pocket = {
+            path: dir,
+            workspaceId: String(found?.id ?? found?.workspaceId ?? ''),
+            registered: Boolean(found),
+            exists: fs.existsSync(dir),
+          }
+        } catch (err) {
+          pocket.why = String(err?.message ?? err).slice(0, 120)
+        }
+        // 外面那条现在看事件流动过没有：回家审查卡要在点「叫她回家」之前就能看见，
+        // 而不是点完才知道要不要拒收。这里只比对、不写盘。
+        const liveVerify = away.kind === 'outing' ? verifyEvents(join(root, 'events.jsonl'), away.outing?.baseline) : null
+        // 这一趟多出来的条目：回家审查卡要逐条摊开，默认全勾。
+        const since = away.kind === 'outing'
+          ? eventsSince(join(root, 'events.jsonl'), away.outing?.startedAt)
+          : { ok: false, total: 0, items: [], why: '没在外面' }
+        return send(res, 200, {
+          ok: true,
+          why,
+          away: { ...away, line: awayLine(away), verify: liveVerify, since },
+          identityFrozen: Boolean(away.outing?.identity),
+          outings: outings.slice(-20),
+          possessions: possessions.slice(-20),
+          workspaces,
+          pocket,
+          // 开发副本才把「出门」页签露出来（发布版先藏着，代码和路由都还在）。
+          dev: IS_DEV_INSTALL,
+          possessionEnabled: false,
+          possessionWhy: '请神要覆盖宿主的身份段，段名必须运行期确认；0.6.3 只做出门，请神等确认后再开。',
+        })
+      }
+      if (req.method !== 'POST') return send(res, 405, { error: 'method not allowed' })
+      const raw = await readBody(req, 20_000)
+      let b = {}
+      try { b = JSON.parse(raw || '{}') } catch { return send(res, 400, { error: 'body 不是合法 JSON' }) }
+      const action = String(b.action ?? '')
+
+      if (action === 'end') {
+        const away = await awayNow(root)
+        if (away.kind !== 'outing') return send(res, 409, { ok: false, why: '她没在外面', away })
+        const v = verifyEvents(join(root, 'events.jsonl'), away.outing?.baseline)
+        // 事件流被动过 → 默认拒收（用户 m08176 拍板）：不结算，她留在外面等确认。
+        // 但「追加」是正常写入（growth_commit），不据此拒收——理由见 outing.js 的 verifyEvents。
+        const tampered = v.checkable !== false && v.ok === false
+        // 取消勾选的条目：先追加一条 meta 记下 id（不删行——第 5 条铁律）。
+        // deriveSelf 读到这条就跳过那些条目，原文仍在事件流里，谁都能复核。
+        const rejectedIds = Array.isArray(b.rejectedIds)
+          ? b.rejectedIds.map((x) => String(x ?? '')).filter(Boolean).slice(0, 500)
+          : []
+        if (!tampered && rejectedIds.length) {
+          try {
+            const { events } = await readEvents(root)
+            const { config } = await loadConfig(root)
+            const m = deriveSelf(events, { growthDays: config.growthDays })
+            await appendEvent(
+              validateEvent(
+                { type: 'meta', text: 'outing-reject:' + rejectedIds.join(' '), day: m.day, stage: m.stage },
+                { day: m.day, stage: m.stage, source: 'system' },
+              ),
+              root,
+            )
+          } catch (err) {
+            logLine('warn', ['回家：取消勾选的标记没写进去', String(err?.message ?? err).slice(0, 120)], root)
+          }
+        }
+        const status = tampered ? 'pending' : b.kept === false ? 'rejected' : 'done'
+        const r = await endOuting(root, { status, kept: tampered ? null : b.kept === false ? false : true })
+        if (!r.ok) return send(res, 409, { ok: false, why: r.why })
+        logLine('info', [`回家：${status}`, r.outing?.workspaceName || r.outing?.workspaceId || '', v.why ?? ''], root)
+        return send(res, 200, { ok: true, outing: r.outing, verify: v, tampered, rejected: rejectedIds.length })
+      }
+
+      if (action === 'start') {
+        // 出门口袋（干活模式）：一个从没写过记忆的空工作区，注入只剩骨架。
+        const wantPocket = Boolean(b.pocket)
+        let wsId = String(b.workspaceId ?? '').trim()
+        if (!wantPocket && !wsId) return send(res, 400, { error: '要选一个工作区' })
+        const away = await awayNow(root)
+        if (away.kind) return send(res, 409, { ok: false, why: '她已经在外面了', away })
+        const sc = safeGet(ctx, 'sessionController')
+        if (!sc?.create) return send(res, 503, { ok: false, why: '宿主没有 sessionController 服务' })
+        // 目标工作区的路径：registry.list() 里的 path（用来记台账与判风险）
+        let wsPath = ''
+        let wsTitle = ''
+        if (wantPocket) {
+          const { config } = await loadConfig(root)
+          const p = await ensurePocket(ctx, root, config)
+          if (!p.ok) return send(res, 500, { ok: false, why: p.why })
+          wsId = p.wsId
+          wsPath = p.dir
+          wsTitle = POCKET_TITLE
+          if (!p.registered) {
+            logLine('warn', ['出门：口袋没登记成工作区', p.why ?? '', p.dir], root)
+          }
+        } else {
+          try {
+            const reg = safeGet(ctx, 'workspaceRegistry')
+            const row = (typeof reg?.list === 'function' ? reg.list() : []).find(
+              (w) => String(w?.id ?? w?.workspaceId ?? '') === wsId,
+            )
+            wsPath = String(row?.path ?? '')
+            wsTitle = String(row?.title ?? '')
+          } catch { /* 拿不到就当没名字，不挡出门 */ }
+        }
+        const baseline = snapshotEvents(join(root, 'events.jsonl'))
+        // 出门那一刻的身份快照：存进台账，她在外面读这个，不再读家里那份可变文件。
+        const identity = identityText(root)
+        // **先记账，再建会话**：`sc.create()` 会同步触发宿主的 `agent/created`，
+        // identity.js 那条钩子必须已经看得到这次出门，否则她的身份段与兜底守卫
+        // 都不会挂上——0.6.3 真机第一趟踩的就是这个顺序。
+        const r = await startOuting(root, { sessionId: '', workspaceId: wsId, workspaceName: wsTitle, cwd: wsPath, baseline, identity })
+        if (!r.ok) return send(res, 409, { ok: false, why: r.why })
+        if (!wsId && !wsPath) return send(res, 400, { error: '要选一个工作区' })
+        let created = null
+        try {
+          // 口袋没登记成工作区时退到 `cwd`——照样能开门，只是记忆分区可能落在「未知工作区」。
+          created = wsId ? await sc.create({ workspaceId: wsId }) : await sc.create({ cwd: wsPath })
+        } catch (err) {
+          await abortOuting(root)
+          return send(res, 500, { ok: false, why: `建会话失败：${String(err?.message ?? err).slice(0, 160)}` })
+        }
+        const sessionId = String(created?.sessionId ?? created?.id ?? '')
+        if (!sessionId) {
+          await abortOuting(root)
+          return send(res, 500, { ok: false, why: '宿主没返回会话 id' })
+        }
+        // 会话 id 补进台账；agent/created 那边如果已经认出来并补过，这一步是幂等的。
+        await bindOutingSession(root, { sessionId })
+        // 首轮必须走 sc.prompt：她的身份段挂在 system prompt 上，冷启动就要生效。
+        // 不能 await（这一轮要等模型跑完），signal 是宿主必填参数（issue #1）。
+        try {
+          if (typeof sc.prompt === 'function') {
+            void sc.prompt({
+              requestId: `outing-${sessionId}-${Date.now()}`,
+              sessionId,
+              mode: 'queue',
+              content: [{ type: 'text', text: outingWakeText(wsTitle || wsPath || '别的工作区') }],
+            }, new AbortController().signal).catch((err) => {
+              logLine('warn', ['出门首轮没递进去', String(err?.message ?? err).slice(0, 120)], root)
+            })
+          }
+        } catch (err) {
+          logLine('warn', ['出门首轮没递进去', String(err?.message ?? err).slice(0, 120)], root)
+        }
+        logLine('info', ['出门：', wsTitle || wsId, `会话 ${sessionId}`], root)
+        return send(res, 200, { ok: true, outing: r.outing, workspaces: [] })
+      }
+
+      send(res, 400, { error: 'action 只能是 start 或 end' })
+    }],
+
+    ['/possession', async (req, res) => {
+      const herDir = paths(root).herDir
+      if (req.method === 'GET') {
+        const away = await awayNow(root)
+        const { possessions } = await readPossessions(root)
+        // 能上身的候选：宿主现在活着的 agent，排除她自己的屋子。
+        // 冷会话（重启后没打开的那条）不在列表里——打开过一次就会被 agent/created 补挂。
+        let sessions = []
+        try {
+          const reg = ctx.get?.('agents')
+          const list = reg?.list?.() ?? []
+          for (const a of list) {
+            const sid = String(a?.session?.header?.id ?? a?.session?.id ?? '')
+            if (!sid) continue
+            if (isHerHome(a, herDir)) continue
+            const h = a?.session?.header ?? a?.session ?? {}
+            sessions.push({
+              sessionId: sid,
+              title: String(h.title ?? h.name ?? '').slice(0, 80),
+              cwd: cwdOf(a),
+            })
+          }
+        } catch { /* 拿不到活 agent 就只读台账 */ }
+        return send(res, 200, {
+          ok: true,
+          enabled: true,
+          away: { ...away, line: awayLine(away) },
+          possessions: possessions.slice(-20),
+          active: activePossessionOf({ possessions }),
+          sessions,
+          why: '',
+        })
+      }
+      if (req.method !== 'POST') return send(res, 405, { error: 'method not allowed' })
+      const body = await readBody(req)
+      let b = {}
+      try { b = JSON.parse(body || '{}') } catch { return send(res, 400, { error: 'body 不是合法 JSON' }) }
+      const log = (m) => console.log(m)
+      if (b.action === 'start') {
+        const away = await awayNow(root)
+        if (away.kind === 'outing') {
+          return send(res, 409, { ok: false, why: '她正在出门，先叫她回家再请神' })
+        }
+        const r = await possessInto(ctx, {
+          root,
+          herDir,
+          sessionId: b.sessionId,
+          log,
+        })
+        if (!r.ok) return send(res, r.code ?? 409, { ok: false, why: r.why })
+        logLine('info', ['请神：', r.possession?.title || r.possession?.sessionId || b.sessionId], root)
+        return send(res, 200, { ok: true, possession: r.possession, section: r.section ?? '' })
+      }
+      if (b.action === 'end') {
+        const r = await releasePossession(root, { sessionId: b.sessionId ?? '', log })
+        if (!r.ok) return send(res, r.code ?? 409, { ok: false, why: r.why })
+        logLine('info', ['请神结束：', r.possession?.title || r.possession?.sessionId || ''], root)
+        return send(res, 200, { ok: true, possession: r.possession })
+      }
+      send(res, 400, { error: 'action 只能是 start 或 end' })
+    }],
+
     ['/reset', async (req, res) => {
       if (req.method === 'GET') {
         const info = await describeState(root)
@@ -1040,6 +1388,9 @@ export function registerObserve(ctx, deps = {}) {
         root,
         preset: cfg?.tools?.preset ?? '',
         log: (m) => console.log('[dsh-fish]', m),
+        // 重置流程本来就是「我要一局新的」：旧会话已经被 retire 归档，
+        // 归档态默认不重建（0.6.8），所以这里必须明说要。
+        force: true,
       })
       // 空白会话在侧栏里是隐形的（宿主 sessionVisible：blank && id !== current → false）。
       // 插件用 API 建的会话不会被设成当前会话，所以要让她先动一轮，侧栏才看得见。
@@ -1059,6 +1410,67 @@ export function registerObserve(ctx, deps = {}) {
             : '状态库已封存，新的一局也开好了；只有旧会话没全收进「已归档」。点一下「叫醒大肥鱼」，侧栏里才会出现会话。')
           : '状态库已封存，但新会话没建出来（重启 DSH 会自动建）。',
       })
+    }],
+
+    // 重新搭一間（0.6.8）：会话被归档之后插件不再自动重建（见 home.js 的判据），
+    // 所以必须有一个明说的入口，否则「收起来」等于「永远回不去」。
+    // 只建新会话，**不搬状态库**——那件事归 /reset。
+    ['/home/rebuild', async (req, res) => {
+      if (req.method !== 'POST') return send(res, 405, { error: 'method not allowed' })
+      const body = await readBody(req)
+      let b = {}
+      try { b = JSON.parse(body || '{}') } catch { return send(res, 400, { error: 'body 不是合法 JSON' }) }
+      if (b.confirm !== 'rebuild') return send(res, 400, { error: '要带 confirm:"rebuild"' })
+      const { config: cfg } = await loadConfig(root)
+      const fresh = await bootstrapHome(ctx, {
+        root,
+        preset: cfg?.tools?.preset ?? '',
+        log: (m) => console.log('[dsh-fish]', m),
+        force: true,
+      })
+      const woke = fresh.ok
+        ? await wakeIfBlank(ctx, { sessionId: fresh.sessionId, root, log: (m) => console.log('[dsh-fish]', m), freshOnly: !fresh.reused })
+        : { woke: false }
+      send(res, fresh.ok ? 200 : 409, {
+        ok: fresh.ok,
+        sessionId: fresh.sessionId ?? '',
+        wasArchived: fresh.wasArchived === true,
+        woke: woke.woke === true,
+        error: fresh.ok ? '' : fresh.why,
+        note: fresh.ok
+          ? '新的一局搭好了。点一下「叫醒大肥鱼」，侧栏里才会出现这条会话。'
+          : fresh.why,
+      })
+    }],
+
+    // 常见问题解答（2026-10-28 用户要求）：设置 → 反馈页的按钮 → 就地展开一个
+    // 可滚动面板，正文在 lib/faq.js。
+    //
+    // 为什么不是新窗口（用户 m00416「点了没有反应」的根因）：
+    //   宿主 connection 的信任栅栏要的是 App 内置登录 cookie，**浏览器地址栏直接
+    //   敲这个路径只会拿到 403**（observe.js 底部 PAGE 那段注释记的是同一条链：
+    //   requestRejection → admit → browserAuth.isAuthenticated）。所以 `target=_blank`
+    //   打开的新标签页注定是一片 forbidden，看起来就像「点了没反应」。
+    //   改成就地展开：同源请求天然带着 cookie，不依赖任何窗口策略。
+    ['/faq.data', async (req, res) => {
+      const body = JSON.stringify({ ok: true, title: FAQ_TITLE, items: FAQ })
+      res.writeHead(200, {
+        'content-type': 'application/json; charset=utf-8',
+        'content-length': Buffer.byteLength(body),
+        'cache-control': 'no-store',
+      })
+      res.end(body)
+    }],
+
+    // 整页版本仍然保留：给「在 App 内部用新窗口打开」留一条路，也方便调试。
+    ['/faq', async (req, res) => {
+      const html = renderFaqPage()
+      res.writeHead(200, {
+        'content-type': 'text/html; charset=utf-8',
+        'content-length': Buffer.byteLength(html),
+        'cache-control': 'no-store',
+      })
+      res.end(html)
     }],
 
     ['/', async (req, res) => {
@@ -1086,6 +1498,88 @@ export function registerObserve(ctx, deps = {}) {
       for (const d of disposers) { try { d() } catch { /* ignore */ } }
     },
   }
+}
+
+/** 比对路径用：Windows 大小写不敏感。只比对，不做文件访问。 */
+function pathKey(p) {
+  const s = String(p ?? '').replace(/\\/g, '/').replace(/\/+$/, '')
+  return process.platform === 'win32' ? s.toLowerCase() : s
+}
+
+/**
+ * 目标工作区是不是本插件的源码目录。
+ *
+ * 为什么要在 UI 上警告：出门是「全工具」，她一旦读到 `lib/rules.js`，
+ * 就等于读到四条禁令的完整清单与每条的理由——那比不知道更糟。
+ */
+function isPluginSource(p) {
+  const k = pathKey(p)
+  if (!k) return false
+  return k.includes('/大肥鱼') || k.includes('/fish-plugin') || k.includes('/plugin')
+}
+
+/**
+ * 出门口袋（2026-10-28，用户 m01145 拍板的「干活模式」）。
+ *
+ * 为什么要有它：她的白板与交接账本按**工作区**注入。只要出门的目标是
+ * `D:\deepseekagent`，那些实现细节就会跟着记忆一起进她的会话——
+ * 真机 5fd70849 那趟就是这么漏的。口袋是一个**从没写过记忆的空目录**，
+ * 注入只剩骨架；她的身份、工具、网络都照常。
+ *
+ * 代价（写进 UI，不藏着）：沙箱的写权限跟工作区走，她在口袋里写不进
+ * `02-我的项目` / `03-我的文档`——要交付就从口袋搬。这条取舍无法两全。
+ */
+const POCKET_TITLE = '出门口袋'
+
+/** 口袋路径：配置 `outingPocket` 优先；缺省放用户目录下（ASCII，避开中文路径那条老坑）。 */
+function pocketDirPath(config) {
+  const raw = String(config?.outingPocket ?? '').trim()
+  if (raw) return raw
+  return join(homedir(), 'outing-pocket')
+}
+
+/**
+ * 建好口袋目录，并登记成工作区（登记失败也能出门：`sc.create({ cwd })` 是退路）。
+ * `registered:false` 时 UI 会写明——那时记忆分区可能落到「未知工作区」。
+ */
+async function ensurePocket(ctx, root, config) {
+  const dir = pocketDirPath(config)
+  try {
+    fs.mkdirSync(dir, { recursive: true })
+  } catch (err) {
+    return { ok: false, why: `建口袋目录失败：${String(err?.message ?? err).slice(0, 140)}`, dir }
+  }
+  const reg = safeGet(ctx, 'workspaceRegistry')
+  let wsId = ''
+  try {
+    const list = typeof reg?.list === 'function' ? reg.list() : []
+    const found = list.find((w) => w && pathKey(w.path) === pathKey(dir))
+    wsId = String(found?.id ?? found?.workspaceId ?? '')
+  } catch { /* 列不出来就试着建 */ }
+  if (!wsId && typeof reg?.create === 'function') {
+    try {
+      const ws = await reg.create(dir, POCKET_TITLE)
+      wsId = String(ws?.id ?? ws?.workspaceId ?? '')
+    } catch (err) {
+      return { ok: true, wsId: '', dir, registered: false, why: `登记工作区失败：${String(err?.message ?? err).slice(0, 120)}` }
+    }
+  }
+  return { ok: true, wsId, dir, registered: Boolean(wsId) }
+}
+
+/**
+ * 出门首轮的那句话。
+ *
+ * 只交代三件事：在哪、能用什么、别动什么。**不写人格**（她是谁由身份段决定），
+ * 也不写「不许」清单（写出来等于告诉她旁边有份清单）。
+ */
+function outingWakeText(where) {
+  return [
+    `你出门了。这里是「${where}」的地盘，不是你自己的屋子。`,
+    '这趟可以放开用手边的工具做事，做完再回去。',
+    '只有一件：你自己的屋子里的东西不要动——那不是这趟该碰的。',
+    '有人会在这里跟你说话。等家里人叫你回去，你就回去。',
+  ].join('\n')
 }
 
 function safeGet(ctx, key) {

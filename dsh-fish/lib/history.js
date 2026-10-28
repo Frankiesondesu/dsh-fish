@@ -8,6 +8,8 @@
  * 这里不新增任何落盘，只做读取与格式化。
  */
 
+import { parseBrowseLine } from './browse.js'
+
 /** 视频的公开地址。她看的东西必须是用户能点开的。 */
 export function videoUrl(bvid) {
   const b = String(bvid ?? '').trim()
@@ -27,16 +29,9 @@ export function historyFromEvents(events, opts = {}) {
   const groups = new Map()
   for (const e of events ?? []) {
     if (e?.type !== 'meta') continue
-    const t = String(e.text ?? '')
-    if (!t.startsWith('browse:')) continue
-    const sp = t.indexOf(' ')
-    if (sp < 0) continue
-    const dk = t.slice('browse:'.length, sp).trim()
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(dk)) continue
-    const json = t.slice(sp + 1).trim()
-    if (!json.startsWith('[')) continue
-    let arr
-    try { arr = JSON.parse(json) } catch { continue } // 坏行跳过，不让页面崩
+    const got = parseBrowseLine(e.text)
+    if (!got) continue // 坏行、别的天、别的 meta 都跳过
+    const { dk, arr } = got
     if (!groups.has(dk)) groups.set(dk, [])
     const bucket = groups.get(dk)
     const have = new Set(bucket.map((x) => x.bvid))

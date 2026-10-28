@@ -15,8 +15,11 @@
  *
  * 设计约束：
  *   1. **永不抛出**。任何方法都返回 { ok, data, code, message }。一次失败不能污染唤醒流程。
- *   2. **限流**。串行 + 最小间隔，避免把本机 IP 刷成 -412。
- *   3. **风控熔断**。遇到 -352/-412 记 30 分钟冷却，期间所有调用直接返回 ok:false。
+ *   2. **限流**。串行 + 最小间隔（默认 800ms + 0–500ms 抖动，设置页可调），
+ *      避免把本机 IP 刷成 -412。机房 IP 需要更慢——所以间隔不写死。
+ *   3. **风控熔断**（issue #5 重做）。读/写两级分开，读 60 秒起、写 5 分钟起，
+ *      连续复发才翻倍；**只关自己那一级**。签名接口的 -412 先当"密钥过期"重试一次，
+ *      仍失败才算真风控。以前是一刀切 30 分钟全局冷却，一次偶发失败能把插件打死半天。
  *   4. **不下载视频**。只读元数据与文本——没有版权面，也不需要 1GB 转写模型。
  */
 
@@ -38,18 +41,109 @@ const MIXIN = [
 
 /** 这些返回码代表"被风控了"，不是"接口坏了" */
 const RISK_CODES = new Set([-352, -412, -509])
-const RISK_COOLDOWN_MS = 30 * 60_000
 
-let riskUntil = 0
+/**
+ * 风控熔断（issue #5 重做，2026-10-28）。
+ *
+ * 原来的写法是**全局一个 30 分钟闸**：任何一次 -412 就把所有接口一起关掉。
+ * 在机房 IP / 无 cookie 的场景下，搜索这类"本来就容易 -412"的接口只要踩一次，
+ * 接下来的热门、看视频、看画面、写评论全被挡在门外半小时——
+ * 一次偶发失败被放大成"插件半小时不干活"。issue #5 报的就是这个。
+ *
+ * 现在分两级，且**只关自己那一级**：
+ *   - 读：起点 60 秒，连续复发翻倍，上限 10 分钟。读请求不该被一次失手打死。
+ *   - 写：起点 5 分钟，翻倍，上限 30 分钟。写被风控的代价高，保守些。
+ * 任意一次同类请求成功就把该级的连击计数清零——"恢复正常"要能被感知到。
+ */
+const RISK_READ_BASE_MS = 60_000
+const RISK_READ_MAX_MS = 10 * 60_000
+const RISK_WRITE_BASE_MS = 5 * 60_000
+const RISK_WRITE_MAX_MS = 30 * 60_000
+
+function freshRisk() {
+  return { until: 0, streak: 0 }
+}
+const RISK = { read: freshRisk(), write: freshRisk() }
+
+/**
+ * 请求节奏（issue #5 第二条诉求：间隔可配置）。
+ *
+ * 放在模块级而不是 createClient 的参数里：客户端被 look / watch / scheduler /
+ * comment / video 等七八处各自 new 出来，逐个传参会漏（漏一处就是固定 800ms）。
+ * 启动时由 index.js 读设置调一次 setPacing，**所有**客户端跟着变。
+ */
+const PACE = { minIntervalMs: 800, jitterMs: 500 }
+
+/**
+ * 坏值一律回默认，**绝不当成 0**：0 间隔等于把限速关掉，是最危险的错值。
+ * null / '' 也算坏值（Number(null) === 0，不特判就会静默变成不限速）。
+ */
+function paceNum(v, dflt) {
+  if (v === null || v === undefined || v === '') return dflt
+  const n = Number(v)
+  return Number.isFinite(n) ? n : dflt
+}
+
+export function setPacing(o = {}) {
+  PACE.minIntervalMs = Math.max(200, Math.min(120_000, paceNum(o.minIntervalMs, 800)))
+  PACE.jitterMs = Math.max(0, Math.min(60_000, paceNum(o.jitterMs, 500)))
+}
+
+export function getPacing() {
+  return { ...PACE }
+}
 
 /** 测试用：清掉熔断状态 */
 export function resetRisk() {
-  riskUntil = 0
+  RISK.read = freshRisk()
+  RISK.write = freshRisk()
 }
 
-export function inCooldown(now = Date.now()) {
-  return now < riskUntil
+/** @param {'read'|'write'} kind */
+export function inCooldown(kind = 'read', now = Date.now()) {
+  const r = RISK[String(kind) === 'write' ? 'write' : 'read']
+  return now < r.until
 }
+
+/** 记一次风控命中，返回本次冷却时长（毫秒） */
+function noteRisk(kind, now) {
+  const k = kind === 'write' ? 'write' : 'read'
+  const r = RISK[k]
+  r.streak = Math.min(20, r.streak + 1)
+  const base = k === 'write' ? RISK_WRITE_BASE_MS : RISK_READ_BASE_MS
+  const cap = k === 'write' ? RISK_WRITE_MAX_MS : RISK_READ_MAX_MS
+  const ms = Math.min(cap, base * 2 ** (r.streak - 1))
+  r.until = now + ms
+  return ms
+}
+
+/** 一次成功就说明已经恢复，连击清零 */
+function noteOk(kind) {
+  const r = RISK[kind === 'write' ? 'write' : 'read']
+  r.streak = 0
+  r.until = 0
+}
+
+/** 冷却多久（给日志/提示用，0 = 没在冷却） */
+export function cooldownLeft(kind = 'read', now = Date.now()) {
+  const r = RISK[String(kind) === 'write' ? 'write' : 'read']
+  return Math.max(0, r.until - now)
+}
+
+/**
+ * 内存里还剩多久（毫秒）。给观测台用：这一层是进程内的，重启就没了，
+ * 和 risk.js 落盘的那份是两个口径，界面要把两句话分开说。
+ */
+export function memoryCooldown(now = Date.now()) {
+  return {
+    readMs: Math.max(0, RISK.read.until - now),
+    writeMs: Math.max(0, RISK.write.until - now),
+    readStreak: RISK.read.streak,
+    writeStreak: RISK.write.streak,
+  }
+}
+
+const fmtWait = (ms) => (ms >= 60_000 ? `${Math.ceil(ms / 60_000)} 分钟` : `${Math.ceil(ms / 1000)} 秒`)
 
 /**
  * wbi 签名密钥：从 nav 接口的 img_url / sub_url 各取文件名，按 MIXIN 表打成 32 位。
@@ -194,10 +288,19 @@ export function normalizeCookie(raw) {
 export function createClient(opts = {}) {
   const fetchImpl = opts.fetchImpl ?? globalThis.fetch
   const now = opts.now ?? (() => Date.now())
-  const minIntervalMs = opts.minIntervalMs ?? 800
-  // 抖动（2026-10-23 加）：固定 800ms 间隔是最像机器人的节奏。
-  // 每条随机多等 0–jitterMs，人看不出差别，风控看得出。
-  const jitterMs = opts.jitterMs ?? 500
+  // 间隔与抖动（issue #5：要可配）。显式传了就听传入的；没传就**运行时**读 PACE——
+  // 这样设置页改完不需要重建客户端，已经在排队的请求也会用新节奏。
+  const minInt = () => {
+    const v = Number(opts.minIntervalMs)
+    return Number.isFinite(v) && v > 0 ? v : PACE.minIntervalMs
+  }
+  const jitInt = () => {
+    if (opts.jitterMs !== undefined && opts.jitterMs !== null) {
+      const v = Number(opts.jitterMs)
+      return Number.isFinite(v) && v >= 0 ? v : PACE.jitterMs
+    }
+    return PACE.jitterMs
+  }
   const rnd = opts.random ?? Math.random
   const timeoutMs = opts.timeoutMs ?? 12_000
   const logger = opts.log ?? (() => {})
@@ -212,7 +315,7 @@ export function createClient(opts = {}) {
   /** 串行 + 最小间隔 + 随机抖动：所有请求排队，避免并发把 IP 刷红 */
   function throttle(fn) {
     const run = chain.then(async () => {
-      const gap = minIntervalMs + Math.floor(rnd() * Math.max(0, jitterMs))
+      const gap = minInt() + Math.floor(rnd() * Math.max(0, jitInt()))
       const wait = gap - (now() - lastReq)
       if (wait > 0) await new Promise((r) => setTimeout(r, wait))
       lastReq = now()
@@ -273,7 +376,9 @@ export function createClient(opts = {}) {
     if (!cookie) return { ok: false, code: 'NOT_LOGIN', message: '没有登录凭据', data: null }
     const token = csrf()
     if (!token) return { ok: false, code: 'NO_CSRF', message: 'cookie 里没有 bili_jct，写不了', data: null }
-    if (now() < riskUntil) return { ok: false, code: 'COOLDOWN', message: '风控冷却中，先不写', data: null }
+    if (now() < RISK.write.until) {
+      return { ok: false, code: 'COOLDOWN', message: `B站风控冷却中，还要约 ${fmtWait(RISK.write.until - now())}才能写`, data: null }
+    }
     try {
       const body = new URLSearchParams({ ...form, csrf: token, csrf_token: token }).toString()
       const r = await throttle(() => raw(API + path, { referer: o.referer, method: 'POST', body }))
@@ -286,11 +391,12 @@ export function createClient(opts = {}) {
       }
       if (j?.code !== 0) {
         if (RISK_CODES.has(j?.code)) {
-          riskUntil = now() + RISK_COOLDOWN_MS
-          logger(`写操作风控 ${j?.code}，冷却 30 分钟`)
+          const ms = noteRisk('write', now())
+          logger(`写操作风控 ${j?.code}，${fmtWait(ms)}后再试`)
         }
         return { ok: false, code: j?.code, message: j?.message ?? String(j?.code), data: null }
       }
+      noteOk('write')
       return { ok: true, code: 0, message: 'OK', data: j?.data ?? null }
     } catch (err) {
       return { ok: false, code: 'NETWORK', message: String(err?.message ?? err), data: null }
@@ -315,8 +421,8 @@ export function createClient(opts = {}) {
   }
 
   /** 拿 wbi 密钥（缓存 6 小时；密钥按天轮换） */
-  async function ensureMk() {
-    if (mk && now() - mkAt < 6 * 3600_000) return true
+  async function ensureMk(force = false) {
+    if (!force && mk && now() - mkAt < 6 * 3600_000) return true
     try {
       await ensureBuvid()
       const r = await throttle(() => raw(`${API}/x/web-interface/nav`))
@@ -341,13 +447,18 @@ export function createClient(opts = {}) {
    * @param {{signed?:boolean, referer?:string, label?:string}} o
    */
   async function api(path, params = {}, o = {}) {
-    if (now() < riskUntil) {
-      return { ok: false, code: 'COOLDOWN', message: '风控冷却中，先不打扰 B 站', data: null }
+    if (now() < RISK.read.until) {
+      return {
+        ok: false,
+        code: 'COOLDOWN',
+        message: `风控冷却中，${fmtWait(RISK.read.until - now())}后再试`,
+        data: null,
+      }
     }
     try {
       let url = API + path
       if (o.signed) {
-        if (!(await ensureMk())) return { ok: false, code: 'NO_WBI', message: '取不到签名密钥', data: null }
+        if (!(await ensureMk(o.forceMk))) return { ok: false, code: 'NO_WBI', message: '取不到签名密钥', data: null }
         url += `?${signQuery(params, mk, Math.floor(now() / 1000))}`
       } else {
         const q = Object.keys(params)
@@ -367,11 +478,22 @@ export function createClient(opts = {}) {
       const code = j?.code
       if (code !== 0) {
         if (RISK_CODES.has(code)) {
-          riskUntil = now() + RISK_COOLDOWN_MS
-          logger(`风控代码 ${code}，冷却 30 分钟`)
+          /**
+           * 签名接口的 -412 有两种原因：真的被风控；以及 wbi 密钥过期/换了。
+           * 后者换一次密钥重试就能好（密钥按天轮换，进程开着一整天就会踩到）。
+           * 以前一律当风控处理 → 整整半小时所有接口全死。issue #5 的第一现场。
+           * 所以：签名接口先强制刷一次密钥重试；仍失败才认作真风控。
+           */
+          if (o.signed && !o.retried) {
+            logger(`签名接口 ${code}，刷新 wbi 后重试一次`)
+            return api(path, params, { ...o, forceMk: true, retried: true })
+          }
+          const ms = noteRisk('read', now())
+          logger(`风控代码 ${code}，${fmtWait(ms)}内不再请求`)
         }
         return { ok: false, code, message: j?.message ?? String(code), data: null }
       }
+      noteOk('read')
       return { ok: true, code: 0, message: 'OK', data: j?.data ?? null }
     } catch (err) {
       return { ok: false, code: 'NETWORK', message: String(err?.message ?? err), data: null }
@@ -485,7 +607,9 @@ export function createClient(opts = {}) {
    */
   async function danmaku(cid) {
     if (!cid) return { ok: false, code: 'NO_CID', message: '没有 cid', data: [] }
-    if (now() < riskUntil) return { ok: false, code: 'COOLDOWN', message: '风控冷却中', data: [] }
+    if (now() < RISK.read.until) {
+      return { ok: false, code: 'COOLDOWN', message: `风控冷却中，${fmtWait(RISK.read.until - now())}后再试`, data: [] }
+    }
     try {
       const r = await throttle(() =>
         raw(`https://api.bilibili.com/x/v1/dm/list.so?oid=${cid}`, {
@@ -616,12 +740,44 @@ export function createClient(opts = {}) {
     }
   }
 
+  /**
+   * 短链 / 页面链接 → BV 号（2026-10-28，用户 m01284：他递来一条链接，她得打得开）
+   *
+   * b23.tv 会 302 到 www.bilibili.com/video/BV…，raw() 默认跟随重定向，
+   * 所以 r.url 就是落地地址；跟随被关掉时再从正文里抠一次。
+   * 只认 BV：详情接口只吃 bvid，av 号在这里一律不接。
+   */
+  async function resolveUrl(url) {
+    const u = String(url ?? '').trim().replace(/[)\],。；;，]+$/, '')
+    if (!u) return { ok: false, code: 'BAD_ARG', message: '没有链接', data: null }
+    const short = /^(?:https?:\/\/)?(?:b23\.tv|bili2233\.cn)\//i.test(u)
+    const have = /BV[0-9A-Za-z]{10}/.exec(u)
+    if (have && !short) return { ok: true, code: 0, message: 'OK', data: { bvid: have[0], url: u } }
+    if (!/^https?:\/\//i.test(u)) return { ok: false, code: 'BAD_URL', message: '这不是链接', data: null }
+    if (now() < RISK.read.until) {
+      return { ok: false, code: 'COOLDOWN', message: `风控冷却中，${fmtWait(RISK.read.until - now())}后再试`, data: null }
+    }
+    try {
+      const r = await throttle(() => raw(u))
+      const final = String(r?.url ?? '')
+      const hit = /BV[0-9A-Za-z]{10}/.exec(final)
+      if (hit) return { ok: true, code: 0, message: 'OK', data: { bvid: hit[0], url: final } }
+      const text = await r.text().catch(() => '')
+      const hit2 = /BV[0-9A-Za-z]{10}/.exec(text)
+      if (hit2) return { ok: true, code: 0, message: 'OK', data: { bvid: hit2[0], url: final } }
+      return { ok: false, code: 'NOT_VIDEO', message: '这个链接点开不是一条视频', data: null }
+    } catch (err) {
+      return { ok: false, code: 'NETWORK', message: String(err?.message ?? err).slice(0, 120), data: null }
+    }
+  }
+
   return {
     popular,
     ranking,
     precious,
     search,
     related,
+    resolveUrl,
     view,
     playurl,
     tags,

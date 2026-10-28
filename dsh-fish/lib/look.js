@@ -16,7 +16,7 @@
 import { createClient } from './bili.js'
 import { absorb, renderMaterial, rankVideos, seenBvids, LOOK_BRIEF, WATCH_RULE } from './browse.js'
 import { readEvents, rootDir, appendEvent } from './store.js'
-import { loadConfig } from './settings.js'
+import { loadConfig, dateKey } from './settings.js'
 // 评论区里别人的话（2026-10-24，用户 m02454）
 import { recordVoice } from './voices.js'
 import { toJsonSchema } from './toolschema.js'
@@ -28,7 +28,7 @@ import { defineTool } from './tool.js'
  * 单独抽出来是为了能在观测台/单测里直接调（不经模型）。
  *
  * @param {object} o
- * @param {'home'|'search'|'related'} o.what
+ * @param {'home'|'search'|'related'|'video'} o.what
  * @param {string} [o.keyword]
  * @param {string} [o.bvid]
  * @param {object} o.cfg 规范化配置
@@ -53,7 +53,24 @@ export async function lookOnce(o = {}) {
     const seen = seenBvids(events)
 
     let list = []
-    if (what === 'search') {
+    // 2026-10-28（用户 m01284）：他递来一条视频，她想看就得看得见指定的**那一条**。
+    // 以前只有 home/search/related，related 是「接着这条往下看它的相关推荐」——
+    // 所以平台没推、她也没自己搜到的那条，她永远打不开，也就永远说不了话。
+    let single = null
+    if (what === 'video') {
+      const want = await resolveWanted(client, o)
+      if (!want.ok) return { ok: false, text: '', note: want.note, picks: [] }
+      let p = null
+      try {
+        const d = await client.view(want.bvid)
+        if (!d?.ok || !d.data) return { ok: false, text: '', note: describeErr(d), picks: [] }
+        // 详情已经拿到了，交给 absorb 复用，不再取第二次
+        p = await absorb(client, { ...d.data, bvid: want.bvid }, cfg, { view: d })
+      } catch { /* 下面按打不开处理 */ }
+      if (!p || !p.video?.bvid) return { ok: false, text: '', note: '这条打不开。', picks: [] }
+      if (p.blocked) return { ok: false, text: '', note: '这条我不想看。', picks: [] }
+      single = p
+    } else if (what === 'search') {
       const kw = String(o.keyword ?? '').trim().slice(0, 40)
       if (!kw) return { ok: false, text: '', note: '要搜什么？给个词。', picks: [] }
       const r = await client.search(kw, { pageSize: limit * 2 })
@@ -84,26 +101,29 @@ export async function lookOnce(o = {}) {
     // 是环境的一部分，不是审查；她搜"恐怖"也可能是因为想验证它到底是什么。
     // 取舍：P2 仍然过滤（用户明确要求四条黑名单是硬的），但**把过滤记账**，
     // 将来要改成"允许她搜但拦住推送"只需改这一处。
-    const picked = rankVideos(list, cfg, { seen, limit })
-    if (!picked.length) {
-      return { ok: false, text: '', note: '这次什么都没找到。也许是被过滤了，也许是平台没给。', picks: [] }
+    const packs = single ? [single] : []
+    if (!single) {
+      const picked = rankVideos(list, cfg, { seen, limit })
+      if (!picked.length) {
+        return { ok: false, text: '', note: '这次什么都没找到。也许是被过滤了，也许是平台没给。', picks: [] }
+      }
+
+      for (const v of picked) {
+        try {
+          const p = await absorb(client, v, cfg)
+          if (!p.blocked) packs.push(p)
+        } catch { /* 单条失败忽略 */ }
+      }
+      if (!packs.length) return { ok: false, text: '', note: '打开了几条，但都打不开。', picks: [] }
     }
 
-    const packs = []
-    for (const v of picked) {
-      try {
-        const p = await absorb(client, v, cfg)
-        if (!p.blocked) packs.push(p)
-      } catch { /* 单条失败忽略 */ }
-    }
-    if (!packs.length) return { ok: false, text: '', note: '打开了几条，但都打不开。', picks: [] }
-
+    const dk = dateKey()
+    const who = { day: Number(o.model?.day ?? 0), stage: Number(o.model?.stage ?? 1), source: 'system' }
     for (const p of packs) {
-      await appendEvent(
-        { type: 'meta', text: `looked:${p.video.bvid}` },
-        { day: Number(o.model?.day ?? 0), stage: Number(o.model?.stage ?? 1), source: 'system' },
-        root,
-      ).catch(() => {})
+      await appendEvent({ type: 'meta', text: `looked:${p.video.bvid}` }, { ...who }, root).catch(() => {})
+      // 今天真的看过的那一条：评论闸门认这一行（2026-10-28）。
+      // 与 looked: 的区别是带日期——昨天看过的，今天不能拿去评。
+      await appendEvent({ type: 'meta', text: `look:${dk} ${p.video.bvid}` }, { ...who }, root).catch(() => {})
     }
 
     // 评论区里别人的话（2026-10-24，用户 m02454）：她自己去看的时候也可能读到一句。
@@ -111,7 +131,9 @@ export async function lookOnce(o = {}) {
 
     return {
       ok: true,
-      text: renderMaterial(packs),
+      text: single
+        ? renderMaterial(packs, { head: '这一条。是你自己点名要看的那条。' })
+        : renderMaterial(packs),
       note: '',
       voice: voice ? { text: voice.text, why: voice.why, across: voice.across ?? 1 } : null,
       picks: packs.map((p) => ({
@@ -136,6 +158,30 @@ function describeErr(r) {
 }
 
 /**
+ * 她要看的到底是哪一条（2026-10-28）。
+ * BV 号优先；其次他递来的链接（b23.tv 短链交给 client 解析，她不用自己拼）。
+ * 认不出就直说，不瞎猜一条给她看。
+ */
+async function resolveWanted(client, o) {
+  const raw = String(o.bvid ?? o.keyword ?? '').trim()
+  const hit = /BV[0-9A-Za-z]{10}/.exec(raw)
+  if (hit) return { ok: true, bvid: hit[0] }
+  const looksUrl = /^https?:\/\//i.test(raw)
+    || /^(?:b23\.tv|bili2233\.cn|(?:www\.|m\.)?bilibili\.com)\//i.test(raw)
+  if (!looksUrl) {
+    return { ok: false, note: '要看哪一条？给个 BV 号（像 BV1xx411c7mD），或者那条视频的链接。' }
+  }
+  if (typeof client.resolveUrl !== 'function') return { ok: false, note: '这个链接打不开，给我 BV 号。' }
+  const url = /^https?:\/\//i.test(raw) ? raw : `https://${raw}`
+  let r = null
+  try { r = await client.resolveUrl(url) } catch { r = null }
+  if (r?.ok && r.data?.bvid) return { ok: true, bvid: r.data.bvid }
+  if (r?.code === 'COOLDOWN') return { ok: false, note: 'B 站这会儿不让我看，过一会儿再说。' }
+  if (r?.code === 'NOT_VIDEO') return { ok: false, note: '这个链接点开不是一条视频。' }
+  return { ok: false, note: '这个链接打不开，给我 BV 号。' }
+}
+
+/**
  * 注册工具。
  * @param {object} ctx
  * @param {{root?:string, client?:object}} deps
@@ -147,7 +193,8 @@ export function registerLook(ctx, deps = {}) {
     defineTool({
       name: 'bili_look',
       description:
-        '去看一眼 B 站：首页在推什么、搜一个词、或者看某条视频之后平台又接着推什么。' +
+        '去看一眼 B 站：首页在推什么、搜一个词、看某条视频之后平台又接着推什么，' +
+        '或者直接看指定的那一条（给 BV 号或链接）。' +
         '只读，不会留下痕迹。给的是标题、简介、标签、热评、弹幕——没有视频画面。' +
         '不用它也可以。',
       // 注意：必须 toJsonSchema 包一层。简写 DSL 直接发出去会被 provider 拒：
@@ -156,11 +203,11 @@ export function registerLook(ctx, deps = {}) {
         what: {
           type: 'string',
           required: true,
-          enum: ['home', 'search', 'related'],
-          description: 'home=首页推给你的；search=你自己搜（要带 keyword）；related=接着某条往下看（要带 bvid）。',
+          enum: ['home', 'search', 'related', 'video'],
+          description: 'home=首页推给你的；search=你自己搜（要带 keyword）；related=接着某条往下看（要带 bvid）；video=看指定的那一条（要带 bvid）。',
         },
         keyword: { type: 'string', required: false, description: 'what=search 时搜什么。' },
-        bvid: { type: 'string', required: false, description: 'what=related 时从哪条接着看（形如 BV1xx411c7mD）。' },
+        bvid: { type: 'string', required: false, description: 'what=related 时从哪条接着看；what=video 时看哪一条（BV 号，或者他递过来的链接）。' },
       }),
       output: {
         schema: {

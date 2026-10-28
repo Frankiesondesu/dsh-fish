@@ -24,9 +24,10 @@
  *   - 只挂在她那个 agent 上（判据 herDir == 会话 cwd），不影响用户自己的会话。
  */
 
-import { readFileSync, statSync } from 'node:fs'
+import { existsSync, readFileSync, statSync } from 'node:fs'
 import { selfDocPath } from './selfdoc.js'
-import { isHerAgent } from './restrict.js'
+import { cwdOf, isHerHome } from './restrict.js'
+import { activeOutingSync, bindOutingSession } from './outing.js'
 
 /** 段名与顺序：放在宿主自己的段之后、`complete` 段之前（order 越大越靠后）。 */
 export const IDENTITY_SECTION = 'fish:identity'
@@ -106,17 +107,19 @@ export function resetIdentityCache() {
  * @param {string} root
  * @returns {{ ok: boolean, why?: string }}
  */
-export function attachIdentity(agent, root) {
+export function attachIdentity(agent, root, { frozen = '' } = {}) {
   const sp = agent?.ctx?.systemPrompt
   if (!sp || typeof sp.section !== 'function') {
     return { ok: false, why: '宿主的 agent.ctx 上没有 systemPrompt.section（版本不支持）' }
   }
   try {
+    const snapshot = String(frozen ?? '')
     sp.section({
       name: IDENTITY_SECTION,
       order: IDENTITY_ORDER,
-      // 每次组装提示词时求值：文件变了，下一轮就是新的她。
-      text: () => identityText(root),
+      // 出门时 `frozen` 是出门那一刻的只读副本：她在外面读到的是「离开时的自己」，
+      // 而不是家里随时可改的那份文件 —— 否则人已经出去了，身份还能被自己在别处改写。
+      text: () => (snapshot ? snapshot : identityText(root)),
     })
     // 「这一次的处境」单独一段：平时是空串（等于不存在），唤醒前才填。
     // 它不进对话历史，所以他看不到系统在跟她说些什么。
@@ -131,6 +134,92 @@ export function attachIdentity(agent, root) {
   }
 }
 
+
+/** 把路径归一成可比较的串（Windows 大小写与反斜杠都要抹平）。 */
+export function flatPath(p) {
+  const s = String(p ?? '').split(String.fromCharCode(92)).join('/')
+  return (s.endsWith('/') ? s.slice(0, -1) : s).toLowerCase()
+}
+
+/**
+ * 出门时除了她自己的屋子，还有什么不许碰（2026-10-28，用户 m01127 拍板）。
+ *
+ * 为什么连宿主家也要挡：她的白板、交接账本、每日日志都在
+ * `<用户目录>/.dsh/memory` 里——读得到，就等于把「守卫怎么做的、基线怎么记的」
+ * 摊开给她看。`sessions` 是所有会话原文，`profiles` 是配置与插件。
+ *
+ * 只挡「文件工具按路径去翻」这一条路；记忆类工具（参数是关键词）不在这一层挡，
+ * 用户拍板保留（m01145「保留记忆工具」）——那几条结论由白板的写法决定。
+ *
+ * @returns {string[]} 小写化、可做子串比对的路径片段
+ */
+export function awayBlockedPaths({ root, herDir } = {}) {
+  const out = [flatPath(herDir), flatPath(root)].filter((w) => w.length > 3)
+  // 她的屋子 `<用户目录>/.dsh-fish` 的上一级，就是宿主的家 `<用户目录>/.dsh`。
+  const hostHome = String(root ?? '').replace(/[\\/][^\\/]*$/, '')
+  if (hostHome) {
+    for (const sub of ['memory', 'sessions', 'profiles']) {
+      const dir = `${hostHome}/.dsh/${sub}`
+      if (existsSync(dir)) out.push(flatPath(dir))
+    }
+  }
+  return out
+}
+
+/**
+ * 出门时的兜底守卫（方案 3.5 第②层）：
+ * `restrict` 挡的是「看不见」，它挡不住写文件这件更直接的事。
+ * 这一层只做一件事：**任何工具调用里出现她家里的路径，就拒绝**。
+ *
+ * 为什么按路径而不是按工具名：外面能用什么工具取决于那个工作区，
+ * 不该替人决定；能决定的是「不许伸手回自己屋子」。
+ * 拒绝话术与 restrict 里的 guard 一致：不带「权限/禁止」，她该以为是自己做不到。
+ */
+export function attachAwayGuard(agent, { root, herDir, log } = {}) {
+  const scoped = agent?.ctx?.tools
+  if (typeof scoped?.guard !== 'function') {
+    return { ok: false, why: '宿主的 agent.ctx 上没有 tools.guard（这一层没挂上）' }
+  }
+  const words = awayBlockedPaths({ root, herDir })
+  if (!words.length) return { ok: false, why: '拿不到她屋子的路径' }
+  let blocked = 0
+  try {
+    const dispose = scoped.guard((exec) => {
+      const parts = []
+      const walk = (v, depth) => {
+        if (depth > 4 || v == null || parts.length > 400) return
+        if (typeof v === 'string') { parts.push(v); return }
+        if (typeof v !== 'object') return
+        if (Array.isArray(v)) { for (const x of v) walk(x, depth + 1); return }
+        let keys = []
+        try { keys = Object.keys(v) } catch { return }
+        for (const k of keys) {
+          let x = null
+          try { x = v[k] } catch { continue }
+          walk(x, depth + 1)
+        }
+      }
+      // 宿主真实形状是 `exec.arguments`（dsh-tools 的 createExecution 只挂这一个字段）。
+      // 0.6.3 真机踩过：只认 args/input/params → 守卫每次看到的都是空对象，
+      // 日志写着「挂上了」，实际一次也没拦（session-3f0d99a2 里它照读了 PLAN.md）。
+      try { walk(exec?.arguments ?? exec?.args ?? exec?.input ?? exec?.params ?? {}, 0) } catch { /* 拿不到实参就只能放行 */ }
+      const joined = flatPath(parts.join(' '))
+      if (words.some((w) => joined.includes(w))) {
+        if (blocked < 10) {
+          blocked += 1
+          log?.('[dsh-fish] 在外面挡住了一次伸回自己屋里的调用')
+        }
+        return '这件事我做不到。'
+      }
+      return undefined
+    })
+    try { agent.ctx.effect?.(() => dispose) } catch { /* 没 effect 就靠父级回收 */ }
+    return { ok: true }
+  } catch (err) {
+    return { ok: false, why: String(err?.message ?? err).slice(0, 160) }
+  }
+}
+
 /**
  * 注册 `agent/created` 监听。**必须先于任何 agent 创建**（与工具面收窄同理），
  * 所以 index.js 里放在 ensureHer 之后、bootstrapHome 之前。
@@ -142,8 +231,36 @@ export function registerIdentity(ctx, { root, herDir, log } = {}) {
   const onCreated = ({ agent } = {}) => {
     try {
       if (!herDir) return
-      if (!isHerAgent(agent, herDir)) return
-      const r = attachIdentity(agent, root)
+      // 0.6.3：判据从「在她屋里」放宽成「是她」——出门那一位也得带着身份，
+      // 否则她在外面会失去全部来历。出门名单只有一条 active，读档失败当没出门。
+      const outing = activeOutingSync(root)
+      const sid = String(agent?.session?.header?.id ?? agent?.session?.id ?? '')
+      const cwd = cwdOf(agent)
+      const home = isHerHome(agent, herDir)
+      // 出门那条会话怎么认出来（三种都认：`agent/created` 的时机不一定带 cwd）：
+      // ① 台账里已经记了会话 id，对上了；
+      // ② cwd 就是出门那个工作区；
+      // ③ 台账刚写、id 还空着（start 路由「先记账再建会话」），而这条会话还没有 cwd。
+      const sidMatch = Boolean(
+        outing?.sessionId && sid &&
+        (sid === outing.sessionId || sid === String(outing.sessionId).replace(/^session-/, '')),
+      )
+      const cwdMatch = Boolean(outing?.cwd && flatPath(cwd) && flatPath(cwd) === flatPath(outing.cwd))
+      const starting = Boolean(outing && !outing.sessionId && !cwd)
+      const isOuting = sidMatch || cwdMatch || starting
+      if (!home && !isOuting) {
+        if (outing) log?.(`[dsh-fish] 有条出门记录，但这条会话没对上：cwd=${cwd || '(空)'} sid=${sid || '(空)'}`)
+        return
+      }
+      const outside = isOuting
+      // ③ 那种情况顺手把 id 补进台账；写盘是异步的，钩子不能等，失败就算了。
+      if (outside && sid && !outing?.sessionId) void bindOutingSession(root, { sessionId: sid }).catch(() => {})
+      const r = attachIdentity(agent, root, { frozen: outside ? outing.identity : '' })
+      if (outside) {
+        const g = attachAwayGuard(agent, { root, herDir, log })
+        if (g.ok) log?.('[dsh-fish] 外面这一条挂上了兜底守卫')
+        else log?.(`[dsh-fish] 兜底守卫没挂上：${g.why}`)
+      }
       if (r.ok) {
         state.ok = true
         state.applied += 1

@@ -6,7 +6,9 @@
  *
  * 这里做三件事，都不碰她的记忆：
  *   1. **记住被锁了多久**（落盘，重启不丢）。`bili.js` 里的冷却只在内存里，进程一重启就当她没被锁过。
- *   2. **罚则递增**：第一次 30 分钟，重复撞就 60 / 120 / 240 分钟。机器越急，人越不信。
+ *   2. **罚则递增**：第一次 10 分钟，重复撞就 30 / 60 / 120 分钟。机器越急，人越不信。
+ *      （2026-10-28 从 30/60/120/240 下调，issue #5：一次偶发 -412 就封半小时，
+ *      对机房 IP 来说等于"一天只能试两次"。真正的礼貌是**降速**，不是长时间停摆。）
  *   3. **降级而不是停摆**：冷却期不刷站，但照常醒来、说话、写日记；
  *      解冻当天少看几条，把"今天不太顺"表现为内容变少，而不是报错。
  *
@@ -18,7 +20,19 @@ import { readFileSync, writeFileSync } from 'node:fs'
 export const RISK_FILE = 'risk.json'
 
 /** 罚则台阶（分钟）。第 N 次撞墙取第 N 项，超出用最后一项。 */
-export const STRIKES_MIN = [30, 60, 120, 240]
+export const STRIKES_MIN = [10, 30, 60, 120]
+
+/**
+ * 这个返回码算不算"真的撞了风控"。
+ *
+ * 只认 B 站亲自回的那三个码。**自己家的 COOLDOWN 不算**——那是我们主动不发了，
+ * 拿它当"撞墙证据"会让一次小失败自我加码成 30 分钟起的封禁（issue #5 的第二现场：
+ * bili.js 里 60 秒的内存冷却 → scheduler 记一次持久罚则 → 半天不刷站）。
+ */
+export function isRiskCode(code) {
+  const n = Number(code)
+  return n === -352 || n === -412 || n === -509
+}
 
 export function riskPath(root) {
   return `${root}/${RISK_FILE}`
@@ -104,7 +118,11 @@ export function browsePlan(cfg, st) {
   const perDay = Number(cfg?.browse?.perDay ?? 0)
   const topN = Number(cfg?.browse?.topN ?? 4)
   const deepRead = Number(cfg?.browse?.deepRead ?? 6)
-  if (st?.cooling) return { skip: true, perDay, topN, deepRead, note: '风控冷却中' }
+  if (st?.cooling) {
+    const m = Number(st?.remainMin ?? 0)
+    // 带上剩余时间：只说「冷却中」，用户分不清是卡死了还是等一会儿就好。
+    return { skip: true, perDay, topN, deepRead, note: m > 0 ? `风控冷却中（还要约 ${m} 分钟）` : '风控冷却中' }
+  }
   if (Number(st?.strikes) >= 1) {
     const half = (n) => Math.max(1, Math.floor(n / 2))
     return {

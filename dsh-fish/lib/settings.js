@@ -9,6 +9,9 @@
  */
 
 import { readConfig, writeConfig, paths, readJson } from './store.js'
+// 请求节奏是 bili 客户端的模块级状态，由配置驱动（issue #5）。
+// 这里有 settings → bili 的单向依赖，bili.js 不反过来引 settings，不会成环。
+import { setPacing } from './bili.js'
 
 /** 所有可调项。加新项就在这里加，下面读配置会自动补全。 */
 export const DEFAULTS = {
@@ -82,6 +85,16 @@ export const DEFAULTS = {
     // 打开后每次浏览最多留 1 条评论给她读（跨视频重复 > 高赞短句 > 25% 随机）。
     // 关掉也能正常上网——只是她再也读不到别人的说法。
     voices: true,
+  },
+
+  // B 站请求节奏（issue #5，2026-10-28）
+  // 为什么可配：机房/服务器 IP 与家宽的风控阈值完全不同。家宽 800ms 很安全，
+  // 机房 IP 反而**越刷越快被盯上**——需要放慢；反过来在某些代理下又能更快。
+  // 放在设置里比写死合理（写死就是让一部分人永远用不了）。
+  // 注意：这是环境参数，不是"她性格"的一部分。
+  bili: {
+    minIntervalMs: 800,     // 两次请求之间最少等多久
+    jitterMs: 500,          // 在最小间隔上再随机多等 0–jitterMs（打散固定节奏）
   },
 
   // 看画面（2026-10-23 加）
@@ -181,6 +194,8 @@ const LIMITS = {
   'browse.deepRead': [0, 40],
   'browse.danmaku': [0, 30],
   'browse.perDay': [0, 4],
+  'bili.minIntervalMs': [200, 120000],
+  'bili.jitterMs': [0, 60000],
   'video.perDay': [0, 6],
   'video.frames': [4, 16],
   'avoid.minDuration': [0, 3600],
@@ -271,6 +286,9 @@ export function normalizeConfig(raw = {}) {
   cfg.browse.voices = cfg.browse.voices !== false
   cfg.browse.keywords = dedupe(cfg.browse.keywords)
   cfg.browse.window = validWindow(cfg.browse.window, DEFAULTS.browse.window)
+
+  // 请求节奏：夹值已由 LIMITS 做过，这里只保证是对象（老配置里没有这一组）
+  cfg.bili = { ...DEFAULTS.bili, ...cfg.bili }
 
   // 提醒：布尔严格化 + lastShown 只收字符串（它的值是日期键，不是数字）
   cfg.notify = { ...DEFAULTS.notify, ...cfg.notify }
@@ -370,14 +388,26 @@ export function validateToolNames(input, known) {
 /** 读配置（文件不存在时返回默认值，不写盘） */
 export async function loadConfig(root) {
   const raw = await readConfig(root)
-  if (raw === null) return { config: normalizeConfig({}), fresh: true, broken: false }
-  let broken = false
-  try {
-    return { config: normalizeConfig(raw), fresh: false, broken }
-  } catch {
-    broken = true
-    return { config: normalizeConfig({}), fresh: false, broken }
+  let res
+  if (raw === null) {
+    res = { config: normalizeConfig({}), fresh: true, broken: false }
+  } else {
+    let broken = false
+    try {
+      res = { config: normalizeConfig(raw), fresh: false, broken }
+    } catch {
+      broken = true
+      res = { config: normalizeConfig({}), fresh: false, broken }
+    }
   }
+  // 每次读配置都把节奏推给 bili 客户端：设置页保存后下一次请求就是新间隔，
+  // 不用重启插件。失败也不能连累读配置本身。
+  try {
+    setPacing(res.config?.bili)
+  } catch {
+    /* 节奏挂了不影响读配置 */
+  }
+  return res
 }
 
 /** 合并式更新：只改你传的键，其余保持。传未知键会原样存下（向前兼容）。 */

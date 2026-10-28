@@ -7,10 +7,12 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtemp, rm } from 'node:fs/promises'
+import { readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { watchedToday, registerWatch } from '../lib/watch.js'
+import { logFile } from '../lib/log.js'
 import { appendEvent } from '../lib/store.js'
 import { updateConfig } from '../lib/settings.js'
 
@@ -103,5 +105,67 @@ test('registerWatch：额度已经用完时只说"不想看了"，不报数字',
     assert.equal(out.ok, false)
     assert.equal(out.note, '今天不想再看画面了。')
     assert.doesNotMatch(out.note, /\d/)
+  })
+})
+
+// 下面四条盯的是「导出包能不能判案」：用户那边的机器上「看不到画面」，
+// 导出包里必须能看出是被哪一条挡下的。日志里可以写数字（给人看的），
+// 工具回复里仍然不能出现数字（那是给她看的）。
+function readLog(root) {
+  try {
+    return readFileSync(logFile(root), 'utf8')
+  } catch {
+    return ''
+  }
+}
+
+test('看画面被设置关掉时，日志里留下「关掉了看视频」', async () => {
+  await withRoot(async (root) => {
+    await updateConfig({ browse: { enabled: true }, video: { enabled: false } }, root)
+    const ctx = fakeCtx()
+    registerWatch(ctx, { root })
+    await ctx._tools[0].execute({ bvid: 'BV1ED4y1Y7dc' })
+    assert.match(readLog(root), /看画面：设置里关掉了看视频/)
+  })
+})
+
+test('视频号不合法时，日志里留下「视频号不合法」和原样的入参', async () => {
+  await withRoot(async (root) => {
+    await updateConfig({ browse: { enabled: true }, video: { enabled: true } }, root)
+    const ctx = fakeCtx()
+    registerWatch(ctx, { root })
+    await ctx._tools[0].execute({ bvid: '不是视频号' })
+    const log = readLog(root)
+    assert.match(log, /看画面：视频号不合法/)
+    assert.match(log, /不是视频号/)
+  })
+})
+
+test('额度用完时日志写数字（1/1），好追额度怎么用掉的', async () => {
+  await withRoot(async (root) => {
+    await updateConfig({ browse: { enabled: true }, video: { enabled: true, perDay: 1 } }, root)
+    const { dateKey } = await import('../lib/settings.js')
+    await appendEvent({ type: 'meta', text: `watched:${dateKey()} BV1xx411c7mD` }, { source: 'system' }, root)
+    const ctx = fakeCtx()
+    registerWatch(ctx, { root })
+    await ctx._tools[0].execute({ bvid: 'BV1ED4y1Y7dc' })
+    assert.match(readLog(root), /看画面：今日额度已满 1\/1 BV1ED4y1Y7dc/)
+  })
+})
+
+test('抽帧失败时写 warn 一行，带上失败原因', async () => {
+  await withRoot(async (root) => {
+    // ffmpeg 不在 PATH 上 → grabFrames 失败；这条是导出包里最值钱的一行
+    const saved = process.env.PATH
+    process.env.PATH = ''
+    try {
+      await updateConfig({ browse: { enabled: true }, video: { enabled: true } }, root)
+      const ctx = fakeCtx()
+      registerWatch(ctx, { root })
+      await ctx._tools[0].execute({ bvid: 'BV1ED4y1Y7dc' })
+      assert.match(readLog(root), /看画面：抽帧失败 BV1ED4y1Y7dc/)
+    } finally {
+      process.env.PATH = saved
+    }
   })
 })

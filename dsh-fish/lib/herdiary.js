@@ -1,0 +1,115 @@
+/**
+ * herdiary.js —— 让她能回头翻自己的日记：her_diary 工具（issue #7 第二半，2026-10-28）
+ *
+ * 问题（github:ssamurias/dsh-fish#7）：
+ *   日记写进 `diary/YYYY-MM-DD.md`、**不进事件流**（否则 diary.visible 这个
+ *   隐私开关立刻失效，记忆也会被稀释成第二条流）。这是对的。但代价是：
+ *     - her_recall 跳过 meta，翻不到日记；
+ *     - 她的工具面里没有任何"读文件"的入口。
+ *   于是日记写完之后她自己永远够不着，只有主人能看。而身份里对她写的是
+ *   「写完自己留着」——那句话默认了她还能再打开。
+ *
+ * 这里只开一扇很窄的窗，**不是**给她一个读文件工具：
+ *   - 只读，永远写不了；
+ *   - 只能读 `diary/` 里按日期命名的那些，参数是日期不是路径（连 `../` 都传不进来）；
+ *   - 一次一份（默认最近一篇），正文截断；
+ *   - **不参与**身份文档拼装，也**不进** her_recall ⇒ `diary.visible` 的语义不变：
+ *     那个开关管"主人看不看"，这个工具管"她自己愿不愿意回头翻"。
+ */
+
+import { toJsonSchema } from './toolschema.js'
+import { rootDir, readDaily, listDiary } from './store.js'
+
+import { defineTool } from './tool.js'
+
+/** 一次最多给她看这么多字（日记是她自己写的，但也不能一口气灌满上下文） */
+export const DIARY_READ_MAX = 3000
+
+/** 只接受 `YYYY-MM-DD`。日期是惟一的入参形态，不拼路径。 */
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/
+
+/**
+ * 渲染成她能读的一段（不是 JSON）。
+ * 失败时也给一句人话——"那天没有日记"和"哪都打不开"必须能分清。
+ */
+export function renderDiary({ date = '', text = '', dates = [], why = '' } = {}) {
+  if (why) return why
+  if (Array.isArray(dates) && dates.length) {
+    return ['你写过日记的日子：', ...dates.slice(0, 60).map((d) => `- ${d}`)].join('\n')
+  }
+  if (!date || text === null || text === undefined) {
+    return '你还没写过日记。'
+  }
+  let body = String(text)
+  const cut = body.length > DIARY_READ_MAX
+  if (cut) body = body.slice(0, DIARY_READ_MAX)
+  return [`${date} 那天你写的：`, body, cut ? `\n（后面还有，这里只到 ${DIARY_READ_MAX} 字）` : ''].join('\n').trim()
+}
+
+/**
+ * 注册 her_diary 工具。
+ *
+ * @param {object} ctx dsh ctx
+ * @param {object} deps { root }
+ */
+export function registerHerDiary(ctx, deps = {}) {
+  const root = deps.root ?? rootDir()
+  return ctx.tools.register(
+    defineTool({
+      name: 'her_diary',
+      description:
+        '翻你自己写过的日记。日记不在事件流里，her_recall 翻不到，只有这里能看。' +
+        '不给日期就是最近那一篇；也可以只要一份日期清单。一次给你一份，太长的会截断。',
+      parameters: toJsonSchema({
+        date: {
+          type: 'string',
+          required: false,
+          description: '想看哪一天，写成 YYYY-MM-DD。不写就是最近那一篇。',
+        },
+        list: {
+          type: 'boolean',
+          required: false,
+          description: '只想知道写过哪些天：给 true 就只回一份日期清单。',
+        },
+      }),
+      output: {
+        schema: {
+          type: 'object',
+          properties: {
+            found: { type: 'boolean' },
+            text: { type: 'string' },
+          },
+          required: ['found', 'text'],
+        },
+        render: (_args, out) => [{ type: 'text', text: out.text }],
+      },
+      async execute(args) {
+        try {
+          const dates = await listDiary(root).catch(() => [])
+          if (args?.list === true) {
+            return { found: dates.length > 0, text: renderDiary({ dates }) }
+          }
+          const want = String(args?.date ?? '').trim()
+          if (want && !DATE_RE.test(want)) {
+            // 不报错、不说教，给她一条能照着走的路
+            return {
+              found: false,
+              text: '日期要写成 YYYY-MM-DD（比如 2026-10-28）。不想指定日期就别传。',
+            }
+          }
+          const dateKey = want || dates[0] || ''
+          if (!dateKey) return { found: false, text: renderDiary({}) }
+          const text = await readDaily('diaryDir', dateKey, root)
+          if (text === null) {
+            const hint = !want && dates[0] ? '' : dates.length ? `最近的一篇是 ${dates[0]}。` : ''
+            return { found: false, text: [`${dateKey} 那天没有日记。`, hint].filter(Boolean).join('\n') }
+          }
+          return { found: true, text: renderDiary({ date: dateKey, text }) }
+        } catch (err) {
+          // 读不动就说读不动，不要装作没有
+          return { found: false, text: `日记打不开：${String(err?.message ?? err).slice(0, 120)}` }
+        }
+      },
+    }),
+  )
+}

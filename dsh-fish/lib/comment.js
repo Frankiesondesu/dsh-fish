@@ -24,9 +24,30 @@ import { createClient } from './bili.js'
 import { itemsFromEvents } from './browse.js'
 import { sanitizeForeign } from './guard.js'
 
-/** 她能说话的对象：今天看过的视频（browse 记账在案） */
+/**
+ * 她能说话的对象：今天**真的看过**的视频。
+ *
+ * 三种来源都算（2026-10-28 放宽）：
+ *   1. 平台刷站记账 `browse:` / `browse-more:`（原来只认这一种）
+ *   2. 她自己主动看过的那一条 `look:<日期> <bvid>`（首页/搜/相关/他递来的）
+ *   3. 看过画面的 `watched:<日期> <bvid>`
+ *
+ * **递过来但没看一眼的不算**（`hand:` 只记事实）——看过才能评。
+ * 日期必须对上：昨天看过的，今天不能拿去评。
+ */
 export function targetsToday(events, dk = dateKey()) {
-  return itemsFromEvents(events, dk)
+  const out = itemsFromEvents(events, dk).filter((x) => x && x.bvid)
+  const seen = new Set(out.map((x) => x.bvid))
+  for (const prefix of ['look:', 'watched:']) {
+    const head = `${prefix}${dk} `
+    for (const line of metas(events, head)) {
+      const bvid = line.slice(head.length).trim().split(/\s+/)[0] ?? ''
+      if (!bvid || seen.has(bvid)) continue
+      seen.add(bvid)
+      out.push({ bvid })
+    }
+  }
+  return out
 }
 
 function metas(events, prefix) {
@@ -202,11 +223,15 @@ export async function postComment(o = {}) {
   const cap = Math.max(0, Number(c.perDay ?? 0))
   if (used >= cap) return { ok: false, why: '今天说够了' }
 
-  // 只允许评今天看过的
+  // 只允许评今天真的看过的（browse / 主动看 / 看过画面，见 targetsToday）
   const bvid = String(o.bvid ?? '').trim()
   const targets = targetsToday(events, dk)
   const t = targets.find((x) => x.bvid === bvid)
-  if (!t) return { ok: false, why: '这个视频你今天没看' }
+  if (!t) {
+    // 他递过来但还没看一眼的那条，拒绝理由说得更准（她才知道下一步是"去看一眼"）
+    const handed = metas(events, `hand:${dk} `).some((line) => line.split(/\s+/)[1] === bvid)
+    return { ok: false, why: handed ? '这条是他递过来的，你还没看' : '这个视频你今天没看' }
+  }
 
   const ow = await readOwner(root)
   const client = o.client ?? createClient({ cookie: ow?.cookie })

@@ -101,12 +101,43 @@ export async function ensureWorkspace(ctx, { root = rootDir(), title = TITLE_WOR
 }
 
 /**
+ * 刚建出来的会话，就算宿主还没把它列进 ws.sessionIds，也先当它还活着。
+ *
+ * 为什么（2026-10-28 房客日志，m01863）：宿主的 workspaceRegistry 是**异步索引**的，
+ * 会话建好之后有一小段时间 `ws.sessionIds` 里查不到它。老判据只认那个数组，
+ * 于是「刚建好 → 下次重启查不到 → 当成没了 → 再建一条」，几轮下来同一间屋堆出
+ * 一串空壳会话（日志里 20:30 与 20:31 各一条就是这个形状）。
+ */
+export const HOME_GRACE_MS = 10 * 60_000
+
+// 同一个 root 只允许有一条「建会话」在飞。
+// 为什么必须（同一份日志）：启动链路的 bootstrapHome 与「她第一次说话」触发的
+// talkSessionId 是两条独立路径，都可能发现会话没了、各自 sc.create 一次，
+// 结果同一个家同时长出两条会话。进程内共享同一个 promise 就够了——
+// 跨进程/跨家由 0.6.7 的 instance.json 占用权兜住。
+const inflight = new Map()
+
+/**
  * 找到或创建那个对话会话。
  *
- * 判定「还活着」的口径：home.json 里记的 sessionId 仍在这个工作区的
- * sessionIds 里，且不在 archivedSessionIds 里。任一不满足就重建。
+ * 判定「还活着」的口径（0.6.8 改）：
+ *   1. home.json 记着 `status:'archived'` → **不自动重建**，返回 archived:true。
+ *      这是用户自己收起来的那一局，插件替他重开等于把「我收起来了」这句话当没听见。
+ *      要重开只有一条路：带 `force:true`（观测台「重新搭一间」/ 重置流程）。
+ *   2. sessionId 在 `archivedSessionIds` 里 → 记成 archived，同上。
+ *   3. 在 ws.sessionIds 里，或者 `createdAt` 距今不到 HOME_GRACE_MS → 复用。
+ *   4. 其余才重建。
  */
-export async function ensureTalkSession(ctx, { root = rootDir(), wsId, title = TITLE_SESSION, preset = '', log } = {}) {
+export async function ensureTalkSession(ctx, opts = {}) {
+  const root = opts.root ?? rootDir()
+  const key = String(root).toLowerCase()
+  if (inflight.has(key)) return inflight.get(key)
+  const p = ensureTalkSessionOnce(ctx, { ...opts, root }).finally(() => inflight.delete(key))
+  inflight.set(key, p)
+  return p
+}
+
+async function ensureTalkSessionOnce(ctx, { root = rootDir(), wsId, title = TITLE_SESSION, preset = '', log, force = false } = {}) {
   const sc = ctx.sessionController
   if (!sc?.create) return { ok: false, why: '宿主没有 sessionController 服务' }
   if (!wsId) return { ok: false, why: '没有工作区 id' }
@@ -114,16 +145,54 @@ export async function ensureTalkSession(ctx, { root = rootDir(), wsId, title = T
   const reg = readRegistry(ctx)
   const saved = await readJson(homeFile(root), null)
 
+  // ---- 用户自己收起来的那一局：不重开，除非明说要 ----
+  if (saved?.sessionId && String(saved.status ?? '') === 'archived' && force !== true) {
+    return {
+      ok: false,
+      archived: true,
+      sessionId: String(saved.sessionId),
+      why: '这个家的会话被收起来了（已归档）；要重新搭一间，用「重新搭一间」',
+    }
+  }
+
   // ---- 先看上次那个会话还在不在 ----
   if (saved?.sessionId) {
     let alive = false
+    let isArchived = false
     try {
       const ws = reg?.get?.(wsId)
       const archived = Array.isArray(reg?.archivedSessionIds) ? reg.archivedSessionIds : []
+      isArchived = archived.includes(saved.sessionId)
       alive = Boolean(ws && Array.isArray(ws.sessionIds) && ws.sessionIds.includes(saved.sessionId))
-        && !archived.includes(saved.sessionId)
+        && !isArchived
     } catch { alive = false }
-    if (alive) {
+
+    if (isArchived && force !== true) {
+      // 宿主那边确认归档了：把这件事记进 home.json，重启之后也认。
+      try {
+        await writeAtomic(homeFile(root), JSON.stringify({
+          ...saved, status: 'archived', archivedAt: new Date().toISOString(),
+        }, null, 2))
+      } catch { /* 记不下来就下次再判一次，不抛 */ }
+      return {
+        ok: false,
+        archived: true,
+        sessionId: String(saved.sessionId),
+        why: '这个家的会话被收起来了（已归档）；要重新搭一间，用「重新搭一间」',
+      }
+    }
+
+    // 宽限期：刚建出来的那条，宿主索引还没跟上也算活着。
+    // 归档过的（含 force 重建时）不算——那种情况要的是新的一条。
+    let recent = false
+    if (!isArchived) {
+      try {
+        const t = Date.parse(String(saved.createdAt ?? ''))
+        recent = Number.isFinite(t) && Date.now() - t < HOME_GRACE_MS
+      } catch { recent = false }
+    }
+
+    if (alive || recent) {
       // 老档改名：早期版本叫「跟她说话」，现在统一叫「跟大肥鱼说话」。
       // 改名失败不影响使用（侧栏照旧显示旧标题），所以只试一次、不抛。
       if (title && saved.title !== title) {
@@ -132,7 +201,9 @@ export async function ensureTalkSession(ctx, { root = rootDir(), wsId, title = T
           await writeAtomic(homeFile(root), JSON.stringify({ ...saved, title }, null, 2))
         } catch { /* 改不了就保持原名 */ }
       }
-      return { ok: true, sessionId: saved.sessionId, reused: true }
+      const out = { ok: true, sessionId: saved.sessionId, reused: true }
+      if (saved.status === 'archived') out.wasArchived = true
+      return out
     }
   }
 
@@ -260,12 +331,20 @@ async function markWoke(root, sessionId) {
   } catch { /* 记不下来就下次多叫一次，没有更坏的后果 */ }
 }
 
-export async function bootstrapHome(ctx, { root = rootDir(), log, preset = '' } = {}) {
+export async function bootstrapHome(ctx, { root = rootDir(), log, preset = '', force = false } = {}) {
   const ws = await ensureWorkspace(ctx, { root })
   if (!ws.ok) return { ok: false, why: ws.why, wsId: '', sessionId: '' }
 
-  const ses = await ensureTalkSession(ctx, { root, wsId: ws.wsId, preset, log })
-  if (!ses.ok) return { ok: false, why: ses.why, wsId: ws.wsId, sessionId: '' }
+  const ses = await ensureTalkSession(ctx, { root, wsId: ws.wsId, preset, log, force })
+  if (!ses.ok) {
+    return {
+      ok: false,
+      why: ses.why,
+      wsId: ws.wsId,
+      sessionId: '',
+      archived: ses.archived === true,
+    }
+  }
 
   // 唤醒**不放在这里**：talkSessionId 在屋子缺失时也会调 bootstrapHome，
   // 那样每次「第一次说话」都会多叫一次，她一轮被点两次火。只在明确的两个入口叫：
@@ -285,6 +364,8 @@ export async function homeStatus(root = rootDir()) {
     turns: Number(saved?.turns ?? 0),
     rotatedAt: saved?.rotatedAt ?? null,
     preset: String(saved?.preset ?? ''),
+    status: String(saved?.status ?? ''),
+    archivedAt: saved?.archivedAt ?? null,
   }
 }
 

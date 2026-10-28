@@ -145,3 +145,27 @@ test('阈值就是导出的那两个常量，别再藏魔法数', () => {
   assert.equal(ACTIVE_MS, 5 * 60_000)
   assert.equal(IDLE_MS, 10 * 60_000)
 })
+
+test('一天几百条「没有该问的事」在时间线上折叠成一条（用户 m06971）', () => {
+  // 0.6.2 之前调度层每分钟写一条 quiet:，一天能堆几百条，把状态卡刷成同一句。
+  // 写入侧已改成一天一条；旧档里已经写进去的那些，读的时候按天折叠。
+  const events = []
+  for (let i = 1; i <= 8; i += 1) {
+    events.push(meta(i * MIN, `quiet:${DK} 无候选模板，今天不打扰`))
+  }
+  const st = deriveStatus({ events, config: cfg, now: NOW })
+  const quietLines = st.timeline.filter((t) => t.text.includes('没有该问的事'))
+  assert.equal(quietLines.length, 1, st.timeline.map((t) => t.text).join(' | '))
+})
+
+test('折叠按天算，不同日期的 quiet 各留一条', () => {
+  const yesterday = new Date(NOW.getTime() - 24 * 60 * MIN)
+  const events = [
+    { id: 'q1', ts: yesterday.toISOString(), type: 'meta', text: 'quiet:2026-10-22 无候选模板，今天不打扰' },
+    meta(3 * MIN, `quiet:${DK} 无候选模板，今天不打扰`),
+    meta(2 * MIN, `quiet:${DK} 无候选模板，今天不打扰`),
+  ]
+  const st = deriveStatus({ events, config: cfg, now: NOW })
+  // 昨天那条不在 today 里，本来就进不了时间线；今天两条折叠成一条
+  assert.equal(st.timeline.filter((t) => t.text.includes('没有该问的事')).length, 1)
+})

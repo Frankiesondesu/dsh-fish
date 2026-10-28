@@ -29,6 +29,7 @@ import { registerCapture } from '../lib/capture.js'
 import { registerLetter } from '../lib/letter.js'
 import { registerLook } from '../lib/look.js'
 import { registerRecall } from '../lib/recall.js'
+import { registerHerDiary } from '../lib/herdiary.js'
 import { registerSpeak } from '../lib/speak.js'
 import { registerWatch } from '../lib/watch.js'
 import { FISH_TOOLS, HER_TOOLS } from '../lib/restrict.js'
@@ -67,17 +68,18 @@ test('defineTool 是恒等：不编译、不改写', () => {
   assert.equal(defineTool(spec), spec)
 })
 
-test('七个工具定义都长成宿主认的形状', () => {
+test('八个工具定义都长成宿主认的形状', () => {
   const ctx = fakeCtx()
   const deps = { root: ROOT, log: () => {} }
   registerCapture(ctx, deps)
   registerLetter(ctx, deps)
   registerLook(ctx, deps)
   registerRecall(ctx, deps)
+  registerHerDiary(ctx, deps)
   registerSpeak(ctx, deps)
   registerWatch(ctx, deps)
 
-  assert.equal(ctx.defs.length, 6, '我们自己的工具是 6 个（第 7 个 read_image 是宿主的）')
+  assert.equal(ctx.defs.length, 7, '我们自己的工具是 7 个（第 8 个 read_image 是宿主的）')
   const names = ctx.defs.map((d) => d.name)
   for (const n of names) assert.ok(FISH_TOOLS.includes(n), `${n} 不在 FISH_TOOLS 里`)
 
@@ -103,12 +105,51 @@ test('自检按 registry 里真的在不在判断，而不是配置名单', asyn
   const okItem = ok.items.find((i) => i.id === 'tools')
   assert.equal(okItem.ok, true, okItem.detail)
 
-  // read_image 缺失只提示、不算失败
+  // 2026-10-28 深夜改写（用户 m05885 的真机反证）：
+  // 原先这里断言「全局工具表里没有 read_image ⇒ 必须报红」。那个判据是**必然误报**——
+  // 宿主把 read_image 注册在 agent 平面（由 attachments 服务挂着），全局表里根本查不到。
+  // 用户同一条会话里 read_image 明明取到了 1096x622 的 PNG、她还照着画面把内容讲了，
+  // 自检却说她「看不了图」。所以现在的判据是「有正面证据才算有，没证据就说判不准」。
+  //
+  // ① 真机那种情况：全局表查不到，但收窄真的挂上了、名单里有它 ⇒ 绿（宿主认过这个名字）。
   const noImage = { get: (n) => (n === 'read_image' ? undefined : { name: n }) }
   const img = await runChecks({ root: ROOT, config: cfg, host: {}, tools: noImage, restrict: R, net: false })
-  const imgItem = img.items.find((i) => i.id === 'tools')
-  assert.equal(imgItem.ok, true, imgItem.detail)
+  const imgTools = img.items.find((i) => i.id === 'tools')
+  assert.equal(imgTools.ok, true, imgTools.detail)
+  const imgItem = img.items.find((i) => i.id === 'read-image')
+  assert.ok(HER_TOOLS.includes('read_image'), '收窄名单里得有 read_image，这条用例才成立')
+  assert.equal(imgItem.ok, true, `全局表查不到、但收窄认过，不能报红：${imgItem.detail}`)
   assert.match(imgItem.detail, /read_image/)
+  // 整体可能因为别的项（cookie / 宿主接口）红，但「看画面」不能再进要注意清单。
+  assert.doesNotMatch(img.summary, /看画面/)
+
+  // ② 全局表里直接看到 ⇒ 绿。
+  const allTools = { get: (n) => ({ name: n }) }
+  const withImg = await runChecks({ root: ROOT, config: cfg, host: {}, tools: allTools, restrict: R, net: false })
+  const okImg = withImg.items.find((i) => i.id === 'read-image')
+  assert.equal(okImg.ok, true, okImg.detail)
+
+  // ③ 宿主明说了没挂附件服务 ⇒ 一定没有 read_image，报红并给修法。
+  const noAttach = await runChecks({
+    root: ROOT, config: cfg, host: {}, tools: noImage, restrict: { allow: [], applied: 0, failed: '' },
+    attachments: false, net: false,
+  })
+  const noAttachItem = noAttach.items.find((i) => i.id === 'read-image')
+  assert.equal(noAttachItem.ok, false, '没挂附件服务必须报出来')
+  assert.match(noAttachItem.detail, /read_image/)
+  assert.match(noAttachItem.fix, /附件|图片/)
+
+  // ④ 什么旁证都没有 ⇒ 说「判不准」，不冤枉她看不了图。
+  const unclear = await runChecks({
+    root: ROOT, config: cfg, host: {}, tools: noImage, restrict: { allow: [], applied: 0, failed: '' }, net: false,
+  })
+  const unclearItem = unclear.items.find((i) => i.id === 'read-image')
+  assert.equal(unclearItem.ok, true, unclearItem.detail)
+  assert.match(unclearItem.detail, /查不准|判不准/)
+
+  // ⑤ 没有 tools（预检/假环境）时不冒充结论：这一项干脆不出现。
+  const noTools = await runChecks({ root: ROOT, config: cfg, host: {}, restrict: R, net: false })
+  assert.equal(noTools.items.find((i) => i.id === 'read-image'), undefined)
 
   const missingOne = { get: (n) => (n === 'growth_commit' ? undefined : { name: n }) }
   const bad = await runChecks({ root: ROOT, config: cfg, host: {}, tools: missingOne, net: false })

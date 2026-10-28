@@ -189,7 +189,8 @@ test('组件在"有数据"时把关键信息渲染出来', async () => {
   // 2026-10-25 起页签固定为 8 个（没有「全部」页，用户要求删掉；文案页同日下线）：
   // 状态 / 成长 / 住所 / 上网 / 记忆 / 插件 / 原理 / 数据（末页原叫「危险」，
   // 2026-10-24 改名并把数据在哪、每日报告、运行日志挪了进去；原理页在插件与数据之间）。
-  for (const label of ['状态', '成长', '住所', '上网', '记忆', '插件', '原理', '数据']) {
+  // 2026-10-28 加了第 9 个「反馈」（开发者 QQ + 交流群二维码），排在最后。
+  for (const label of ['状态', '成长', '住所', '上网', '记忆', '插件', '原理', '数据', '反馈']) {
     assert.ok(txt.includes(label), `分页标签「${label}」必须在`)
   }
   assert.ok(!txt.includes('全部'), '不该再有「全部」页')
@@ -496,4 +497,67 @@ test('互动计数的问号写清四个数字的口径（用户定稿）', async
   assert.ok(src.includes('拒绝=她明确登记拒绝过什么'))
   assert.ok(src.includes('重聚=久别之后她自己写下的感受'))
   assert.ok(!src.includes('她自己写下的事件条数，不含系统记的。'), '旧口径已作废')
+})
+
+// ---------------------------------------------------------------------------
+// 2026-10-28：用户转来的四条反馈（m00802）
+// ---------------------------------------------------------------------------
+
+test('日记三项不再跟着整表保存走：各自 patchDiary，服务端没给值也不写回界面（反馈 1）', async () => {
+  const src = await readFile(CLIENT, 'utf8')
+
+  // 整表保存（buildConfig + 700ms 自动 POST）必须碰不到 diary，
+  // 否则每一次环境参数改动都会顺带把日记开关写回旧值 —— 用户看到的就是"自己关"。
+  assert.ok(!src.includes('diary: { visible: diaryVisible'), 'buildConfig 里不该再有 diary')
+  assert.ok(src.includes("await jpost('/config', { diary: patch })"), '日记要走单独 patch')
+
+  // 三个控件各连一次 patchDiary
+  assert.ok(src.includes('patchDiary({ enabled: v })'))
+  assert.ok(src.includes('patchDiary({ visible: v })'))
+  assert.ok(src.includes('patchDiary({ keepDays: Number(v) })'))
+
+  // 日记天数不再参与整表范围校验（它已经不随整表提交了）
+  assert.ok(!src.includes("['日记保留天数', diaryKeep"), '日记天数要从 NUM_BOUNDS 里摘掉')
+
+  // /state 回包比手速慢时别把开关拨回去；undefined（服务端没给）更不能当 false
+  assert.ok(src.includes('diaryPending.current'), '要有"patch 在飞"的保护')
+  assert.ok(src.includes("typeof dv === 'boolean'"), '非 boolean 就跳过 set')
+})
+
+test('风控提示分两层说：落盘的冷却与进程内的 60 秒（反馈 4）', async () => {
+  const src = await readFile(CLIENT, 'utf8')
+  assert.ok(src.includes('B 站那边正在冷却'), '落盘冷却（risk.js）要显示剩余分钟')
+  assert.ok(src.includes('risk?.memory?.readMs'), '进程内的短暂熔断也要单独说明')
+  assert.ok(src.includes('重启就清空'), '要说清这层不是永久的')
+})
+
+test('领养人两格被旧版本写脏时点出来（反馈 2）', async () => {
+  const src = await readFile(CLIENT, 'utf8')
+  assert.ok(src.includes('像是旧版本写进去的'), '要和登录账号相同的情况给一句提示')
+  assert.ok(src.includes('测试 cookie 能不能说话'), '测试按钮要说清它只验 cookie')
+})
+
+// ---------------------------------------------------------------------------
+// 2026-10-28 晚：用户 m00416
+// ---------------------------------------------------------------------------
+
+test('刷视频记录按条翻页：每页条数随实际量自适应，日期只在换天时出现一次（m00416）', async () => {
+  const src = await readFile(CLIENT, 'utf8')
+
+  // 原来是「一天一组、一页三天」，一天刷 10 条、查 3 天就是 30 条挤一屏
+  assert.ok(src.includes('(g.items || []).map((it) => ({ ...it, date: g.date }))'), '要摊平成一条一条')
+  assert.ok(!src.includes('一页三天'), '旧口径的文案要清掉')
+  assert.ok(src.includes('histSlice[i - 1].date !== it.date'), '换天处才插日期标签')
+  // 2026-10-28 晚（用户 m0xxxx「按实际刷的视频数量动态调整」）：
+  // 每页条数不是死 12 条，而是先看总量、再看日均密度分档，上限 12。
+  assert.ok(src.includes('const HIST_PAGE_MAX = 12'), '上限是 12 条')
+  assert.ok(src.includes('histTotal <= 8 ? histTotal'), '一共不到 8 条就一页全放下')
+  assert.ok(src.includes('histPerDay > 20 ? 6'), '一天 20 条以上的重度用户，一页只给 6 条')
+  assert.ok(src.includes('histPerDay > 10 ? 8'), '一天 10~20 条，一页 8 条')
+  assert.ok(src.includes('histPerDay > 5 ? 10'), '一天 5~10 条，一页 10 条')
+  assert.ok(src.includes('const histPages = Math.max(1, Math.ceil(histTotal / histPageSize))'), '页数按自适应条数算')
+  // 只有一页时连翻页条都不出，别让人看到「第 1 / 1 页」
+  assert.ok(src.includes('const histPager = histPages > 1'), '一页就不出翻页条')
+  assert.ok(src.includes('histPages > 1\n            ? h('), '下面的翻页条同样只在多页时出现')
+  assert.ok(src.includes('一页 ${histPageSize} 条'), '页码旁边标出这一页有几条')
 })

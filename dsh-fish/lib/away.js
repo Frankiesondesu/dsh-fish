@@ -11,6 +11,7 @@
  *   - 日记只报**篇数**，永不报内容——看不看得到是 `diary.visible` 那件事。
  */
 import { readEvents } from './store.js'
+import { parseBrowseLine } from './browse.js'
 
 function tsOf(e) {
   const raw = e?.ts
@@ -69,15 +70,13 @@ export function summarizeAway(events, { now = Date.now(), maxDays = 60 } = {}) {
       const txt = String(e.text ?? '')
       if (txt.startsWith('wake:')) { wakes++; continue }
       if (txt.startsWith('diary:')) { diaries++; continue }
-      if (txt.startsWith('browse:')) {
-        const json = txt.slice(txt.indexOf(' ')).trim()
-        if (!json.startsWith('[')) continue
-        try {
-          for (const it of JSON.parse(json)) {
-            const b = String(it?.bvid ?? '')
-            if (b) bvids.add(b)
-          }
-        } catch { /* 坏行跳过，不让整张卡片空掉 */ }
+      // 记账分片：browse: 是第一片，browse-more: 是后续，两片都要算
+      const got = parseBrowseLine(txt)
+      if (got) {
+        for (const it of got.arr) {
+          const b = String(it?.bvid ?? '')
+          if (b) bvids.add(b)
+        }
       }
     }
   }

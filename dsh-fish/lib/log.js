@@ -141,6 +141,35 @@ export function tailLog(root, { lines = 50, maxBytes = 256 * 1024 } = {}) {
   }
 }
 
+/**
+ * 事件流尾巴（2026-10-28 加）。
+ *
+ * 为什么日志文件不够：`watched:` 这种计数是**写进 events.jsonl 的 meta 事件**，
+ * 日志文件里一个字都没有；`bili_watch` 当年也压根没写日志。于是用户那边
+ * 「看不到画面」时，导出包里没有任何东西能回答「今天到底看没看过画面」。
+ *
+ * 不 import store.js：那边已经 import 了本文件，反向引用会成环。路径规则很简单，
+ * 就是 `<root>/events.jsonl`，跟 store.paths().events 一致。
+ */
+export function tailEvents(root, { lines = 60, maxBytes = 256 * 1024 } = {}) {
+  const base = root || process.env.DSH_FISH_HOME || join(homedir(), '.dsh-fish')
+  const file = join(base, 'events.jsonl')
+  try {
+    if (!existsSync(file)) return { file, exists: false, bytes: 0, lines: [] }
+    const size = statSync(file).size
+    const readBytes = Math.min(size, maxBytes)
+    const buf = readFileSync(file)
+    const slice = buf.subarray(buf.length - readBytes)
+    const all = slice.toString('utf8').split('\n')
+    // 从尾部读时第一行可能是半截 JSON，丢掉
+    if (readBytes < size) all.shift()
+    const kept = all.filter((l) => l.trim().length > 0)
+    return { file, exists: true, bytes: size, lines: kept.slice(-lines), total: kept.length }
+  } catch (err) {
+    return { file, exists: false, bytes: 0, lines: [], why: String(err?.message ?? err) }
+  }
+}
+
 export function clearLog(root) {
   try {
     const file = logFile(root)
@@ -167,9 +196,22 @@ export function redactConfig(cfg) {
 
 /**
  * 导出包：一次给 AI 看够。
- * 顺序按"排查时最先想看什么"排：环境 → 自检 → 配置 → 日志 → 宿主报错。
+ * 顺序按"排查时最先想看什么"排：环境 → 模型 → 自检 → 工具面 → 事件流 → 日志 → 宿主报错。
+ *
+ * 2026-10-28 加了三样（用户 m06256 点名要的，起因是另一台机器「看不到画面」查不出所以然）：
+ *   ① `restrict.effective` —— 真下给宿主的名单，与配置里的 allow 分开写；
+ *   ② `model` —— 她那条会话用的哪个模型、支不支持图像输入；
+ *   ③ events.jsonl 尾部 —— `watched:` 计数与失败记录都在事件流里，日志文件里没有。
  */
-export function buildBundle(root, { checks = null, version = '', restrict = null, config = null, lines = 200 } = {}) {
+export function buildBundle(root, {
+  checks = null,
+  version = '',
+  restrict = null,
+  config = null,
+  model = null,
+  eventLines = 60,
+  lines = 200,
+} = {}) {
   const out = []
   const now = new Date()
   out.push('=== 大肥鱼 dsh-fish 运行日志导出 ===')
@@ -178,12 +220,32 @@ export function buildBundle(root, { checks = null, version = '', restrict = null
   out.push(`Node: ${process.version} / 平台: ${platform()} ${arch()}`)
   out.push(`状态库: ${root}`)
 
+  if (model && typeof model === 'object') {
+    // 「她看不见画面」有一半的原因是模型本身不吃图，跟 ffmpeg、跟额度都无关。
+    const who = model.provider || model.model ? `${model.provider ?? '?'} / ${model.model ?? '?'}` : '(读不到)'
+    const img = model.imageInput === true ? '支持' : model.imageInput === false ? '不支持' : '说不准'
+    out.push(`模型: ${who} · 图像输入: ${img}${model.why ? ` · 原因: ${model.why}` : ''}`)
+  }
+
   if (restrict) {
+    const cfgN = (restrict.allow || []).length
+    const eff = Array.isArray(restrict.effective) ? restrict.effective : []
     out.push(
-      `工具面: ${restrict.applied ? '已收窄' : '未收窄'} · 允许 ${(restrict.allow || []).length} 个` +
+      `工具面: ${restrict.applied ? '已收窄' : '未收窄'} · 配置允许 ${cfgN} 个` +
         `${restrict.guard ? ' · 有兜底守卫' : ' · 没有兜底守卫'}` +
         `${restrict.why ? ` · 原因: ${restrict.why}` : ''}`,
     )
+    // 两个数字分开报。0.6.0 那台机器的导出里只有一个「允许 7 个」，
+    // 而实际生效的是 1 个 —— 那一行把排查的人直接带偏了。
+    out.push(
+      eff.length
+        ? `实际生效: ${eff.length} 个（${eff.join(' / ')}）`
+        : `实际生效: 没收窄 —— 这一局她看得见全部工具`,
+    )
+    const missing = (restrict.allow || []).filter((n) => !eff.includes(n))
+    if (eff.length && missing.length) {
+      out.push(`名单里没生效的: ${missing.join(' / ')}`)
+    }
   }
 
   if (checks && Array.isArray(checks.items)) {
@@ -193,6 +255,14 @@ export function buildBundle(root, { checks = null, version = '', restrict = null
       const mark = it.ok ? 'OK ' : 'BAD'
       out.push(`${mark} ${it.label || it.id}: ${it.detail || ''}${it.fix ? ` | 修法: ${it.fix}` : ''}`)
     }
+  }
+
+  // 事件流尾部：`watched:` 是「今天看没看过画面」的唯一凭证，
+  // 失败记录也只在事件流里（日志文件里当年一条都没写，见 watch.js）。
+  if (eventLines > 0) {
+    const ev = tailEvents(root, { lines: eventLines })
+    out.push('', `--- 事件流（最近 ${ev.lines.length} 条，文件共 ${ev.bytes} 字节）---`)
+    out.push(ev.exists ? (ev.lines.length ? ev.lines.map((l) => scrub(l)).join('\n') : '(空)') : '(还没有 events.jsonl)')
   }
 
   const log = tailLog(root, { lines })

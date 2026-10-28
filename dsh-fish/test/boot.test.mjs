@@ -8,7 +8,7 @@ import { apply, name, inject } from '../lib/index.js'
 import { readEvents, paths, writeConfig, appendEvent } from '../lib/store.js'
 import { normalizeConfig } from '../lib/settings.js'
 import { deriveSelf } from '../lib/derive.js'
-import { startScheduler, wakeNow, wakeTimeLine } from '../lib/scheduler.js'
+import { startScheduler, wakeNow, wakeTimeLine, shouldLogSkip } from '../lib/scheduler.js'
 import { rememberKnownTools } from '../lib/restrict.js'
 import { dateKey } from '../lib/settings.js'
 import { writeSelfDoc } from '../lib/selfdoc.js'
@@ -614,4 +614,33 @@ test('叫醒的时间行：手动的说清谁按的，定时的说清是她自�
     wakeTimeLine(at(20, 43), { manual: false }),
     '现在是 20:43，这一次是你自己醒的。',
   )
+})
+
+// 回归（2026-10-28 用户发来的运行日志）：22:15→23:00 每分钟一条
+// `skip 今日主动唤醒已满(1/1)`，几十行同样的字把日志刷满，
+// 真正的报错（工具有没有注册上）反而被埋掉。配额当天固定，原因没变就别重述。
+test('调度器 skip 日志：同一小时同一原因只记一条，换小时或换原因才再记', () => {
+  const at = (h, m = 0) => new Date(2026, 9, 28, h, m).getTime()
+  const why = '今日主动唤醒已满(1/1)'
+
+  // 第一次：要记
+  const first = shouldLogSkip('', '2026-10-28', at(22, 15), why)
+  assert.match(first, /^2026-10-28T22\|/)
+  assert.ok(first.includes(why))
+
+  // 同一小时、同一原因：返回空字符串 = 不该写
+  assert.equal(shouldLogSkip(first, '2026-10-28', at(22, 16), why), '')
+  assert.equal(shouldLogSkip(first, '2026-10-28', at(22, 59), why), '')
+
+  // 换成下一个小时：再记一条
+  const nextHour = shouldLogSkip(first, '2026-10-28', at(23, 0), why)
+  assert.match(nextHour, /^2026-10-28T23\|/)
+
+  // 同一小时但原因变了（配额类型不同）：也要记
+  const otherWhy = shouldLogSkip(first, '2026-10-28', at(22, 30), '今日事件已满(1/1)')
+  assert.match(otherWhy, /今日事件已满/)
+
+  // 跨到第二天同一钟点：日期变了，照样记
+  const nextDay = shouldLogSkip('2026-10-28T22|' + why, '2026-10-29', at(22, 5), why)
+  assert.match(nextDay, /^2026-10-29T22\|/)
 })

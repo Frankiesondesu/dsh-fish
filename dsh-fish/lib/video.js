@@ -79,7 +79,12 @@ export async function grabFrames(o = {}) {
   const ff = o.ffmpeg ?? detectFfmpeg()
   if (!ff.ok) return fail(`本机没有可用的 ffmpeg（${ff.why}）。装好后重试，或先只看文字。`)
 
-  const client = o.client ?? createClient({})
+  // cookie 要在建客户端**之前**读：看画面是登录态才稳的（issue #5 里那台机器匿名 → 更容易被风控）。
+  // 顺手把 2026-10-25 那个「readOwner 是 async 却在同步 IIFE 里调」的坑一并收干净：只读一次，两处共用。
+  let cookie = ''
+  try { cookie = (await readOwner(root))?.cookie ?? '' } catch { cookie = '' }
+
+  const client = o.client ?? createClient({ cookie })
   let info
   try {
     info = await client.view(bvid)
@@ -101,10 +106,6 @@ export async function grabFrames(o = {}) {
 
   const url = pu.data.url
   const duration = Number(info.data?.duration ?? pu.data?.duration ?? 0) || 0
-  // 2026-10-25 修：readOwner 是 async —— 这里原来在同步 IIFE 里调它，
-  // 拿到的是 Promise，cookie 永远为空，看画面就成了匿名请求。
-  let cookie = ''
-  try { cookie = (await readOwner(root))?.cookie ?? '' } catch { cookie = '' }
   const headers = headersFor(bvid, cookie)
 
   // 每帧一个临时 PNG，最后 tile 成一张

@@ -26,13 +26,14 @@ import { createClient } from './bili.js'
 import { gather, browseCountToday, recordBrowse, itemsFromEvents } from './browse.js'
 import { renderWatchList } from './history.js'
 import { fetchCover, coverLines } from './cover.js'
-import { riskState, browsePlan, noteRisk } from './risk.js'
+import { riskState, browsePlan, noteRisk, isRiskCode } from './risk.js'
 import { scanReplies, renderReplies } from './comment.js'
 import { flushReport } from './report.js'
 import { talkSessionId } from './home.js'
 import { WAKE_TRIGGER } from './wakeconst.js'
 import { refreshSelfDoc } from './selfdoc.js'
 import { setWakeSection, clearWakeSection } from './identity.js'
+import { awayNow, awayLine } from './outing.js'
 
 const TICK_MS = 60_000
 const INITIAL_DELAY_MS = 20_000
@@ -95,6 +96,9 @@ export function startScheduler(ctx, deps = {}) {
   let disposed = false
   let timer = null
   let wakeTimer = null
+  // skip 日志去重（2026-10-28）：同一小时、同一原因只记一次。
+  // 存成 `${dk}T${hour}|${why}` 一行，交给 shouldLogSkip 判。
+  let skipLogged = ''
 
 
   async function tick() {
@@ -103,6 +107,18 @@ export function startScheduler(ctx, deps = {}) {
     // 同一分钟内只算一次（setInterval 漂移保护）
     if (now - lastTick < 30_000) return
     lastTick = now
+
+    // ---- 她出门了 / 被请神了：家里这套日程整段暂停（用户 m07453 第 6 条）----
+    // 两条会话并行会互相踩 events.jsonl：那边在写、这边在读，还会在侧栏里
+    // 凭空多出一条「家里醒了」的对话。回家或结束请神后自动恢复，不需要开关。
+    // 台账坏掉就照常跑——不能因为一个新文件读不了，让她在家里彻底不动。
+    try {
+      const away = await awayNow(root)
+      if (away.kind) {
+        log('away', awayLine(away))
+        return
+      }
+    } catch { /* 静默放行 */ }
 
     try {
       // ---- 冷落检测：先测，再决定叫不叫她 ----
@@ -131,10 +147,33 @@ export function startScheduler(ctx, deps = {}) {
       const decision = plan(model, config, counts, events, { squeeze: gapSqueeze(gapSinceLastWake(events)) })
 
       if (decision.action === 'quiet') {
+        // 2026-10-28 修（用户 m06971）：原来每分钟写一条。
+        //
+        // tick 每 60 秒跑一次，而 quiet 既不带 `wake:` 前缀（所以 todayCounts 数不到、
+        // 「每天最多几个事件」拦不住它），也没有任何「今天已经记过」的判断——
+        // 候选池一空，一天就能写几百条。实测 2026-10-27 142 条、10-28 96 条，
+        // 状态卡片上一分钟跳一格「醒了，但今天没有该问的事」。
+        //
+        // 一天记一次就够：它只是给状态卡解释「为什么今天什么都没发生」，不是行动。
+        const alreadyQuiet = events.some((e) => e.type === 'meta' && String(e.text ?? '').startsWith(`quiet:${dk}`))
+        if (alreadyQuiet) {
+          log('quiet', '今天已经记过「没有该问的事」，不再重复写')
+          return
+        }
         await appendEvent({ type: 'meta', text: `quiet:${dk} 无候选模板，今天不打扰` }, { day: model.day, stage: model.stage, source: 'timer' }, root)
         return
       }
       if (decision.action === 'skip') {
+        // 2026-10-28 修（用户反馈日志里 22:15→23:00 每分钟一条「今日主动唤醒已满」）：
+        // 和上面的 quiet 一样，skip 也不带 `wake:` 前缀，todayCounts 拦不住它，
+        // 于是「今天已经满了」这件事被重复写上几百遍——日志被这些行淹没，
+        // 真正的报错（比如工具没注册上）反而看不见。
+        //
+        // 同一个原因一小时最多记一条：配额是当天固定的，原因不变就没必要重述。
+        // 用内存变量而不是事件流：这只是日志噪音，不值得污染 events.jsonl。
+        const next = shouldLogSkip(skipLogged, dk, now, decision.why)
+        if (!next) return
+        skipLogged = next
         log('skip', decision.why)
         return
       }
@@ -256,7 +295,9 @@ export async function lookBeforeWake(root, model, config, dk, deps, log) {
     const client = deps.client ?? createClient({ log: (...a) => log?.('bili', ...a) })
     const r = await gather(client, model, cfg2, { root, dk, events })
     if (!r.ok || !r.text) {
-      if (/COOLDOWN|-352|-412|-509|风控/.test(String(r.code ?? r.note ?? ''))) noteRisk(root, r.code ?? 'COOLDOWN', deps.now ?? new Date())
+      // 只把 B 站亲自回的 -352/-412/-509 记成持久罚则。
+      // 我们自己的 COOLDOWN（内存里那 60 秒）不是证据，不能记——否则一次小磕碰会自我加码。
+      if (isRiskCode(r.code)) noteRisk(root, r.code, deps.now ?? new Date())
       if (r.note) log?.('browse empty', r.note)
       return empty
     }
@@ -267,9 +308,7 @@ export async function lookBeforeWake(root, model, config, dk, deps, log) {
       picks: r.picks,
     }
   } catch (err) {
-    if (/COOLDOWN|-352|-412|-509|风控/.test(String(err?.code ?? err?.message ?? ''))) {
-      noteRisk(root, err?.code ?? 'COOLDOWN', deps.now ?? new Date())
-    }
+    if (isRiskCode(err?.code)) noteRisk(root, err?.code, deps.now ?? new Date())
     log?.('browse failed', err?.message ?? err)
     return empty
   }
@@ -667,4 +706,26 @@ export function gapSqueeze(gapDays) {
   if (g >= 4) return 0.35
   if (g >= 2) return 0.5
   return 1
+}
+
+/**
+ * skip 日志要不要写（2026-10-28）。
+ *
+ * 背景：用户发来的运行日志里，22:15 到 23:00 每分钟一条
+ * `skip 今日主动唤醒已满(1/1)`，几十条同样的字把日志刷满，
+ * 真正的报错（比如工具有没有注册上）反而被埋掉。
+ *
+ * 配额是当天的固定值，原因不变就没有重述的必要：同一小时 + 同一原因只记一条。
+ * 纯内存判定，不写 events.jsonl——这只是日志噪音，不该污染她的记忆。
+ *
+ * @param {string} prev  上一次的记录，形如 `2026-10-28T22|今日主动唤醒已满(1/1)`
+ * @param {string} dk    日期键 YYYY-MM-DD
+ * @param {number} now   毫秒时间戳
+ * @param {string} why   这次 skip 的原因
+ * @returns {string}     要存下来的新记录；返回等同 prev 时调用方就不该写日志
+ */
+export function shouldLogSkip(prev, dk, now, why) {
+  const hourKey = `${dk}T${new Date(Number(now) || Date.now()).getHours()}`
+  const next = `${hourKey}|${String(why ?? '')}`
+  return next === prev ? '' : next
 }

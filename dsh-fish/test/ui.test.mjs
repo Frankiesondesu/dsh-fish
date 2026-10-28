@@ -33,10 +33,21 @@ test('封面：lazyCover 从 view() 的 data 里取 pic', async () => {
   assert.ok(!src.includes("await import('./owner.js')"), 'owner.js 没有 readOwner，别再动态导入它')
 })
 
-test('观看历史：一天里的条目全部列出，不再只给前 8 条', async () => {
+test('观看历史：条目全部摊平后再分页，没有「只给前 8 条」', async () => {
   const src = await readFile(CLIENT, 'utf8')
-  assert.ok(src.includes('g.items.map('), '所有条目都要渲染')
+  // 2026-10-28（用户 m00416）：从「按天分组、一天只给前 8 条」改成
+  // 「所有天的条目摊平 → 按条翻页，一页 12 条」。所以不许再有 slice(0, 8)，
+  // 并且必须把每组的 items 全部摊进来（不是取第一条、也不是截前几条）。
   assert.ok(!src.includes('g.items.slice(0, 8)'), '旧的 slice(0, 8) 已经拿掉')
+  assert.ok(src.includes('const histFlat = (hist?.groups || []).flatMap('), '要先按天摊平全部条目')
+  assert.ok(src.includes('(g.items || []).map((it) => ({ ...it, date: g.date }))'), '一天里的每条都要进摊平结果')
+  assert.ok(src.includes('const histPageSize = histTotal === 0 ? HIST_PAGE_MAX'), '每页条数按实际量算，不是死数')
+  assert.ok(src.includes('histPerDay > 20 ? 6'), '刷得越密每页越短')
+  // 翻页条要真的能点：两个方向各一个按钮，并且到头会禁用
+  assert.ok(src.includes("onClick: () => setHistPage(histAt - 1) }, '较新')"), '要有「较新」按钮')
+  assert.ok(src.includes("onClick: () => setHistPage(histAt + 1) }, '更早')"), '要有「更早」按钮')
+  assert.ok(src.includes('`第 ${histAt + 1} / ${histPages} 页 · 一页 ${histPageSize} 条`'), '要显示第几页 / 共几页，以及这一页几条')
+  assert.ok(!/const histAt = histPage\\b/.test(src), '页码要收敛在有效范围内（Math.min）')
 })
 
 test('查看文件夹：悬停要说清「只复制路径，不弹窗口」', async () => {
@@ -110,4 +121,16 @@ test('页签选中态不许拿正文墨色当底色（2026-10-25 深色主题下
     '选中页签要用真正的中性强调色 state-business-primary')
   assert.ok(!/\.badge\{[^}]*color:#fff/.test(src), '角标字色同理')
   assert.ok(!/button\.primary\{[^}]*color:#fff/.test(src), '主按钮字色同理')
+})
+
+test('反馈页：开发者 QQ + 群二维码都自带，不引外链（2026-10-28 用户要求）', async () => {
+  const src = await readFile(CLIENT, 'utf8')
+  // 二维码必须走插件自己的 /media 路由。群图挂在第三方图床上，图挂了这页就没用了。
+  assert.ok(src.includes("src: `${API}/media/feedback-qr.jpg`"), '二维码要走 /media 路由')
+  assert.ok(src.includes('1264518494'), '开发者 QQ 号要在页面上')
+  assert.ok(src.includes('615628177'), '群号要在页面上（二维码扫不出来时的兜底）')
+  assert.ok(!/feedback-qr[^`'"]*https?:\/\//.test(src), '二维码不许改成外链')
+  // 页签必须真的挂进渲染树，否则源码里有、界面上点不到。
+  assert.ok(/showTab\('feedback'\) \? feedbackPage : null/.test(src), '反馈页要挂进渲染树')
+  assert.ok(/const feedbackPage = h\('div', \{ className: 'page' \}/.test(src), '要有 feedbackPage')
 })
