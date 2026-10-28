@@ -18,7 +18,7 @@
  */
 
 import { promises as fs } from 'node:fs'
-import { join, resolve, sep } from 'node:path'
+import { join, resolve } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { hostname } from 'node:os'
 
@@ -35,11 +35,24 @@ export const CLAIM_TTL_MS = 45_000
 export const HEARTBEAT_MS = 15_000
 
 const isWin = process.platform === 'win32'
+/** Windows 写法的绝对路径：盘符（D:\）或 UNC（\\server\share）。 */
+const WIN_ABS = /^[a-zA-Z]:[\\/]/
+const UNC_ABS = /^\\\\[^\\]/
 
 /** 归一化路径：绝对化、去掉末尾分隔符、Windows 下忽略大小写。 */
 export function normPath(p) {
   const s = String(p ?? '').trim()
   if (!s) return ''
+  // 2026-10-28 修（CI 在 ubuntu 上红）：`D:\a\home` 这种 Windows 写法的绝对路径，
+  // 在 POSIX 上 resolve() 会把它当**相对路径**拼到 cwd 后面
+  // （变成 /home/runner/.../D:\a\home），后面 isInside 的前缀判断就永远对不上。
+  // 所以这类路径不看当前系统，一律按 Windows 规则归一：分隔符统一成 /、盘符路径小写。
+  if (!isWin && (WIN_ABS.test(s) || UNC_ABS.test(s))) {
+    let out = s.replace(/[\\/]+/g, '/')
+    // 盘符根（C:/）保留末尾斜杠；其余去掉末尾分隔符
+    if (!/^[a-zA-Z]:\/?$/.test(out)) out = out.replace(/\/+$/, '')
+    return WIN_ABS.test(out) ? out.toLowerCase() : out
+  }
   let out = resolve(s)
   // 盘符根（C:\）不能把反斜杠去掉，否则 isInside 的前缀判断会失准
   if (out.length > 3 || (out.length === 3 && !/[\\/]$/.test(out))) {
@@ -66,11 +79,14 @@ export function pidAlive(pid) {
 
 /** child 是不是 parent 本身或在 parent 里。 */
 export function isInside(child, parent) {
-  const c = normPath(child)
-  const p = normPath(parent)
+  // 比较前把两侧分隔符统一成 /：Windows 归一会给反斜杠，POSIX 上给正斜杠，
+  // 混着比（比如 root 是 Windows 写法、cwd 是 POSIX 写法）会误判成「在外面」。
+  const slash = (v) => (v ? v.replace(/[\\/]+/g, '/') : '')
+  const c = slash(normPath(child))
+  const p = slash(normPath(parent))
   if (!c || !p) return false
   if (c === p) return true
-  return c.startsWith(p.endsWith(sep) ? p : p + sep)
+  return c.startsWith(p.endsWith('/') ? p : p + '/')
 }
 
 /** 取路径里最后一段目录名（用于拒绝话术里辨认「哪一栋房子」，不暴露整条路径给模型？这里只给日志用）。 */
