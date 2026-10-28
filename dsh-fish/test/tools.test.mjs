@@ -120,8 +120,11 @@ test('自检按 registry 里真的在不在判断，而不是配置名单', asyn
   assert.ok(HER_TOOLS.includes('read_image'), '收窄名单里得有 read_image，这条用例才成立')
   assert.equal(imgItem.ok, true, `全局表查不到、但收窄认过，不能报红：${imgItem.detail}`)
   assert.match(imgItem.detail, /read_image/)
-  // 整体可能因为别的项（cookie / 宿主接口）红，但「看画面」不能再进要注意清单。
-  assert.doesNotMatch(img.summary, /看画面/)
+  // 整体可能因为别的项（cookie / 宿主接口 / 这台机器没装 ffmpeg）红，但「看画面」这一项不能再红。
+  // 2026-10-28 修（GitHub 的 Windows runner 红）：早先这里断言 summary 不含 /看画面/，
+  // 会把另一项的标题「看画面用的 ffmpeg」也连坐禁掉——那条红说的是 ffmpeg 缺失，跟 read_image 无关。
+  const redIds = img.items.filter((i) => !i.ok).map((i) => i.id)
+  assert.ok(!redIds.includes('read-image'), `「看画面」不能进要注意清单：${img.summary}`)
 
   // ② 全局表里直接看到 ⇒ 绿。
   const allTools = { get: (n) => ({ name: n }) }

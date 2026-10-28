@@ -16,7 +16,7 @@
  */
 
 import { readFileSync } from 'node:fs'
-import { join, resolve, sep } from 'node:path'
+import { join, resolve } from 'node:path'
 import { homedir } from 'node:os'
 import { writeAtomic } from './store.js'
 
@@ -28,7 +28,9 @@ export function homesFile() {
 /** 只比较用：统一小写、去掉尾分隔符。Windows 上盘符与路径大小写都可能变。 */
 export function normRoot(p) {
   let s = resolve(String(p ?? ''))
-  while (s.length > 1 && (s.endsWith(sep) || s.endsWith('/'))) s = s.slice(0, -1)
+  // 2026-10-28 修（CI 在 ubuntu 上红）：POSIX 的 sep 只有 '/'，Windows 写法的尾 `\`
+  // 剥不掉，于是 `…\Home` 与 `…\Home\` 会被判成「换了家」。两种分隔符都剥。
+  while (s.length > 1 && /[\\/]$/.test(s)) s = s.slice(0, -1)
   return s.toLowerCase()
 }
 

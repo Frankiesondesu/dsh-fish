@@ -1,3 +1,14 @@
+## 0.6.10 — 2026-10-28
+
+**GitHub Actions 四个 job 全红：三处「只在 Windows 上成立」的路径判断（2026-10-28 发布后自查）。**
+
+本机 Windows 上 779 条全绿，推到 GitHub 后 `test` workflow 的 ubuntu（Node 20/22/24）与 Windows runner 全红。逐条对日志，全是平台依赖，不是逻辑回归：
+
+- **`normPath` 在 POSIX 上把 Windows 路径当相对路径。** `resolve('D:\\a\\home')` 在 Linux 上会拼到 cwd 后面（变成 `/home/runner/work/dsh-fish/dsh-fish/D:\a\home`），而 `isInside` 又用平台的 `sep` 拼前缀，于是「同一个家有大小写/尾斜杠两种写法」被判成「在外面」——`isInside / normPath`、`checkCaller`、`guardWrite` 三条一起红。现在 `normPath` 先认 Windows 写法的绝对路径（盘符 `^[a-zA-Z]:[\\/]` 或 UNC `^\\\\`）：不管跑在哪个系统都按 Windows 规则归一（分隔符统一成 `/`、盘符路径小写），其余才走 `resolve()`；`isInside` 比较前把两侧分隔符都统一成 `/`，混着比也不会误判。**Windows 上的输出格式一字未变**——`~/.dsh-fish-homes.json` 里已记的家不会被当成新家、不会写假事件。
+- **`normRoot` 剥不掉 Windows 写法的尾 `\`。** POSIX 的 `sep` 只有 `/`，`…\Home\` 与 `…\Home` 被当成两个家（`同一个家的不同写法不算换家` 红）。改成两种分隔符都剥。
+- **自检用例把「缺 ffmpeg」连坐成「看画面坏掉」。** `tools.test.mjs` 早先断言自检摘要不含 `/看画面/`，只为证明「全局工具表查不到 `read_image` 时不能乱报红」；但 GitHub 的 Windows runner 没装 ffmpeg，另一项红项的标题正好叫「看画面用的 ffmpeg」，被这条断言误伤。改成直接断言红项里没有 `read-image` 这一项，不再拿文案做代理。
+- 验证：本机 `node --test` **779 tests / pass 779 / fail 0**；另用 POSIX 语义模拟（`D:\deepseekagent\04-小工具\posix-sim.mjs`）逐条复算了 ubuntu 上那几个断言，确认修对了。
+
 ## 0.6.9 — 2026-10-28
 
 **反馈页的「常见问题解答」点了没反应；刷视频记录翻不了页（2026-10-28 用户 m00416）。**
