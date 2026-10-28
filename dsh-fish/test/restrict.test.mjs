@@ -367,7 +367,7 @@ test('own 层（dsh-ops 的 ops_*）能进白名单，但不会被塞给 restric
       },
     },
   }
-  registerToolRestrict(ctx, { herDir: 'C:\h', extra: ['ops_bash'], log: () => {} })
+  registerToolRestrict(ctx, { herDir: 'C:\\h', extra: ['ops_bash'], log: () => {} })
   ctx.emit('agent/created', { agent })
 
   // 白名单校验：ops_bash 是真名字，得能存

@@ -124,8 +124,9 @@ test('profile 里那条依赖分得清"开发版"和"可升级的安装"', () =>
 })
 
 test('从模块路径反推 profile 目录：link 安装（真身在源码目录）要识别为"没有 profile"', () => {
-  const winUrl = pathToFileURL('C:/Users/DANG/.dsh/profiles/desktop/node_modules/dsh-fish/lib/selfupdate.js').href
-  assert.equal(profileDirOf(winUrl).replace(/\\/g, '/'), 'C:/Users/DANG/.dsh/profiles/desktop')
+  const winUrl = 'file:///C:/Users/DANG/.dsh/profiles/desktop/node_modules/dsh-fish/lib/selfupdate.js'
+  const got = profileDirOf(winUrl).split(String.fromCharCode(92)).join('/').replace(/^\/(?=[A-Za-z]:)/, '')
+  assert.equal(got, 'C:/Users/DANG/.dsh/profiles/desktop')
   const linkUrl = pathToFileURL('D:/deepseekagent/02-我的项目/大肥鱼/plugin/lib/selfupdate.js').href
   assert.equal(profileDirOf(linkUrl), '')
 })
@@ -375,6 +376,7 @@ test('状态机：下载 → 验过 = prepared；没下好之前装不了', asyn
       current: '0.6.13',
       moduleUrl,
       exe: 'C:\\App\\DeepSeek Harness.exe',
+      platform: 'win32',
       downloadImpl: async ({ dir }) => {
         await mkdir(dir, { recursive: true })
         await writeFile(join(dir, 'x.tgz'), 'x')
@@ -413,6 +415,7 @@ test('下载失败进 failed，error 原样给界面；再点一次能从 failed
       current: '0.6.13',
       moduleUrl,
       exe: 'C:\\App\\DeepSeek Harness.exe',
+      platform: 'win32',
       downloadImpl: async () => {
         calls += 1
         return calls === 1 ? { ok: false, error: '三次都没连上' } : { ok: true, bytes: 10, source: '源' }
@@ -452,6 +455,7 @@ test('非桌面版（execPath 是 node）不许装：没有能重开的目标就
       current: '0.6.13',
       moduleUrl,
       exe: 'C:\\Program Files\\nodejs\\node.exe',
+      platform: 'win32',
       downloadImpl: async () => ({ ok: true, bytes: 1, source: '源' }),
     })
     await up.start('0.6.14')
@@ -502,6 +506,7 @@ test('安装：写好脚本、起在子进程里、状态切到 installing', asy
       current: '0.6.13',
       moduleUrl,
       exe: 'C:\\App\\DeepSeek Harness.exe',
+      platform: 'win32',
       downloadImpl: async () => ({ ok: true, bytes: 2048, source: '源' }),
       spawnImpl: (cmd, args, opts) => {
         spawned.push({ cmd, args, opts })
