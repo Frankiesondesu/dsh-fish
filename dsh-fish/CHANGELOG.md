@@ -1,3 +1,17 @@
+## 0.7.1 — 2026-10-29
+
+只修 CI，产品代码没动。
+
+0.7.0 推上去之后 GitHub Actions 的 Linux 三个 job 红了，Windows job 绿。四条失败全在测试里，是「只在 Windows 上成立」的假设：
+
+1. `test/restrict.test.mjs` 的「own 层能进白名单」：`herDir` 写的是 `'C:\h'`，JS 里其实是 `C:h`（反斜杠被吃掉），而 cwd 写的是 `'C:\\h'`（真值 `C:\h`）。Windows 上 `resolve('C:h')` 恰好归一回 `C:\h`，所以本地一直绿；Linux 上会拼到 cwd 后面，两个路径不相等，`isHerAgent` 判 false，restrict 根本没被调用。现在两边写同一种字面量。
+2. `test/selfupdate.test.mjs` 的 profile 反推：用 `pathToFileURL('C:/Users/…')` 造 URL，Linux 上会把盘符当相对路径拼到 cwd 后面。改成字面 `file:///C:/…`，断言时把 `/C:/…` 归一成 `C:/…`。
+3. 两个安装用例（「非桌面版不许装」「安装：写好脚本…」）没有显式给 `platform`，`install()` 先查「是不是 Windows」再查「有没有 exe」，Linux 上先撞前一条，拿不到预期的错误。现在显式传 `platform: 'win32'`。
+
+顺手给另外两个自更新用例也补了 `platform: 'win32'`（它们本来不装，补上更明确）。
+
+回归：`node --test` 全量 **883 passed / 0 failed**；另用 `path.posix` 复算了上面两处判据（restrict 的 `normDir` 相等、profileDirOf 归一出 `C:/…`），确认在 Linux 上也会过。
+
 ## 0.7.0 — 2026-10-29
 
 **把 0.6.12–0.6.32 这二十一个本地版本合成一次发布。对外只发这一版；下面按主题并成一份，逐版本的细节仍留在 0.6.12–0.6.32 各条目里。**
