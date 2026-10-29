@@ -21,10 +21,12 @@ import { registerHerDiary } from './herdiary.js'
 import { registerWatch } from './watch.js'
 import { registerLetter } from './letter.js'
 import { registerBringBack } from './keep.js'
+import { registerAsk } from './ask.js'
 import { registerObserve } from './observe.js'
 import { startScheduler } from './scheduler.js'
 import { registerTurns } from './turns.js'
 import { bootstrapHome, homeStatus, wakeIfBlank } from './home.js'
+import { ensurePocketOrder, findPocketWorkspace } from './pocket.js'
 import { noteRoot } from './homes.js'
 import { writeSelfDoc } from './selfdoc.js'
 import { claimRoot, beatRoot, releaseRoot, HEARTBEAT_MS } from './tenant.js'
@@ -34,12 +36,13 @@ import { registerToolRestrict } from './restrict.js'
 import { clearWakeSection, registerIdentity } from './identity.js'
 import { registerPossession } from './possess.js'
 
+import { checkUpgrade } from './upgrade.js'
 import { logBoot, makeLogger } from './log.js'
 
 export const name = 'dsh-fish'
 
 /** 版本号：只用于日志导出（排查时第一件事是确认跑的是哪一版）。 */
-export const VERSION = '0.7.6'
+export const VERSION = '0.8.0'
 
 // ⚠️ 一个数组写全，不要拆成对象
 // `userQuestions`（0.7.5）：让她能在会话里直接问那个人（带东西回家、解锁申请）。
@@ -61,10 +64,23 @@ export function apply(ctx, baseConfig = {}) {
   // 多租户（2026-10-28 m01319）：这个对象是「这个实例认哪个家、它还是不是房主」的唯一真相，
   // 工具注册时按引用传下去 —— boot 之后填进来，工具执行时现读，不做拷贝。
   const tenancy = { root, herDir: '', tenant: { ok: true, instanceId: '', why: '' } }
+  // 升级自检（2026-10-29）：`file:` 装的人常常只换了源目录，跑的还是 node_modules 里的旧副本。
+  // 这里只读不写；查不到就写 skipped，不影响启动。
+  const install = { upgrade: { ok: false, skipped: true, why: '还没查', running: VERSION, source: '', sourcePath: '', profile: '', stale: false } }
   let heartbeat = null
 
   async function boot() {
     logBoot(root, `${VERSION} · ${process.version} · ${process.platform}`)
+    // 先查一次「跑的是不是源目录里那份」：这类问题没有任何报错，只有版本对不上。
+    try {
+      install.upgrade = await checkUpgrade({ version: VERSION })
+      if (install.upgrade.stale === true) {
+        const u = install.upgrade
+        logger.warn(`[dsh-fish] ${u.why}。改的是源目录，装进去的是另一份——要么 pnpm install --force，要么删掉 node_modules\\dsh-fish 再启动。`)
+      }
+    } catch (err) {
+      install.upgrade = { ...install.upgrade, skipped: true, why: String(err?.message ?? err).slice(0, 120) }
+    }
     const { config } = await loadConfig(root)
     // 她自己的房间必须先存在：她的会话 cwd 指向这里（不是 root），
     // 这样她不会一睁眼就站在自己的 events.jsonl 旁边。
@@ -240,6 +256,24 @@ export function apply(ctx, baseConfig = {}) {
     const doc = await writeSelfDoc(root, { log: (...a) => logger.warn(...a), tenant: tenancy.tenant })
     if (!doc.ok) logger.warn(`[dsh-fish] 身份文件写不出来：${doc.why}`)
 
+    // ---- 侧栏顺序：口袋排在她的家下面（2026-10-30 用户 m01078）----
+    // 口袋第一次出门才建，比她的家晚，却排在它上面——用户要的是
+    // ①大肥鱼的家 ②出门口袋 ③之后才是宿主本来建的那些。
+    // 走宿主正规入口 insertBefore，不手改 workspace.json（那份是宿主内存态）。
+    // 已经在正确位置就什么都不做（幂等）；失败只记日志，不挡任何事。
+    try {
+      const found = findPocketWorkspace(ctx, config)
+      const homeWs = String(home?.wsId ?? '') || String((await homeStatus(root)).wsId ?? '')
+      if (found.registered && homeWs) {
+        const order = await ensurePocketOrder(ctx, { pocketWsId: found.wsId, homeWsId: homeWs })
+        if (order.retitled) logger.info('[dsh-fish] 工作园区的工作区名已统一')
+        if (order.ok && order.moved) logger.info('[dsh-fish] 工作园区已排到大肥鱼的家下面')
+        else if (!order.ok) logger.info(`[dsh-fish] 口袋排序跳过：${order.why}`)
+      }
+    } catch (err) {
+      logger.warn(`[dsh-fish] 口袋排序失败：${String(err?.message ?? err).slice(0, 120)}`)
+    }
+
     // ---- 侧栏轮数：在侧栏亲口跟她说话也算一轮（issue #6，2026-10-28）----
     // 原来只有 /say 路由会 bumpTurns，用户直接打字时 rotateAfter 永不触发。
     // 观察者只读会话事件，认来源是"真人打的"，一轮结束再结账。
@@ -256,7 +290,14 @@ export function apply(ctx, baseConfig = {}) {
       for (const reg of [
         () => registerCapture(ctx, { root, tenant: tenancy }),
         () => registerLook(ctx, { root, client: baseConfig.client }),
-        () => registerSpeak(ctx, { root, client: baseConfig.client, tenant: tenancy }),
+        // 工具说明随说话开关走（2026-10-29）：关着时身份文档里没有「在网上说话」那一节，
+        // 说明里就不该再许诺"可以留评论"。启动时按当时读到的配置定一次，之后由 execute 同步。
+        () => registerSpeak(ctx, {
+          root,
+          client: baseConfig.client,
+          tenant: tenancy,
+          speakEnabled: config?.comment?.enabled === true,
+        }),
         () => registerRecall(ctx, { root }),
         // issue #7：日记不进事件流，所以她需要一个只读的窗口回头翻（her_diary）。
         () => registerHerDiary(ctx, { root }),
@@ -265,6 +306,9 @@ export function apply(ctx, baseConfig = {}) {
         () => registerLetter(ctx, { root, tenant: tenancy }),
         // 0.6.17：纪念品。她只能「问」，真带回去要那个人在出门页点头。
         () => registerBringBack(ctx, { root, tenant: tenancy }),
+        // 0.7.6（2026-10-30 m01274）：请求事件。她有事想征得同意时弹一张卡，
+        // 每天 1 次、每周 3 次；只有 time / rest 真会改东西（见 lib/ask.js）。
+        () => registerAsk(ctx, { root, tenant: tenancy }),
       ]) {
         try {
           const d = reg()
@@ -277,7 +321,7 @@ export function apply(ctx, baseConfig = {}) {
     }
 
     // 观测台路由
-    const obs = registerObserve(ctx, { root, version: VERSION, tenancy })
+    const obs = registerObserve(ctx, { root, version: VERSION, tenancy, install })
     if (obs?.dispose) disposers.push(() => obs.dispose())
 
     // 生物钟：把屋子信息一起传下去。她每晚醒来说话要落进**同一个**会话，

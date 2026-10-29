@@ -24,6 +24,14 @@ export const ALL_TYPES = Object.freeze([
   // R3（2026-10-24）：她自己提出「我能不能改一条规矩」→ 由主人裁决。
   // 两种都只能宿主写，她写不了（不在 HER_TYPES 里）。
   'grant_offer', 'grant',
+  // 请求事件（2026-10-30，用户 m01274/m01292）：她有件事想征得同意 → 一张卡。
+  // ask = 她问的那一句（工具 ask_owner 写，source 是 system）；answer = 那个人怎么答。
+  // 和 grant 一样只由宿主写：她能伪造一条 ask，就等于替自己批准了。
+  'ask', 'answer',
+  // 旁听（2026-10-30，用户 m00112 批准 A2）：他说的**一句原话**，每几轮记一次。
+  // 不解释、不加工——她翻到时看到的是「他说：…」，不是"他当时的意思是…"。
+  // 系统侧写（不在 HER_TYPES 里）：她不能凭空造一句"他说过"。
+  'heard',
 ])
 
 /**
@@ -250,6 +258,8 @@ export function validateEvent(raw, { day, stage, now = Date.now(), source = 'too
     flags,
     // R3：申请与裁决都带一个 grant 子对象，其余事件不带（undefined 不落 JSON）。
     ...(type === 'grant_offer' || type === 'grant' ? { grant: normalizeGrant(type, raw.grant) } : {}),
+    // 请求事件：ask 带她问的事，answer 带裁决（并指回 askId）。同样只由系统写。
+    ...(type === 'ask' || type === 'answer' ? { ask: normalizeAsk(type, raw.ask) } : {}),
     // 拒绝的形状（P1 第二块，2026-10-24）：原话照样留在 text 里，
     // 另外落一份「动作 + 对象」，让后来的她（和观测台）能分清
     // "不想看这个视频" 与 "不想被安排" 是两个不同的不。
@@ -281,5 +291,39 @@ function normalizeGrant(type, raw) {
     reason: str(g.reason, 200),
   }
   if (type === 'grant' && g.expiresAt) out.expiresAt = str(g.expiresAt, 40) || null
+  return out
+}
+
+/**
+ * ask 子对象（请求事件，0.7.6）：她问的事与那个人的回答共用。
+ *
+ * 为什么 ask 的 text 存她问的原话、这里只存结构：界面要原样显示她的语气，
+ * 而 kind / subject / options 是系统做配额、生效与观测台统计时用的字段。
+ * answer 的 text 是那个人可能留的一句说明（可以空，validateEvent 会填占位）。
+ */
+function normalizeAsk(type, raw) {
+  const a = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {}
+  const str = (v, max) => (typeof v === 'string' ? v.slice(0, max) : '')
+  const out = {
+    kind: str(a.kind, 24),
+    subject: str(a.subject, 120),
+    options: Array.isArray(a.options)
+      ? a.options.map((x) => str(typeof x === 'string' ? x : x?.label, 24)).filter(Boolean).slice(0, 4)
+      : [],
+    reason: str(a.reason, 200),
+    askId: str(a.askId, 64),
+    verdict: a.verdict === 'approve' || a.verdict === 'reject' || a.verdict === 'later' ? a.verdict : null,
+    via: str(a.via, 16),
+  }
+  // 只有 time 会带 value（新时���与次数），其余 kind 不允许借这个口子改配置。
+  if (type === 'ask' && a.value && typeof a.value === 'object' && !Array.isArray(a.value)) {
+    const v = {}
+    if (Number.isFinite(Number(a.value.wakesPerDay))) v.wakesPerDay = Math.max(0, Math.min(4, Math.round(Number(a.value.wakesPerDay))))
+    if (Array.isArray(a.value.window) && a.value.window.length === 2) {
+      const w = a.value.window.map((x) => str(x, 5))
+      if (/^([01]\d|2[0-3]):[0-5]\d$/.test(w[0]) && /^([01]\d|2[0-3]):[0-5]\d$/.test(w[1]) && w[0] !== w[1]) v.window = w
+    }
+    if (Object.keys(v).length) out.value = v
+  }
   return out
 }

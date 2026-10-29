@@ -263,15 +263,19 @@ export function deriveSelf(events = [], opts = {}) {
   const now = Number(opts.now ?? Date.now())
   const growthDays = clampInt(opts.growthDays ?? 30, 7, 180, 30)
   const ordered = orderEvents(events)
-  // 出门审查：回家卡上被取消勾选的条目，靠追加的一条 meta 记着它们的 id。
+  // 出门/请神的审查：回家卡上被取消勾选的条目，靠追加的一条 meta 记着它们的 id。
   // 事件流只能追加（第 5 条铁律），所以「不收下」= deriveSelf 跳过，而不是删行。
   // 原文仍在，观测台/导出照样看得见。
+  // 两条路各一个前缀（2026-10-29 m02241 第④条）：出门 `outing-reject:`，
+  // 请神 `possess-reject:`——同一套收下/驳回语义，但要分得清是哪条路留下的。
+  const REJECT_PREFIXES = ['outing-reject:', 'possess-reject:']
   const rejectedIds = new Set()
   for (const e of ordered) {
     if (e.type !== 'meta') continue
     const t = String(e.text ?? '')
-    if (!t.startsWith('outing-reject:')) continue
-    for (const id of t.slice('outing-reject:'.length).split(/[\s,]+/)) if (id) rejectedIds.add(id)
+    const prefix = REJECT_PREFIXES.find((p) => t.startsWith(p))
+    if (!prefix) continue
+    for (const id of t.slice(prefix.length).split(/[\s,]+/)) if (id) rejectedIds.add(id)
   }
   const evs = rejectedIds.size ? ordered.filter((e) => !rejectedIds.has(e.id)) : ordered
   const seedEv = evs.find((e) => e.type === 'seed')

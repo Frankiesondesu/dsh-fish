@@ -241,6 +241,10 @@ window.__ModuleLoader__.load({
       const [reports, setReports] = useState({ dates: [], date: null, md: '' })
       const [inbox, setInbox] = useState(null)
       const [home, setHome] = useState(null)
+      // 请求事件（0.7.6，m01274）：她问过什么、答过什么。只在住所页用到。
+      const [asks, setAsks] = useState(null)
+      // 请求事件：在这里补答之后的提示（弹卡答过的就不写了）。
+      const [askMsg, setAskMsg] = useState('')
       const [mem, setMem] = useState(null)
       // 规则与解禁（R3，2026-10-24）：四层规则 + 她提上来的那一张申请
       const [rules, setRules] = useState(null)
@@ -248,6 +252,11 @@ window.__ModuleLoader__.load({
       const [rotateAfter, setRotateAfter] = useState(40)
       const [docBudget, setDocBudget] = useState(1800)
       const [beliefsShown, setBeliefsShown] = useState(3)
+      // 旁听（A2，2026-10-30）：每几轮记一句你说过的话（0 = 不记）
+      const [hearEvery, setHearEvery] = useState(3)
+      // 记忆体检（0.7.6，2026-10-30 用户 m00342）：点一下才算，不自动跑。
+      const [health, setHealth] = useState(null)
+      const [healthBusy, setHealthBusy] = useState(false)
       const [toolsAllowText, setToolsAllowText] = useState('')
       const [toolsRestrict, setToolsRestrict] = useState(true)
       // 白名单草稿态（2026-10-24，用户要求）：输入框里的字先不提交，
@@ -478,11 +487,12 @@ window.__ModuleLoader__.load({
           setDataPaths(pth)
           // 迁移工作区：只读她现在住哪、有多少东西（失败就只显示按钮，不影响别处）
           jget('/move').then(setMoveInfo).catch(() => {})
-          // 出门：现在在哪、有哪些工作区可去（失败就只显示空页，不影响别处）
-          // 顺带带回 dev：只有开发副本才把「出门」页露出来（0.6.6 发布版先藏着）。
-          jget('/outing').then((o) => { setOuting(o); setDevMode(o?.dev === true) }).catch(() => {})
+          // 出门：现在在哪、有哪些工作区可去、说明卡确认过没有（失败就只显示空页）
+          jget('/outing').then(setOuting).catch(() => {})
           // 请神：现在上身在哪条、哪些对话可以请（失败就只显示空卡）
           jget('/possession').then(setPossess).catch(() => {})
+          // 请求事件：她问过什么、哪些还没答（失败就只显示空卡）
+          jget('/ask').then(setAsks).catch(() => {})
           // 上下文与记忆：单独取，失败不影响其它卡片
           jget('/memory').then(setMem).catch(() => {})
           // 她以前看过什么 / 风控状态：都是只读，失败不影响其它卡片
@@ -530,6 +540,7 @@ window.__ModuleLoader__.load({
           setToolsRestrict(cfg.tools?.restrict !== false)
           setDocBudget(Number(cfg.memory?.docBudget ?? 1800))
           setBeliefsShown(Number(cfg.memory?.beliefsShown ?? 3))
+          setHearEvery(Number(cfg.memory?.hearEvery ?? 3))
           setGrowthDaysUi(Number(cfg.growthDays ?? 30))
           setDiaryKeep(Number(cfg.diary?.keepDays ?? 0))
           setBrowseDeepRead(Number(cfg.browse?.deepRead ?? 6))
@@ -648,7 +659,7 @@ window.__ModuleLoader__.load({
         notify: { enabled: notifyOn },
         chat: { rotateAfter: Number(rotateAfter), replyChars: Number(replyChars) },
         tools: { restrict: Boolean(toolsRestrict), allow: toolsAllowSaved },
-        memory: { docBudget: Number(docBudget), sleepEveryDays: Number(sleepEvery), sleepKeep: Number(sleepKeep), beliefsShown: Number(beliefsShown) },
+        memory: { docBudget: Number(docBudget), sleepEveryDays: Number(sleepEvery), sleepKeep: Number(sleepKeep), beliefsShown: Number(beliefsShown), hearEvery: Number(hearEvery) },
         comment: {
           enabled: commentOn,
           perDay: Number(commentPerDay),
@@ -1068,7 +1079,7 @@ window.__ModuleLoader__.load({
       const toolsCard = h('div', { className: 'card' },
         h('h3', null, '手上能用什么'),
         h('div', { className: 'dim' },
-          '大肥鱼自己可以调用的工具只有六个：记录想法、查看记忆、发送消息、刷B站、图片识别、评论区评论及回复。',
+          '大肥鱼自己可以调用的工具只有八个：记录想法、翻自己的旧事、翻自己的日记、留一句话、刷 B 站、看视频画面、在评论区说话、有事问你同不同意。另外宿主的 read_image 也留着——她看画面要靠它。',
           '别的插件和技能启用，DSH会把它们的工具定义也塞进上下文——大肥鱼会看到一堆能做各种操作的工具，占用上下文的同时有可能真的尝试调用这些工具。',
           '为了保证大肥鱼不会被插件能力污染，保持原生状态健康成长，禁用了其他能力（只影响和大肥鱼对话框的能力调用，不影响其他对话框的正常工具调用）。'),
         h('div', null, Toggle({
@@ -1191,6 +1202,22 @@ window.__ModuleLoader__.load({
               state?.home?.blockedWhy || '把另一个关掉之后，这边下次启动会自己接管。'),
             h('div', { className: 'dim' },
               '想真正并存，就别让两个家共用一个 root：在 cordis.patch.yml 里给每个条目配不同的 root。'))
+        : null
+
+      // 升级自检（2026-10-29）：正在跑的这一份跟 profile 里那条 `file:` 源目录版本对不上。
+      // 典型画面：robocopy 覆盖了源目录、重启了，界面还是老样子——因为加载的是 node_modules 里的副本。
+      const upgradeCard = state?.upgrade?.stale === true
+        ? h('div', { className: 'card full' },
+            h('h3', null, state.upgrade.older ? '源目录里那份比正在跑的旧' : '升级没有真正装进去'),
+            h('div', { className: 'dim' }, state.upgrade.why || '版本对不上。'),
+            h('div', { className: 'dim' },
+              'DSH 加载的是 node_modules\\dsh-fish 里的副本，不是 profile 里写的那条源目录。'
+              + '只覆盖源目录，跑起来的还是旧的：没有报错、也没有日志，因为新代码根本没执行。'),
+            h('div', { className: 'dim' },
+              '修法：关掉 DSH → 在 profile 目录跑 pnpm install --force（或者删掉 node_modules\\dsh-fish）→ 再启动。'),
+            state.upgrade.sourcePath
+              ? h('div', { className: 'dim' }, `源目录：${state.upgrade.sourcePath}`)
+              : null)
         : null
 
       const resetCard = h('div', { className: 'card full' },
@@ -1352,7 +1379,7 @@ window.__ModuleLoader__.load({
           ? h('div', {
               className: 'dim',
               style: { marginTop: '6px', fontSize: '12px', fontWeight: st.away.kind === 'possession' ? 600 : 400 },
-            }, `${st.away.line}${st.away.kind === 'possession' ? '（这条对话此刻是她）' : ''}`)
+            }, `${st.away.line}${st.away.kind === 'possession' ? '（这条对话现在由她来答）' : ''}`)
           : null)
       // ================================================================
       // 设置界面 2.0（2026-10-24 重做）
@@ -1373,23 +1400,22 @@ window.__ModuleLoader__.load({
       //   · 面向用户的字符串里**不出现「她/他」**（test/p5.test.mjs 有硬断言）。
       // ================================================================
 
-      // 出门页只在「开发副本」里露出来（2026-10-28 用户要求）：功能还要真机跑一段时间，
-      // 发布版（npm 装进 node_modules 的那种）先不显示。代码、路由、审查卡都留着。
-      // 是不是开发副本由服务端算（看它自己的 import.meta.url 在不在 node_modules 底下），
-      // 客户端在挂载时从 /outing 读一次；读不到就当发布版，先藏起来。
-      const [devMode, setDevMode] = useState(null)
+      // 出门页从 0.8.0 起对所有人可见（2026-10-30，用户 m01904）：不再看 devMode。
+      // 误用的门改在页面里——第一次进来先点一次「我知道了」，三个入口按钮才放开。
 
       const TABS = [
         ['now', '状态'],
         ['grow', '成长'],
         ['home', '住所'],
         ['bili', '上网'],
+        // 2026-10-30（用户 m02207）出门挪到「上网」和「记忆」中间：它是她离开家去干活，
+        // 跟上网（出门看东西）是同一类事，放在记忆之前更顺。
+        ['outing', '出门'],
         ['memory', '记忆'],
         ['env', '插件'],
         ['principle', '原理'],
         ['data', '数据'],
         ['feedback', '反馈'],
-        ['outing', '出门'],
       ]
 
       // 只有这几个页签里的东西是「改完就写盘」的。没有设置项的页签（状态 / 住所 / 原理 / 数据）
@@ -1400,14 +1426,25 @@ window.__ModuleLoader__.load({
         now: '现在是什么状态、走了多远、在守什么规矩，以及你不在的时候发生了什么。',
         grow: '怎么长大：时间尺度、每天经历多少、日记、隔几天回头想一次。改这些只会让她变快变慢，不会改变她是什么样。',
         home: '住在哪：工作区、会话、身份文件、日记、她留下的小纸条，以及一键自检。',
-        bili: '上网：能不能出门、看多少、看画面、避开什么，以及在评论区说话和登录。',
+        bili: '上网：能不能刷 B 站、看多少、要不要看画面、避开哪些内容，以及在评论区说话和登录。',
         memory: '记忆：一次能背多少、多少条判断被挤出视野。',
         env: '插件：别的插件能往她上下文里塞什么工具，以及为什么默认只放她自己那几个。',
         principle: '原理：两张图讲清她怎么长大、记忆怎么被筛；每条设计从哪条理论来，以及这一套能用在什么场景。',
         data: '数据：都存在哪、每日报告、运行日志，以及重置（有破坏性的操作放在这一页最下面）。',
         feedback: '反馈：找开发者、进交流群。插件有问题、有想要的功能，都可以说。',
-        outing: '出门：送她去别的工作区干活，回来再判这趟算不算数。出门期间家里那套日程会暂停。',
+        outing: '出门：让她去别的工作区干活，回来时由你决定这趟行程学到的东西、写下的记录算不算数。出门期间，家里的日程、日记、刷 B 站都会停。',
       }
+
+      // 出门页顶部的说明卡（2026-10-30，用户 m00650 / m01100）：文字是用户自己写的，
+      // 一个数组元素就是一段。想改说明只改这里，别动下面的渲染结构。
+      const OUTING_INTRO = [
+        '本功能为想要让大肥鱼拥有完整权限和工具干活的用户设计，且附带了一些偏娱乐（但也有些危险）的功能。',
+        '偏实验性，虽然做了人格防护，但是如果你担心可以暂时不用。具体的可以看下面各节。',
+        '工作园区等于一个全新的沙箱全工具无文件记录环境，如果只是想让大肥鱼可以干活，建议选这个。',
+        '想要体验让大肥鱼去别的工作区串门会带来什么戏剧性效果，可以选择送她出门（真身出门）和请神（灵魂出窍）。',
+        '送她出门：开发者本人测试，在人格较为弱小的情况下，选择让大肥鱼去你已经有很多工作性质内容的对话框去接班，会导致大肥鱼的人格几乎被消弭，最终沦为一个助手性质的输出（因为上下文很多都是说你是一个助手），并且会读取到该工作区的记忆插件、交接文档、工作记录，可能会知道很多不该知道的内容（有些东西是全工作区可见，非单条对话框可见）。不确定人格强大之后能不能维持住人格。为了防止意外情况，给了整趟记忆都忘掉的功能（整趟不算），如果你认为她在工作中确实学到了一些东西，可以勾选想要她记住的内容。',
+        '请神：开发者本人测试，人格保留和表现较为完整，会在自身认知的基础上，调用工具帮你完成工作。没有读取过多上下文，但是如果你的工作任务是需要她读取上下文，她依然会读很多内容，可能会知道一些不该知道的内容（有些东西是全工作区可见，非单条对话框可见）。同样有整趟忘记和保留记录的功能。',
+      ]
 
       // 阶段与门：写清楚，因为「下一个成长瓶颈」这几个字原来没人看得懂。
       // 四行措辞是用户在设置页上亲手写的（2026-10-24），已固化进源码，别再改回短的。
@@ -1454,8 +1491,7 @@ window.__ModuleLoader__.load({
       //   · 保存 → 删掉，因为每个设置页底部本来就有「保存改动」，
       //     顶上再放一个同样的按钮，只会让人猜「这两个是不是不一样」。
       const tabBar = h('div', { className: 'tabs' },
-        // 出门页是开发预览：发布版不露（devMode 由 /outing 带回来），代码与路由不受影响。
-        ...TABS.filter(([id]) => id !== 'outing' || devMode === true).map(([id, name]) => h('button', {
+        ...TABS.map(([id, name]) => h('button', {
           key: id,
           className: 'tab' + (tab === id ? ' on' : ''),
           title: TAB_HELP[id] || '',
@@ -1528,7 +1564,10 @@ window.__ModuleLoader__.load({
           h('div', { className: 'dim' },
             '看视频画面、读评论、回评都要用到它。存好之后这张卡会自己消失——不想存就点「不用了」，以后不再提示。'),
           h('div', { className: 'row', style: { gap: '8px', marginTop: '6px' } },
-            h('button', { onClick: () => showTab('bili') }, '去上网页存'),
+            // issue #12（TulleyT，2026-10-29）：这里原写 showTab('bili')，而 showTab 是
+            // 「现在是不是这个页」的判据（返回布尔），真正的切换是 setTab。返回值被丢弃，
+            // 所以点了既不跳页也不报错。从 0.6.1 起就这样，一直没人点到过。
+            h('button', { onClick: () => setTab('bili') }, '去上网页存'),
             h('button', {
               className: 'ghost',
               onClick: async () => {
@@ -1700,6 +1739,18 @@ window.__ModuleLoader__.load({
 
       // ---------------------------- 住所 ----------------------------
       // 这一页回答的是「东西都在哪」，不是「怎么调她」。
+      // 请求事件：在住所页补答（弹卡超时之后仍能答；答过的不再改）。
+      async function answerAsk(id, verdict) {
+        try {
+          const r = await jpost('/ask', { action: 'answer', askId: id, verdict })
+          setAsks(await jget('/ask'))
+          if (r?.ok) setAskMsg('答好了。')
+          else setAskMsg(String(r?.why || '没答上。'))
+        } catch (e) {
+          setAskMsg(`没答上：${e.message}`)
+        }
+      }
+
       const homePage = h('div', { className: 'page' },
         group('大肥鱼住在哪',
           '侧栏里新增工作区和新增会话，就是她的房间。',
@@ -1731,6 +1782,44 @@ window.__ModuleLoader__.load({
                         h('p', { className: 'dim' }, '大肥鱼刚刚说的'),
                         ...said.map((x) => h('div', { className: 'said', key: x.id }, esc(x.text))))
                     : null))),
+
+        group('她的请求',
+          '她有事想征求你同意的时候，会弹一张卡。这里能看到问过什么、你怎么答的；没答的可以在这里补答。一天最多一次，一周最多三次。',
+          !asks ? h('p', { className: 'empty' }, '读取中…')
+            : (() => {
+                const pend = Array.isArray(asks.pending) ? asks.pending : []
+                const items = (Array.isArray(asks.items) ? asks.items : []).slice().reverse()
+                const wordOf = (a) => {
+                  if (a.pending) return '还没答'
+                  if (a.verdict === 'approve') return '可以'
+                  if (a.verdict === 'reject') return '这次不行'
+                  if (a.verdict === 'later') return '以后再说'
+                  return ''
+                }
+                return h('div', null,
+                  askMsg ? h('p', { className: 'hint' }, askMsg) : null,
+                  pend.length
+                    ? h('div', null,
+                        h('p', { className: 'dim' }, '还没答的'),
+                        ...pend.map((a) => h('div', { className: 'said', key: a.id },
+                          esc(a.question),
+                          h('div', { className: 'row', style: { marginTop: '6px' } },
+                            ...(a.options?.length ? a.options : ['可以', '这次不行']).map((label, i) =>
+                              h('button', {
+                                key: `${a.id}-${i}`,
+                                onClick: () => answerAsk(a.id, i === 0 ? 'approve' : i === 1 ? 'reject' : 'later'),
+                              }, label)),
+                            h('button', { className: 'ghost', onClick: () => answerAsk(a.id, 'later') }, '以后再说')))))
+                    : h('p', { className: 'empty' }, '现在没有等你答的。'),
+                  items.length
+                    ? h('div', { style: { marginTop: '12px' } },
+                        h('p', { className: 'dim' }, '最近的'),
+                        ...items.slice(0, 8).map((a) => h('div', { className: 'said', key: a.id },
+                          esc(a.question),
+                          '　',
+                          h('span', { className: 'tag' }, wordOf(a)))))
+                    : null)
+              })()),
 
         group('日记',
           '如果你在「成长」页勾选了看日记。日记会在这里显示，一天一页，多天时自动出现翻页',
@@ -1985,6 +2074,17 @@ window.__ModuleLoader__.load({
         )
 
       // ---------------------------- 记忆 ----------------------------
+      // 记忆体检（0.7.6，用户 m00342）：只读、点一下才跑，不让它自动轮询。
+      const runHealth = async () => {
+        setHealthBusy(true)
+        try {
+          setHealth(await jget('/health'))
+        } catch (e) {
+          setHealth({ error: String(e?.message || e) })
+        } finally {
+          setHealthBusy(false)
+        }
+      }
       const memoryPage = h('div', { className: 'page' },
         group('上下文',
           '一个侧栏会话聊到几百轮，上下文必然撑爆——不是变慢，是每轮都为几十万字付费，最后直接失败。',
@@ -2001,7 +2101,9 @@ window.__ModuleLoader__.load({
           '当前上下文占用量，查看哪些变为「记不太清」的「久远回忆」。',
           h('div', { className: 'grid2', style: { marginBottom: '10px' } },
             Num({ label: '每轮对话认知记忆条数', value: beliefsShown, onChange: setBeliefsShown, min: 1, max: 8, unit: '条',
-              hint: '调整的是大肥鱼能记住多少自己的定论/判断/信念。数值越大记得越多，更不容易遗忘，但是要消耗更多token，默认推荐3.' })),
+              hint: '调整的是大肥鱼能记住多少自己的定论/判断/信念。数值越大记得越多，更不容易遗忘，但是要消耗更多token，默认推荐3.' }),
+            Num({ label: '每几轮记一句你说的话', value: hearEvery, onChange: setHearEvery, min: 0, max: 50, unit: '轮',
+              hint: '0 = 不记。每 N 轮挑你说过最长的一句原话存成「旁听」，不加解释、不改写；她自己翻回忆时看到的，就是你当时说的那句原话。' })),
           !mem ? h('p', { className: 'empty' }, '读取中…')
             : h('div', null,
                 h('div', { className: 'row', style: { alignItems: 'center', gap: '10px' } },
@@ -2050,6 +2152,45 @@ window.__ModuleLoader__.load({
                   '记忆深刻的认知详细记录；普通认知只有一句话，超出上下文的不重要记忆被折叠，被模糊（不是完全消失，只是可能记不太清）。被反复提起、或被反复检验过的会固定下来（记得很牢）——固定只代表她忘不掉，不代表那句是对的。'),
                 h('p', { className: 'dim', style: { marginTop: '6px' } },
                   '为什么这样做？1.节省token成本2.全量记忆等于提示词污染/强调，会让人格的改变无从发生3.在遗忘发生时，什么能够留下来才是更显珍贵的。'))),
+
+        // ---- 记忆体检（0.7.6，2026-10-30 用户 m00342）----
+        // 只读：按现在的账本算一遍。点一下才跑，不自动轮询，也不给她本人看。
+        group('记忆体检',
+          '按现在的账本算一遍：哪两句话对不上、哪些快忘了、哪些快固定下来了。只读，不会写任何东西，也不算分。',
+          h('div', { className: 'row', style: { marginBottom: health ? '10px' : '0' } },
+            h('button', {
+              className: 'primary',
+              disabled: healthBusy,
+              onClick: runHealth,
+            }, healthBusy ? '体检中…' : '查一下')),
+          !health ? h('p', { className: 'dim' }, '还没查过。点上面那颗按钮才会读账本。')
+            : health.error ? h('p', { className: 'err' }, `没查成：${health.error}`)
+            : h('div', { style: { fontSize: '12.5px', lineHeight: '1.9' } },
+                h('div', null, `· ${health.events ?? 0} 条记录，跨 ${health.days ?? 0} 天；判断 ${health.beliefs ?? 0} 条，记得很牢 ${health.solid ?? 0} 条`),
+                health.empty
+                  ? h('p', { className: 'dim', style: { margin: '4px 0 0' } }, '还太早：等她说出第一条判断，这里才有东西可看。')
+                  : null,
+                (health.tensions ?? []).length
+                  ? h('div', { style: { marginTop: '4px' } }, `· 两句话对不上 ${health.tensions.length} 处`)
+                  : null,
+                ...(health.tensions ?? []).map((t) => h('div', { className: 'dim', key: `${t.a}|${t.b}` }, `　「${t.a}」／「${t.b}」`)),
+                (health.stale ?? []).length
+                  ? h('div', { style: { marginTop: '4px' } }, `· 快被忘掉的 ${health.stale.length} 条（${health.staleDays ?? 21} 天以上没再提起）`)
+                  : null,
+                ...(health.stale ?? []).map((s, i) => h('div', { className: 'dim', key: `s${i}` },
+                  `　「${s.text}」${s.days != null ? ` · ${s.days} 天前` : ''}`)),
+                (health.nearSolid ?? []).length
+                  ? h('div', { style: { marginTop: '4px' } }, `· 快固定下来的 ${health.nearSolid.length} 条`)
+                  : null,
+                ...(health.nearSolid ?? []).map((n, i) => h('div', { className: 'dim', key: `n${i}` },
+                  `　「${n.text}」 · 被提起 ${n.mentions} 次，被检验 ${n.verified} 次`)),
+                (health.byType ?? []).length
+                  ? h('div', { className: 'dim', style: { marginTop: '6px' } },
+                      `记录构成：${health.byType.map((b) => `${b.type} ${b.count}`).join(' · ')}`)
+                  : null,
+                h('p', { className: 'dim', style: { marginTop: '8px' } },
+                  '体检只看账本，不评价对错。两句话对不上不是错误——都可能是她当时真心这么想；快忘掉也不代表不重要，只是还没被反复提起或检验。')),
+        ),
 
         // ---- 原来这里的「信箱」卡 2026-10-29（用户 m02105）搬到住所页，改名「她写的小纸条」----
       )
@@ -2485,20 +2626,35 @@ window.__ModuleLoader__.load({
       // 复用同一趟（0.6.16，用户 m01613）：接着这个工作区上次那条会话。
       const [outingReuse, setOutingReuse] = useState(false)
 
+      // 说明卡看过一遍才放开三个入口（2026-10-30，用户 m01904）。
+      // 只记本地配置——挪了数据目录要重新点一次，这是有意的。
+      async function doAckOuting() {
+        setOutingBusy(true)
+        setOutingMsg('')
+        try {
+          await jpost('/outing', { action: 'ack' })
+          setOuting(await jget('/outing'))
+        } catch (e) {
+          setOutingMsg(`没能记下来：${e.message}`)
+        } finally {
+          setOutingBusy(false)
+        }
+      }
+
       async function doStartOuting() {
         const ws = outingPick || outing?.workspaces?.[0]?.id || ''
         if (!ws) { setOutingMsg('先选一个工作区。'); return }
         setOutingBusy(true)
-        setOutingMsg('正在开门……')
+        setOutingMsg('正在准备……')
         try {
           const row = (outing?.workspaces ?? []).find((w) => w.id === ws)
           const reuseSession = outingReuse && row?.last?.sessionId ? row.last.sessionId : ''
           await jpost('/outing', { action: 'start', workspaceId: ws, sessionId: reuseSession })
           const next = await jget('/outing')
           setOuting(next)
-          setOutingMsg(reuseSession ? '她回到上次那条会话了，接着做。' : '她已经出门了，正在那个工作区里。')
+          setOutingMsg(reuseSession ? '回到上次那条对话了，接着做。' : `她出门了，现在在「${row?.title || ws}」那边。`)
         } catch (e) {
-          setOutingMsg(`派活失败：${e.message}`)
+          setOutingMsg(`没送出去：${e.message}`)
         } finally {
           setOutingBusy(false)
         }
@@ -2507,15 +2663,19 @@ window.__ModuleLoader__.load({
       // 出门口袋（2026-10-28，用户 m01145 拍板「干活模式」）：
       // 干净工作区 + 读拦截 + 保留记忆工具。口袋是一个从没写过记忆的空目录，
       // 每轮注入只剩骨架——她带过去的只有出门那一刻的自己。
+      // 2026-10-30（用户 m00972）：口袋也能选「新建一条」还是「接着上次那条」。
       async function doStartPocket() {
         setOutingBusy(true)
-        setOutingMsg('正在开门……')
+        setOutingMsg('正在准备……')
         try {
-          await jpost('/outing', { action: 'start', pocket: true })
+          const reuseSession = outingReuse && outing?.pocket?.last?.sessionId ? outing.pocket.last.sessionId : ''
+          await jpost('/outing', { action: 'start', pocket: true, sessionId: reuseSession })
           setOuting(await jget('/outing'))
-          setOutingMsg('她去口袋了。那边没有这里的白板，也没有这十几天的账；要交付的东西，等她回来你点头再搬。')
+          setOutingMsg(reuseSession
+            ? '回到园区里上次那条对话了，接着做。'
+            : '她去园区了。那边没有任何会干扰记忆和认知的内容（项目笔记、交接记录等）；要交付的文件，等她回来你点头再搬。')
         } catch (e) {
-          setOutingMsg(`派活失败：${e.message}`)
+          setOutingMsg(`没送出去：${e.message}`)
         } finally {
           setOutingBusy(false)
         }
@@ -2524,14 +2684,14 @@ window.__ModuleLoader__.load({
       // 纪念品（0.6.17）：她问「这件能带回去吗」，这里点头或摇头。
       async function doDecideKeepsake(id, yes) {
         setOutingBusy(true)
-        setOutingMsg(yes ? '正在把东西拿回来……' : '正在回绝……')
+        setOutingMsg(yes ? '正在带回来……' : '正在回绝……')
         try {
           const r = await jpost('/outing', { action: 'keepsake', id, yes })
           setOuting(await jget('/outing').catch(() => outing))
           setOutingMsg(
             yes
-              ? (r?.ok ? '带回来了。东西放在她家的纪念品目录里。' : `没带成：${r?.note ?? '不知道哪一步没成'}`)
-              : '没带。她那边会知道这一件不算。',
+              ? (r?.ok ? '带回来了，收在她家的纪念品文件夹里（按日期分）。' : `没带成：${r?.note ?? '不知道哪一步没成'}`)
+              : '没带。她那边会知道这个不让带。',
           )
         } catch (e) {
           setOutingMsg(`没处理成：${e.message}`)
@@ -2552,33 +2712,33 @@ window.__ModuleLoader__.load({
           const autoN = Number(r?.rejected ?? 0)
           setOutingMsg(
             r?.status === 'pending'
-              ? '这趟的文件对不上，先没结算。她本人已经回家了（装备也拆了）；把文件还原，再点下面「复核一次」就能收下。'
+              ? '这趟的记录对不上，先没算数。人已经回来了，能力也收回；把记录恢复成出门时的样子，再点「核对一次」就能算数。'
               : keep === false
                 ? (autoN > 0
-                    ? `叫回来了。这趟不算数：她这趟写下的 ${autoN} 条全部跳过，不会长在她身上。`
-                    : '叫回来了。这趟不算数。不过这趟她没写下什么，所以没有东西要跳过。')
+                    ? `叫回来了。这趟不算数：她写的 ${autoN} 条全部跳过，不会算成她的成长。`
+                    : '叫回来了。这趟不算数——她这趟什么都没写，所以没有要跳过的。')
                 : drop.length
-                  ? `叫回来了。取消勾选了 ${drop.length} 条，那几条会被跳过，其余照常算。`
-                  : '叫回来了。',
+                  ? `叫回来了。划掉了 ${drop.length} 条，那几条不算，其余的照常算。`
+                  : '叫回来了。这趟算数。',
           )
           setOutingEndAsk(false)
         } catch (e) {
-          setOutingMsg(`叫不回来：${e.message}`)
+          setOutingMsg(`没能叫回来：${e.message}`)
         } finally {
           setOutingBusy(false)
         }
       }
 
-      // 复核上一次被拒收的那趟（0.6.32）：文件还原后重新比对，通过就当场收下。
+      // 核对上一次没算数的那趟（0.6.32）：记录恢复后重新比对，通过就当场算数。
       async function doReviewPending() {
         setOutingBusy(true)
-        setOutingMsg('正在重新比对……')
+        setOutingMsg('正在重新核对……')
         try {
           const r = await jpost('/outing', { action: 'review' })
           setOuting(await jget('/outing'))
-          setOutingMsg(r?.ok ? '复核通过，这趟收下了。' : '还是对不上，没收。')
+          setOutingMsg(r?.ok ? '核对通过，这趟算数。' : '还是对不上，没算数。')
         } catch (e) {
-          setOutingMsg(`复核没过：${e.message}`)
+          setOutingMsg(`核对没过：${e.message}`)
         } finally {
           setOutingBusy(false)
         }
@@ -2590,6 +2750,10 @@ window.__ModuleLoader__.load({
       const [possessBusy, setPossessBusy] = useState(false)
       const [possessMsg, setPossessMsg] = useState('')
       const [possessPick, setPossessPick] = useState('')
+      // 回家审查（m02241 第⑤条）：结束请神前先把这趟多出来的条目摆出来。
+      // 默认全收下；取消勾选的会写成 possess-reject: 标记，之后派生时跳过。
+      const [possessEndAsk, setPossessEndAsk] = useState(false)
+      const [possessDrop, setPossessDrop] = useState([])
 
       async function loadPossess() {
         try { setPossess(await jget('/possession')) } catch { /* 拿不到就保持原样 */ }
@@ -2597,34 +2761,67 @@ window.__ModuleLoader__.load({
 
       async function doStartPossess() {
         const sid = possessPick || possess?.sessions?.[0]?.sessionId || ''
-        if (!sid) { setPossessMsg('先选一条正在运行的对话。'); return }
+        if (!sid) { setPossessMsg('先选一条现在开着的对话。'); return }
         setPossessBusy(true)
-        setPossessMsg('正在请……')
+        setPossessMsg('正在接入……')
         try {
           await jpost('/possession', { action: 'start', sessionId: sid })
           await loadPossess()
           setOuting(await jget('/outing').catch(() => outing))
-          setPossessMsg('上身了。那条对话下一轮开始，回你话的就是她。')
+          setPossessMsg('接上了。从你在那条对话里说的下一句话开始，回你的就是她。')
         } catch (e) {
-          setPossessMsg(`请不上：${e.message}`)
+          setPossessMsg(`没接上：${e.message}`)
         } finally {
           setPossessBusy(false)
         }
       }
 
-      async function doEndPossess() {
+      async function doEndPossess(keep = true, drop = []) {
         setPossessBusy(true)
-        setPossessMsg('正在请她回去……')
+        setPossessMsg('正在让她回去……')
         try {
-          const r = await jpost('/possession', { action: 'end' })
+          const r = await jpost('/possession', {
+            action: 'end',
+            sessionId: possess?.active?.sessionId ?? '',
+            kept: keep,
+            rejectedIds: keep ? (drop ?? []) : [],
+          })
           await loadPossess()
           setOuting(await jget('/outing').catch(() => outing))
-          // 交接句写不进去不算失败：请神本身已经结束了，只是那条对话少了一句提示。
-          setPossessMsg(r?.note?.ok
-            ? '回去了。那条对话里留下了一句「已经还给你了」，下一轮它会看到。'
-            : `回去了。那条对话恢复成原来的样子${r?.note?.why ? `（没能留下交接句：${r.note.why}）` : ''}。`)
+          setPossessEndAsk(false)
+          setPossessDrop([])
+          const n = Number(r?.rejected ?? 0)
+          // 文案要跟结算一致（与出门 0.7.4 的修法同一套）：说「不算数」就得说清几条被跳过。
+          setPossessMsg(
+            r?.tampered
+              ? `她回去了，但这趟先不算数：${r?.verify?.why || '记录对不上'}。把记录恢复成接管前的样子，再点「核对一次」。`
+              : keep === false
+                ? (n > 0
+                    ? `回去了。这趟不算数：她写的 ${n} 条全部跳过，不会算成她的成长。`
+                    : '回去了。这趟不算数。不过这趟她什么都没写，所以没有要跳过的。')
+                : n > 0
+                  ? `回去了。划掉了 ${n} 条，那几条不算，其余的照常算。`
+                  : r?.note?.ok
+                    ? '回去了，那条对话里留了一句「已经还给你了」。'
+                    : `回去了，那条对话恢复原样${r?.note?.why ? `（那句交接没写进去：${r.note.why}）` : ''}。`,
+          )
         } catch (e) {
-          setPossessMsg(`请不回去：${e.message}`)
+          setPossessMsg(`没能让她回去：${e.message}`)
+        } finally {
+          setPossessBusy(false)
+        }
+      }
+
+      // 核对上一次没算数的请神（与出门 /outing 的 review 同一套）。
+      async function doReviewPossession() {
+        setPossessBusy(true)
+        setPossessMsg('正在重新核对……')
+        try {
+          const r = await jpost('/possession', { action: 'review' })
+          await loadPossess()
+          setPossessMsg(r?.ok ? '核对通过，这趟算数。' : '还是对不上，没算数。')
+        } catch (e) {
+          setPossessMsg(`核对没过：${e.message}`)
         } finally {
           setPossessBusy(false)
         }
@@ -2656,22 +2853,25 @@ window.__ModuleLoader__.load({
       const outPick = outingPick || wsList[0]?.id || ''
       const outPickRow = wsList.find((w) => w.id === outPick) ?? null
       const outingDisabled = Boolean(outing?.away?.kind)
+      // 说明卡确认过没有（2026-10-30，用户 m01904）：没确认时三个入口按钮先灰着。
+      const outingAck = outing?.ack === true
 
       // 回家审查：比对结果先给她自己看，不是点完才告诉她「对不上」。
+      // 2026-10-30（用户 m00650 第三版）：字节数不摆正文——给人看的是「多了什么」。
       const verifyText = (v) => {
-        if (!v) return '还没比对。'
-        if (v.checkable === false) return '这一趟没记基线，回家时没法比对。'
-        if (v.ok === true) return `事件流只多出 ${v.appended ?? 0} 字节，没有删改。`
-        return `事件流不对劲：${v.why || '内容对不上'}`
+        if (!v) return '还没核对。'
+        if (v.checkable === false) return '这趟出门前没记下她自己的记录，回来没法核对。'
+        if (v.ok === true) return '记录里只多了她这趟写的东西，之前的内容没被改过。'
+        return `这段记录对不上：${v.why || '内容对不上'}`
       }
       const outingStatusText = (o) =>
         o.status === 'active'
-          ? '还在外面'
+          ? '还没回来'
           : o.status === 'pending'
-            ? '等复核'
+            ? '等着核对'
             : o.status === 'rejected'
-              ? '没算数'
-              : '已收下'
+              ? '这趟不算'
+              : '已算数'
       const outingRows = recentOutings.map((o) =>
         h('div', { style: { display: 'flex', gap: '10px', justifyContent: 'space-between' } },
           h('span', null,
@@ -2682,60 +2882,99 @@ window.__ModuleLoader__.load({
             `${outingStatusText(o)} · ${new Date(o.startedAt).toLocaleDateString()}`)))
 
       const outingPage = h('div', { className: 'page' },
+        // 关于出门的说明卡（2026-10-30，用户 m00650 / m01100）：文字来自 OUTING_INTRO，
+        // 一个元素一段；「送她出门：」「请神：」把冒号前当小标题加粗，这么长的说明才扫得动。
+        h('div', { className: 'card full' },
+          h('h3', null, '关于出门'),
+          ...OUTING_INTRO.map((line, i) => {
+            const cut = line.indexOf('：')
+            const label = cut > 0 && cut <= 6 ? line.slice(0, cut) : ''
+            return h('p', {
+              key: `outing-intro-${i}`,
+              style: {
+                margin: i === OUTING_INTRO.length - 1 ? 0 : '0 0 8px',
+                fontSize: '13px',
+                lineHeight: 1.7,
+              },
+            },
+              label ? h('strong', null, `${label}：`) : null,
+              label ? line.slice(cut + 1) : line)
+          })),
+
+        // 确认门（2026-10-30，用户 m01904）：没点过「我知道了」，三个入口按钮先灰着。
+        // 只做在界面——服务端拦住会把命令行与旧用例一起挡掉，而这里要挡的是误点。
+        outingAck
+          ? null
+          : groupFull('先确认一下',
+              '出门是测试版功能。它是真的把一条对话交出去、也真的会读那边的文件——最坏的情况不是数据坏了，是她会把不该看的内容写进日记，而日记撤不回。',
+              h('div', { className: 'row', style: { alignItems: 'center', gap: '10px' } },
+                h('button', { disabled: outingBusy, onClick: doAckOuting }, outingBusy ? '正在记……' : '我知道了，开始用'),
+                h('span', { className: 'hint', style: { margin: 0 } }, '点过之后不再问；说明随时在上面的卡里。')),
+              h('p', { className: 'hint', style: { margin: '8px 0 0' } },
+                '第一次用，先试「工作园区」：一个空的工作区，不会碰你别的目录。')),
+
         groupFull('现在在哪',
-          '在家，还是出门去了别的地方。出门期间家里那套日程会整段暂停——两边同时醒着会互相踩同一份记录。',
+          '她现在是待在家，还是去了别的工作区。出门期间家里的日程会暂停：一个人不能同时在两个地方干活，不然两边会写进同一本记录。',
           isOut
             ? h('div', null,
                 h('p', { style: { margin: '0 0 6px', fontWeight: 600 } },
-                  awayNowUI.line || '此刻在外面'),
-                // 写清是哪条对话（0.6.26，用户 m03194）：工作区 + 会话名字/短号 + 第几趟。
-                // 0.6.25 真机上出现过「台账说在外面、其实一段装备都没挂」的幽灵出门，
-                // 所以这里连「装备挂上没有」也如实写出来，不能只写一句「在外面」。
+                  awayNowUI.line || '现在在外面'),
+                // 写清是哪条对话（0.6.26，用户 m03194）：工作区 + 对话名字 + 第几趟。
+                // 2026-10-30（用户 m00650）：会话短号对用户没意义，从正文里去掉——
+                // 真要排查时看 possessions/outings 台账就够了。
                 h('p', { className: 'hint', style: { margin: '0 0 4px' } },
                   [
-                    `在「${awayNowUI.outing?.workspaceName || '那个工作区'}」那条对话里`,
-                    awayNowUI.sessionTitle ? `（名字：${awayNowUI.sessionTitle}）` : '（这条还没起名字）',
-                    awayNowUI.sessionShort ? ` · 会话 ${awayNowUI.sessionShort}` : '',
+                    `在「${awayNowUI.outing?.workspaceName || '那个工作区'}」`,
+                    awayNowUI.sessionTitle ? `的「${awayNowUI.sessionTitle}」这条对话里` : '的一条对话里',
                     awayNowUI.tripNo ? ` · 第 ${awayNowUI.tripNo} 趟` : '',
                   ].join('')),
                 awayNowUI.warning
                   ? h('p', { style: { margin: '0 0 4px', color: '#e5534b', fontWeight: 600 } }, awayNowUI.warning)
                   : null,
                 h('p', { className: 'hint' },
-                  '这趟不自动收下：回来时先比对事件流。如果有人在后面动过她那份记录，这趟先不算数——她本人照样回家、装备也拆，只是等你复核。'),
+                  '这趟不会自动算数。她回来时，会先核对她自己的记录有没有被人改过（人为或意外篡改）；如果对不上，这趟就先不算数——人照样回家、能力也收回，只是等你点一下确认。'),
                 h('p', { className: 'hint' },
                   verifyText(awayNowUI.verify),
-                  outing?.identityFrozen ? ' 她带的是出门那一刻的身份快照，家里之后改了什么，这一趟不会变成她。' : ''),
+                  outing?.identityFrozen ? ' 她带出去的是出门那一刻的自己；出门之后家里改了什么，这趟都不算数。' : ''),
                 // 想念天数（0.6.16，用户 m01677）：只写事实——第几天，不替她抒情。
+                // 2026-10-30（用户 m00650）：不再 +1——tripDays 本身就从「今天算第 1 天」起算。
                 awayNowUI.tripDays > 0
-                  ? h('p', { className: 'hint' }, `这趟已经第 ${awayNowUI.tripDays + 1} 天。`)
+                  ? h('p', { className: 'hint' }, `这趟出门已经第 ${awayNowUI.tripDays} 天了。`)
                   : null,
                 // 留话：这趟出门里她以 user 身份写进自己事件流的那几句。
                 (outing?.letters ?? []).length
                   ? h('div', { style: { marginTop: '8px', fontSize: '13px', lineHeight: '1.8' } },
-                      h('p', { className: 'hint', style: { margin: '0 0 4px' } }, '这趟她留给你的话：'),
+                      h('p', { className: 'hint', style: { margin: '0 0 4px' } }, '这趟出门，她想对你说：'),
                       ...(outing?.letters ?? []).map((l) => h('div', { key: l.id }, l.text)))
                   : null,
                 // 纪念品（0.6.17）：她问「这件能带回去吗」，只有这里点头才会真的复制。
+                // 2026-10-30（用户 m00650 第三版）：按钮直接说结果，别提「目录」——
+                // 真身是 keepsakes/<日期>/，写「纪念品目录」会让人去找一个不存在的中文文件夹。
                 (outing?.keepsakes?.pending ?? []).map((k) =>
                   h('div', { key: k.id, style: { marginTop: '8px', padding: '8px', border: '1px solid var(--border, #333)', borderRadius: '8px', fontSize: '13px' } },
                     h('p', { style: { margin: '0 0 4px' } },
-                      '她想带这个回来：',
+                      '她想把这件东西带回家：',
                       h('strong', null, k.rel),
                       h('span', { className: 'hint', style: { marginLeft: '6px' } },
                         `${Math.max(1, Math.round(Number(k.size || 0) / 1024))} KB`)),
                     k.why ? h('p', { className: 'hint', style: { margin: '0 0 6px' } }, k.why) : null,
+                    h('p', { className: 'hint', style: { margin: '0 0 6px' } },
+                      '带回来的会收进她家的纪念品文件夹里（按日期分）。'),
                     h('div', { className: 'row' },
-                      h('button', { disabled: outingBusy, onClick: () => doDecideKeepsake(k.id, true) }, '准了'),
-                      h('button', { disabled: outingBusy, className: 'ghost', onClick: () => doDecideKeepsake(k.id, false) }, '算了')))),
+                      h('button', { disabled: outingBusy, onClick: () => doDecideKeepsake(k.id, true) }, '带回来'),
+                      h('button', { disabled: outingBusy, className: 'ghost', onClick: () => doDecideKeepsake(k.id, false) }, '不用带')))),
                 outingEndAsk
                   ? h('div', null,
                       h('p', { className: 'hint', style: { marginTop: '8px' } },
-                        (awayNowUI.outing?.workspaceName || '').includes('口袋')
-                          ? '她这趟在口袋里，你这边没有她可用的工具，所以自己家的账上不会多出东西——清单空着是正常的，不代表这趟没做事。算不算，你说了算。'
+                        // 2026-10-29（用户 m01581，真机）：原来写「你这边没有她可用的工具」，
+                        // 这是**事实错误**——她的那几个工具是插件级全局注册的，口袋那条会话里
+                        // 一样在手上（只是没有那个工作区的 bash/read/write）。空清单的真实原因
+                        // 是她一条没写，不是她没有工具。
+                        /(口袋|园区)/.test(awayNowUI.outing?.workspaceName || '')
+                          ? '这趟她去的是园区，那个位置没有能干活的工作区工具，所以能写下的只有她自己记的东西。清单空着，通常就是这趟她没写。算不算，你说了算。'
                           : (awayNowUI.since?.total ?? 0) === 0
-                            ? '这趟她自己的事件流里没有新增，所以没有可以取消勾选的条目——只跟你说话不算事件。想验驳回，在那条出门会话里让她用 growth_commit 写一条（或留话、写日记、评视频），回家这里才会冒出那一行。'
-                            : '这趟多出 ' + (awayNowUI.since?.total ?? 0) + ' 条。默认全收下；不想留下的那条取消勾选。她顶回来的会单独标出来——只收下说得漂亮的，等于把这趟教坏。'),
+                            ? '这趟她没写新东西，所以没有可以划掉的。只跟你聊天不算她做的事。想让她留下点什么，就让她在那边记一条（说一句话、写篇日记、评个视频都行），回来这里才会出现可勾的条目。'
+                            : `这趟她写了 ${awayNowUI.since?.total ?? 0} 条记录。默认全算上；不想要的，把前面的勾去掉。她拒绝过或推翻过的会单独标出来——只挑好听的话留下，等于把这趟教坏。`),
                       h('div', { style: { display: 'flex', flexDirection: 'column', gap: '6px', marginTop: '6px', maxHeight: '260px', overflow: 'auto' } },
                         ...(awayNowUI.since?.items ?? []).map((it) => {
                           const on = !outingDrop.includes(it.id)
@@ -2747,27 +2986,31 @@ window.__ModuleLoader__.load({
                               onChange: (e) => setOutingDrop((prev) => e.target.checked ? prev.filter((x) => x !== it.id) : [...prev, it.id]),
                             }),
                             h('span', null,
-                              it.pushback ? h('strong', { style: { marginRight: '6px' } }, '顶回来的') : null,
+                              // pushback = type==='refusal' || verdict==='refuted'（她拒绝过 / 推翻过自己），
+                              // 不是「不想放弃」——标记要跟语义对得上（2026-10-30 用户 m00650 第三版核对）。
+                              it.pushback ? h('strong', { style: { marginRight: '6px' } }, '（她拒绝过或推翻过的）') : null,
                               it.text))
                         })),
                       h('div', { className: 'row', style: { marginTop: '8px' } },
-                        h('button', { disabled: outingBusy, onClick: () => doEndOuting(true, outingDrop) }, '这趟收下'),
+                        h('button', { disabled: outingBusy, onClick: () => doEndOuting(true, outingDrop) }, '这趟算数'),
                         h('button', { disabled: outingBusy, className: 'ghost', onClick: () => doEndOuting(false, []) }, '整趟不算'),
-                        h('button', { disabled: outingBusy, className: 'ghost', onClick: () => { setOutingEndAsk(false); setOutingMsg('') } }, '再等等')))
-                  : h('div', { className: 'row', style: { marginTop: '8px' } },
-                      h('button', { disabled: outingBusy, onClick: () => { setOutingDrop([]); setOutingEndAsk(true) } }, '叫她回家…')))
+                        h('button', { disabled: outingBusy, className: 'ghost', onClick: () => { setOutingEndAsk(false); setOutingMsg('') } }, '先等等')))
+                  : h('div', { className: 'row', style: { marginTop: '8px', alignItems: 'center' } },
+                      h('button', { disabled: outingBusy, onClick: () => { setOutingDrop([]); setOutingEndAsk(true) } }, '叫她回家'),
+                      h('span', { className: 'hint', style: { margin: 0 } }, '回来时会先让你核对')))
             : awayNowUI?.kind === 'possession'
               ? h('div', null,
                   h('p', { style: { margin: '0 0 6px', fontWeight: 600 } },
-                    awayNowUI.line || '此刻在替人说话'),
-                  // 2026-10-29（用户 m01474）：把「你们共用同一个守卫」这件事写明白。
-                  // 守卫挂在 agent 上，不区分谁在说话——所以「拦她」和「拦你」是同一道闸，
-                  // 你在那条对话里伸手去碰她家的路径，一样会被挡回来。
+                    awayNowUI.line || '现在在这条对话里替人说话'),
+                  // 2026-10-29（用户 m01474）：把「护栏是共用的」写明白。
+                  // 2026-10-30（用户 m00650 第三版，并纠正原第三版的一句事实错误）：
+                  // 护栏只作用于**这一条**被接管的对话——别的对话照常，不会全被拦；
+                  // 结束也只能在界面里点，不能让她自己结束（第三版原文「所有对话都不能修改」「只能由用户消息覆盖」都不成立）。
                   h('p', { className: 'hint' },
-                    '这段时间那条对话里回你话的是她，不再是原来的那个人。守卫是那条对话共用的一个，分不出谁在说话——你在那儿也没法碰她家的路径（她的屋子、记忆、会话、配置档案），会跟她一起被拦。只能由你来结束。'),
+                    '这段时间，这条对话里回你话的是她，不是原来那个。护栏是这条对话共用的：分不出谁在打字，所以只有这条被接管的对话改不了她家里的东西（屋子、记忆、对话、配置），会被一起拦下来；别的对话不受影响。回你话的也不再是原来的助手。结束只能在界面里点。'),
                   h('p', { className: 'hint' },
-                    '请神期间她说过的话会留在那条对话的历史里——结束时会补一条「我回去了」，想完全干净请新开一条对话。'))
-              : h('p', { className: 'dim', style: { margin: 0 } }, '在家。'),
+                    '这期间她说过的话会留在上下文里（可能会干扰这条对话原本的工作），结束时系统会补一句「已经还给你了」，帮原来的助手接回人格。想完全干净，就新开一条对话。'))
+              : h('p', { className: 'dim', style: { margin: 0 } }, '在家。没有出门。'),
 
           outingMsg ? h('p', { className: 'hint', style: { marginTop: '10px' } }, outingMsg) : null,
 
@@ -2776,49 +3019,67 @@ window.__ModuleLoader__.load({
           // 结果人和文件都在，却是死路。这里把原因和复核按钮一起摆出来。
           (outing?.pendingReview ?? null)
             ? h('div', { style: { marginTop: '10px', padding: '8px', border: '1px solid var(--border, #333)', borderRadius: '8px', fontSize: '13px' } },
-                h('p', { style: { margin: '0 0 4px', fontWeight: 600 } }, '上一趟没结算：文件对不上'),
+                h('p', { style: { margin: '0 0 4px', fontWeight: 600 } }, '上一趟还没算数：记录被篡改过'),
                 h('p', { className: 'hint', style: { margin: '0 0 4px' } },
-                  `${outing.pendingReview.workspaceName || '那个工作区'} · 会话 ${outing.pendingReview.sessionShort || '—'} · ${outing.pendingReview.reason || '对不上'}`),
+                  // 2026-10-30（用户 m00650 第三版第 21 条）：不再摆会话短号——
+                  // 对普通用户来说那是一串看不懂的编号。
+                  `${outing.pendingReview.workspaceName || '那个工作区'} · ${outing.pendingReview.reason || '对不上'}`),
                 h('p', { className: 'hint', style: { margin: '0 0 6px' } },
                   outing.pendingReview.okNow
-                    ? '现在这份文件已经能对上了。点「复核一次」，这一趟就收下。'
-                    : '她本人已经回家了（装备也拆了），只是这趟还没算数。把文件还原成出门时的样子，再来点「复核一次」。'),
-                h('div', { className: 'row' },
-                  h('button', { disabled: outingBusy || !outing.pendingReview.okNow, onClick: () => doReviewPending() }, '复核一次'),
-                  outing.pendingReview.okNow ? null : h('span', { className: 'hint', style: { margin: 0 } }, '还没还原')))
+                    ? '现在记录已经对得上了。点「核对一次」，这趟就算数。'
+                    : '人已经回家了，能力也收回，只是这趟还没算数。把记录恢复成出门时的样子，再来点「核对一次」。'),
+                h('div', { className: 'row', style: { alignItems: 'center' } },
+                  h('button', { disabled: outingBusy || !outing.pendingReview.okNow, onClick: () => doReviewPending() }, '核对一次'),
+                  outing.pendingReview.okNow ? null : h('span', { className: 'hint', style: { margin: 0 } }, '还没恢复')))
             : null,
 
           // 最近几趟并进这张卡（0.6.16，用户 m01613：信息与台账重复，合并）。
           recentOutings.length
             ? h('div', { style: { marginTop: '12px', fontSize: '13px', lineHeight: '1.9' } },
-                h('p', { className: 'hint', style: { margin: '0 0 4px' } }, '最近几趟：'),
+                h('p', { className: 'hint', style: { margin: '0 0 4px' } }, '最近的几趟：'),
                 ...outingRows)
             : null),
 
-        groupFull('出门口袋（干活模式）',
-          '一个空的工作区：没有这里的白板，也没有这十几天的账。她带过去的只有出门那一刻的自己。',
+        groupFull('工作园区（专门干活用）',
+          '一个空的工作区：没有任何会干扰记忆和认知的内容。她带过去的，只有出门那一刻的自己。在这里可以火力全开不受限制的干活。',
           !outing
-            ? h('p', { className: 'hint' }, '正在读口袋……')
+            ? h('p', { className: 'hint' }, '正在读园区……')
             : h('div', null,
                 h('p', { className: 'hint', style: { margin: '0 0 8px' } },
-                  '位置：' + (outing.pocket?.path || '（还定不下来）') +
-                    (outing.pocket?.registered ? '' : ' · 第一次开门时会自动登记成工作区')),
+                  '工作园区在：' + (outing.pocket?.path || '（还定不下来）') +
+                    (outing.pocket?.registered ? '' : '（第一次用时会自动登记成一个工作区）')),
                 h('div', { className: 'row' },
                   h('button', {
-                    disabled: outingDisabled || outingBusy,
+                    disabled: !outingAck || outingDisabled || outingBusy,
                     onClick: doStartPocket,
-                  }, outingBusy ? '正在开门……' : '送她去口袋')),
+                  }, outingBusy ? '正在准备……' : '让她去园区')),
+                // 2026-10-30（用户 m00972）：园区也可以接着上次那条会话做，
+                // 不必每趟从白纸开始；不勾就是新开一条。
+                outing.pocket?.last?.sessionId
+                  ? h('label', { style: { display: 'flex', gap: '8px', alignItems: 'flex-start', marginTop: '8px', fontSize: '13px', lineHeight: '1.6' } },
+                      h('input', {
+                        type: 'checkbox',
+                        checked: outingReuse,
+                        disabled: outingDisabled || outingBusy,
+                        onChange: (e) => setOutingReuse(e.target.checked),
+                      }),
+                      h('span', null,
+                        '接着上次做（回到工作园区里上次那条对话）',
+                        h('span', { className: 'hint', style: { display: 'block', margin: '2px 0 0' } },
+                          '上次是 ' + new Date(outing.pocket.last.startedAt).toLocaleDateString() +
+                          ' 去的。不勾就新开一条。')))
+                  : null,
                 h('p', { className: 'hint', style: { marginTop: '8px' } },
-                  '她在口袋里写不进 02-我的项目 / 03-我的文档 / 04-小工具 这几个目录——沙箱的写权限跟着工作区走。要交付的东西，等她回来再搬。'),
+                  '在工作园区里，她写不进你别的项目目录——权限是跟着工作区走的（沙箱或全部权限）。要交付的文件，等她回来再搬。'),
                 h('p', { className: 'hint', style: { marginTop: '8px', fontWeight: 600 } },
-                  '别把她送到有插件源码的工作区——她在那边能读到自己不该看的文件（禁令清单就在源码里）。只是想让她去干活，用口袋最稳。'))),
+                  '别把她送到放着插件源码的工作区：在那边她能读到自己不该看的文件（禁令的完整清单就写在源码里）。只是干活的话，用园区最稳妥。'))),
 
-        groupFull('送她出门',
-          '选一个工作区，在那边开一条新会话。她继承那个工作区本来的权限和工具，不套家里那套收窄过的名单。',
+        groupFull('让她去别的工作区',
+          '选一个工作区，在那边开一条新对话。在那边，她用那个工作区本来的权限和工具，不套家里这套收窄过的工具清单。',
           !outing
             ? h('p', { className: 'hint' }, '正在读工作区列表……')
             : wsList.length === 0
-              ? h('p', { className: 'hint' }, '还没有别的工作区。先在宿主里建一个，再回来。')
+              ? h('p', { className: 'hint' }, '还没有别的工作区。先在 DSH 里新建一个工作区，再回来这里。')
               : h('div', null,
                   h('div', { className: 'row', style: { alignItems: 'center', gap: '10px' } },
                     h('select', {
@@ -2827,10 +3088,10 @@ window.__ModuleLoader__.load({
                       onChange: (e) => setOutingPick(e.target.value),
                     }, ...wsList.map((w) => h('option', { value: w.id }, w.title || w.id))),
                     h('button', {
-                      disabled: outingDisabled || outingBusy || !outPick,
+                      disabled: !outingAck || outingDisabled || outingBusy || !outPick,
                       onClick: doStartOuting,
-                    }, outingBusy ? '正在开门……' : '让她去这里')),
-                  // 复用同一趟（0.6.16，用户 m01613）：这个工作区上次那条会话还在，
+                    }, outingBusy ? '正在准备……' : '让她去这个工作区')),
+                  // 复用同一趟（0.6.16，用户 m01613）：这个工作区上次那条对话还在，
                   // 就可以接着做，而不是每趟从白纸开始。
                   outPickRow?.last?.sessionId
                     ? h('label', { style: { display: 'flex', gap: '8px', alignItems: 'flex-start', marginTop: '8px', fontSize: '13px', lineHeight: '1.6' } },
@@ -2841,38 +3102,76 @@ window.__ModuleLoader__.load({
                           onChange: (e) => setOutingReuse(e.target.checked),
                         }),
                         h('span', null,
-                          '接着上次那趟（同一个工作区，回到那条会话里做）',
+                          '接着上次做（回到这个工作区上次那条对话）',
                           h('span', { className: 'hint', style: { display: 'block', margin: '2px 0 0' } },
                             '上次是 ' + new Date(outPickRow.last.startedAt).toLocaleDateString() +
-                            ' 走的 · 会话 ' + String(outPickRow.last.sessionId).replace(/^session-/, '').slice(0, 8) +
-                            '。不勾就是新开一条。')))
+                            ' 去的。不勾就新开一条。')))
                     : null,
                   h('p', { className: 'hint', style: { marginTop: '8px' } },
-                    '出门期间：家里不叫她、不刷 B 站、不写日记。回家那一刻才结算这趟算不算数。'),
+                    '出门期间：家里不会叫她、不刷 B 站、不写日记。等她回家那一刻，才决定这趟算不算数。'),
                   h('p', { className: 'hint', style: { marginTop: '8px', fontWeight: 600 } },
-                    '这条老路会把那个人工作区的白板和交接账本每轮注入给她（2026-10-28 20:55 那趟就是这样漏的）。只是想让她去干活，用上面的口袋。'),
+                    '这个选项有副作用：那个工作区的项目笔记、交接记录、记忆文件等凡是你之前调用过以及你的记忆类插件总结过的，会被整份带进她的上下文（可能会导致她知道很多不该、不适合知道的事）。只想让她干活，用上面的工作园区。'),
                   awayNowUI?.kind === 'possession'
-                    ? h('p', { className: 'hint' }, '先结束请神，才能出门。')
+                    ? h('p', { className: 'hint' }, '她正在替人说话，先结束请神，再出门。')
                     : null)),
 
-        groupFull('请神（上身到一条正在用的对话）',
-          '把一条对话临时交给她：下一轮起，回你话的是她——身份是真的，工具也是真的，不是演。结束时撤销，那条对话恢复原样。',
+        groupFull('请神（让她接管一条正在用的对话）',
+          '把一条对话临时交给她。从你下一句话开始，回你的就是她——是本人灵魂出窍接手回复，工具按照该会话的给，不是人格复制。你点结束时，这条对话就恢复原样。',
           possessActive
             ? h('div', null,
                 h('p', { className: 'hint', style: { margin: 0, fontWeight: 600 } },
-                  `现在上身：${possessActive.title || '还没起名字的对话'}${possessWhere(possessActive.cwd) ? ` · ${possessWhere(possessActive.cwd)}` : ''}`),
-                // 2026-10-29（用户 m01474）：守卫是那条对话共用的一个，不区分谁在说话。
+                  `现在在这条对话里：${possessActive.title || '还没起名字的对话'}${possessWhere(possessActive.cwd) ? `（${possessWhere(possessActive.cwd)}）` : ''}`),
+                // 2026-10-29（用户 m01474）：护栏是这条对话共用的，不区分谁在说话。
+                // 2026-10-30（用户 m00650 第三版，并纠正第三版里的两处事实错误）：
+                // 「所有对话都不能修改」不成立——只有被接管的这一条会被拦；
+                // 「结束请神只能由用户消息覆盖」也不成立——结束只能从界面按钮触发。
                 h('p', { className: 'hint', style: { marginTop: '8px' } },
-                  '这段时间那条对话的守卫是你们共用的一个，分不出谁在说话——你在那儿也没法碰她家的路径（她的屋子、记忆、会话、配置档案），会跟她一起被拦；它也不再是原来的那个人。'),
+                  '这段时间护栏是共用的：它分不出谁在打字，所以你在那条对话里也无法修改她家里的东西（屋子、记忆、对话、配置），会被一起拦下来。只有这条被接管的对话受影响，别的对话照常。回你话的也不再是原来的助手。'),
                 h('p', { className: 'hint', style: { marginTop: '6px' } },
-                  '请神期间她说过的话会留在这条对话的历史里——结束时会补一条「我回去了」进去，想完全干净请新开一条对话。'),
-                h('button', {
-                  disabled: possessBusy,
-                  onClick: doEndPossess,
-                }, possessBusy ? '正在请她回去……' : '结束请神'))
+                  '这期间她说过的话会留在上下文里（可能会干扰这条对话的工作任务），结束时系统会补一句「已经还给你了」，帮助恢复原来的助手人格。想完全干净，就新开一条对话。'),
+                // 回家审查卡（m02241 第⑤条）：两栏并排——左边逐条挑，右边看比对结果再拍板。
+                // 和出门那张卡同一套语义：默认全收下，取消勾选 = 那几条跳过；整趟不算 = 全跳过。
+                possessEndAsk
+                  ? h('div', { style: { display: 'flex', gap: '14px', marginTop: '10px', alignItems: 'flex-start', flexWrap: 'wrap' } },
+                      h('div', { style: { flex: '1 1 260px', minWidth: '240px' } },
+                        h('p', { className: 'hint', style: { margin: '0 0 4px', fontWeight: 600 } },
+                          `这趟她新写下的 ${possess?.since?.total ?? 0} 条`),
+                        (possess?.since?.items ?? []).length
+                          ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: '6px', maxHeight: '240px', overflow: 'auto' } },
+                              ...(possess.since.items).map((it) => {
+                                const on = !possessDrop.includes(it.id)
+                                return h('label', { key: it.id, style: { display: 'flex', gap: '8px', alignItems: 'flex-start', fontSize: '13px', lineHeight: '1.6' } },
+                                  h('input', {
+                                    type: 'checkbox',
+                                    checked: on,
+                                    disabled: possessBusy,
+                                    onChange: (e) => setPossessDrop((prev) => e.target.checked ? prev.filter((x) => x !== it.id) : [...prev, it.id]),
+                                  }),
+                                  h('span', null,
+                                    // pushback 是「她拒绝过 / 推翻过自己的判断」，不是「不想放弃」或「违抗命令」。
+                                    it.pushback ? h('strong', { style: { marginRight: '6px' } }, '（她拒绝过或推翻过的）') : null,
+                                    it.text))
+                              }))
+                          : h('p', { className: 'hint', style: { margin: 0 } },
+                              '这趟她没写新东西，所以没有可以划掉的。只跟你聊天不算她做的事。')),
+                      h('div', { style: { flex: '1 1 220px', minWidth: '200px' } },
+                        h('p', { className: 'hint', style: { margin: '0 0 4px', fontWeight: 600 } }, '记录核对'),
+                        h('p', { className: 'hint', style: { margin: '0 0 4px' } }, verifyText(possess?.verify)),
+                        h('p', { className: 'hint', style: { margin: '0 0 6px' } },
+                          '默认全算上；左边没勾的会被标成「不算」。她拒绝过或推翻过的会单独标出来——只挑好听的话留下，等于把这趟教坏。'),
+                        h('div', { className: 'row' },
+                          h('button', { disabled: possessBusy, onClick: () => doEndPossess(true, possessDrop) }, '这趟算数'),
+                          h('button', { disabled: possessBusy, className: 'ghost', onClick: () => doEndPossess(false, []) }, '整趟不算'),
+                          h('button', { disabled: possessBusy, className: 'ghost', onClick: () => { setPossessEndAsk(false); setPossessDrop([]); setPossessMsg('') } }, '先等等'))))
+                  : h('div', { className: 'row', style: { marginTop: '8px', alignItems: 'center' } },
+                      h('button', {
+                        disabled: possessBusy,
+                        onClick: () => { setPossessDrop([]); setPossessEndAsk(true) },
+                      }, possessBusy ? '正在让她回去……' : '结束请神'),
+                      h('span', { className: 'hint', style: { margin: 0 } }, '点开先核对这趟')))
             : h('div', null,
                 h('p', { className: 'hint', style: { margin: 0 } },
-                  '只能请到「现在开着」的对话；没开过的那条打开一次之后才会出现在这里。'),
+                  '只能选现在开着的对话。没打开过的，点击一次之后才会出现在这里。'),
                 h('div', { style: { display: 'flex', gap: '8px', marginTop: '8px', flexWrap: 'wrap' } },
                   h('select', {
                     value: possessTarget,
@@ -2880,11 +3179,27 @@ window.__ModuleLoader__.load({
                     onChange: (e) => setPossessPick(e.target.value),
                   }, ...possessSessions.map((s) => h('option', { value: s.sessionId }, possessName(s)))),
                   h('button', {
-                    disabled: possessBusy || !possessTarget,
+                    disabled: !outingAck || possessBusy || !possessTarget,
                     onClick: doStartPossess,
-                  }, possessBusy ? '正在请……' : '请她上身')),
+                  }, possessBusy ? '正在接入……' : '请她上身')),
+                // 2026-10-30（用户 m00650 第三版第 47 条：两处不重复全文，这里缩成一句结论）。
                 h('p', { className: 'hint', style: { marginTop: '8px', fontWeight: 600 } },
-                  '注意：这段时间那条对话的守卫是你们共用的一个，分不出谁在说话——你在那儿也没法碰她家的路径（她的屋子、记忆、会话、配置档案），会跟她一起被拦；它也不再是原来的那个人。只能由你结束。')),
+                  '注意：接上之后，这条对话的护栏就被她和原来那个共用——分不出谁在打字，所以你在那条对话里也改不了她家里的东西（屋子、记忆、对话、配置），会被一起拦下来。只有这条对话受影响，别的对话照常。只能由你结束。')),
+          // 上一次没结算的请神（m02241 第②条）：与出门那趟同一套——摆原因、摆复核按钮。
+          // 不给这块，pending 就只剩一句「等复核」，人不知道在等什么。
+          (possess?.pendingReview ?? null)
+            ? h('div', { style: { marginTop: '10px', padding: '8px', border: '1px solid var(--border, #333)', borderRadius: '8px', fontSize: '13px' } },
+                h('p', { style: { margin: '0 0 4px', fontWeight: 600 } }, '上一次请神还没算数：记录被篡改过'),
+                h('p', { className: 'hint', style: { margin: '0 0 4px' } },
+                  `${possess.pendingReview.title || '那条对话'} · ${possess.pendingReview.reason || '对不上'}`),
+                h('p', { className: 'hint', style: { margin: '0 0 6px' } },
+                  possess.pendingReview.okNow
+                    ? '现在记录已经对得上了。点「核对一次」，这趟就算数。'
+                    : '人已经回到原来的位置了，只是这趟还没算数。把记录恢复成接管前的样子，再来点「核对一次」。'),
+                h('div', { className: 'row', style: { alignItems: 'center' } },
+                  h('button', { disabled: possessBusy || !possess.pendingReview.okNow, onClick: () => doReviewPossession() }, '核对一次'),
+                  possess.pendingReview.okNow ? null : h('span', { className: 'hint', style: { margin: 0 } }, '还没恢复')))
+            : null,
           possessMsg ? h('p', { className: 'hint', style: { margin: '8px 0 0' } }, possessMsg) : null))
 
       const envPage = h('div', { className: 'page' },
@@ -3115,6 +3430,9 @@ window.__ModuleLoader__.load({
           h('p', { className: 'hint' }, '导出的是纯文本：版本、自检结果、脱敏后的配置、日志末尾。没有 cookie，没有她说过的话。')),
 
         importCard,
+
+        // 升级自检放在最上面：这类问题不报错，只表现为「升了没变」，得先看见它。
+        upgradeCard,
 
         // 换家留痕（0.6.8）：只在「跟上次不一样」时出现。用户改了 cordis.patch.yml 的 root
         // 之后，侧栏会多一间屋、旧的还在——这里直接把两个路径并排摆出来，省得靠猜。

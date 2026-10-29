@@ -97,11 +97,13 @@ test('回家时事件流变小 → ok:false（被删过行），这是必须拒�
     const v = verifyEvents(f, snap)
     assert.equal(v.checkable, true)
     assert.equal(v.ok, false)
-    assert.match(v.why, /变小/)
+    // 2026-10-30（用户 m00650 第三版文案）：why 改成「记录比出门时短了（被删过行）」，
+    // 不再出现「事件流 / 变小」这些对内行话。
+    assert.match(v.why, /短了/)
   } finally { done() }
 })
 
-test('回家时大小没变但尾部被改写 → ok:false（原地篡改）', async () => {
+test('回家时大小没变但内容被改写 → ok:false（原地篡改）', async () => {
   const { root, done } = tmp()
   try {
     const f = join(root, 'events.jsonl')
@@ -112,7 +114,26 @@ test('回家时大小没变但尾部被改写 → ok:false（原地篡改）', a
     writeFileSync(f, same, 'utf8')
     const v = verifyEvents(f, snap)
     assert.equal(v.ok, false)
-    assert.match(v.why, /尾部/)
+    // 2026-10-29 m02241 第③条：基线改成整文件哈希后判的是「开头那段变了」，
+    // 不再只认尾部。2026-10-30 第三版文案把这句话改成「记录长度没变，但里面的字被改过。」
+    assert.match(v.why, /长度没变/)
+    assert.match(v.why, /被改过/)
+  } finally { done() }
+})
+
+test('追加了但把前面的行改过 → 同样抓得住（第③条要补的盲区）', async () => {
+  const { root, done } = tmp()
+  try {
+    const f = join(root, 'events.jsonl')
+    writeFileSync(f, '{"a":"旧"}\n{"b":1}\n', 'utf8')
+    const snap = await snapshotEvents(f)
+    // 改掉第一行（字节数不变），再正常追加一条：只比尾部的旧版会判成「干净」。
+    writeFileSync(f, '{"a":"新"}\n{"b":1}\n{"c":2}\n', 'utf8')
+    const v = verifyEvents(f, snap)
+    assert.equal(v.ok, false)
+    // 2026-10-30 第三版文案：从「事件流开头 N 字节对不上」改成
+    // 「出门前那段内容被改过（后面的新增是正常的，改前面就不行）。」
+    assert.match(v.why, /出门前那段/)
   } finally { done() }
 })
 
@@ -141,7 +162,7 @@ test('没有基线时 checkable:false —— 不谎报「验过没问题」', as
 
 test('awayLine 说人话：外面报工作区，替人说话报标题', async () => {
   const line = awayLine({ kind: 'outing', outing: { workspaceName: '素材库', startedAt: Date.now() - 3600_000 } })
-  assert.match(line, /此刻在外面：素材库/)
+  assert.match(line, /现在在外面：素材库/)
   assert.match(line, /小时/)
   const p = awayLine({ kind: 'possession', possession: { title: '别人的对话', startedAt: Date.now() - 60_000 } })
   assert.match(p, /替人说话/)
@@ -199,13 +220,17 @@ test('建会话失败时撤掉空壳，否则她会一直「挂在门外」', as
   }
 })
 
-test('出门页签的开关不跟安装路径走：正式版里 .dev 不在就得藏起来', async () => {
+test('出门页对所有人可见：服务端只多一个一次性确认，不再按 dev 藏', async () => {
   // 2026-10-29 用户 m00608：早先按「代码路径里有没有 node_modules」猜安装形态，
   // 发布包被解包到插件目录 / 经 junction 指过去时路径里没有这一段，页签就漏给了所有人。
   const src = readFileSync(new URL('../lib/observe.js', import.meta.url), 'utf8')
   assert.ok(!src.includes('IS_DEV_INSTALL'), '不能再按安装形态算一次就定死')
   assert.ok(!src.includes("includes('node_modules')"), '安装路径判定会把页签漏给正式版')
-  assert.ok(src.includes('dev: await devMode(root)'), '/outing 的 dev 要跟 .dev 开关走')
+  // 2026-10-30 用户 m01904：可见性不再看 dev；GET 带回 ack，POST 能把它写下来。
+  assert.ok(src.includes('ack: ((await loadConfig(root)'), '/outing 要带回一次性确认')
+  assert.ok(src.includes("if (action === 'ack')"), '要能把确认写回配置')
+  // dev 字段保留——本机还拿它做别的判断，只是不再用来藏页签。
+  assert.ok(src.includes('dev: await devMode(root)'), '/outing 仍带回 dev')
   // 同一个判据也被「去刷 B 站」用：没有 .dev 时两处一起藏，不各算各的。
   assert.ok(src.includes("from './devmode.js'"), '要复用 devmode 那个文件开关')
 })
@@ -405,8 +430,8 @@ test('/outing 复核接口：GET 带回 pendingReview，POST action=review 通�
 
   const client = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')
   assert.ok(client.includes('doReviewPending'), '界面上要有复核这个动作')
-  assert.ok(client.includes('复核一次'), '按钮要写人话')
-  assert.ok(client.includes('上一趟没结算'), '要有一张卡告诉人上一趟卡在哪')
-  assert.ok(client.includes('等复核'), '台账状态词用「等复核」，不是「等确认」')
+  assert.ok(client.includes('核对一次'), '按钮要写人话')
+  assert.ok(client.includes('上一趟还没算数'), '要有一张卡告诉人上一趟卡在哪')
+  assert.ok(client.includes('等着核对'), '台账状态词用「等着核对」，不是「等确认」')
   assert.ok(!client.includes('她留在外面，等你确认过再说'), 'pending 之后她其实已经回家了，旧文案会骗人')
 })

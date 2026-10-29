@@ -38,12 +38,36 @@ export function logFile(root) {
 }
 
 /** 抹掉可疑的凭据。宁可把一条日志毁掉，也不要让 cookie 进日志文件。 */
+// 2026-10-29（用户 m02241）：以前这条正则会把**会话 id 一起抹掉**。
+// `session-058a9c4d-0999-4772-8264-c289f799fd09` 有 42 字符、字母数字混合，
+// 正好命中下面的规则②，于是日志里到处是「会话 ***」「woke *** test_first」——
+// 排查「是哪条会话出的问题」时日志一个字都给不出来，只能去 outings.json 台账反推。
+//
+// 这些是**我们自己的标识符**，不是凭据：会话 id 只在宿主内部有用，
+// 事件 id 本来就是本机事件流的主键，抹掉它们只会让日志失去价值。
+// 所以先摘出来、跑完脱敏再放回去。
+const KEEP_PATTERNS = [
+  /\bsession-[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b/g,
+  /\bsession-[0-9a-zA-Z]{6,}\b/g,
+  /\bev_[0-9A-HJKMNP-TV-Z]{20,}\b/g,
+]
+
 export function scrub(text) {
   let s = String(text ?? '')
+  // 先把要保留的标识符换成占位符（用不含字母数字混排的记号，跑完换回来）
+  const kept = []
+  for (const re of KEEP_PATTERNS) {
+    s = s.replace(re, (m) => {
+      kept.push(m)
+      return `\u0000KEEP${kept.length - 1}\u0000`
+    })
+  }
   // SESSDATA=xxx&bili_jct=yyy 这种整段 cookie
   s = s.replace(/(SESSDATA|bili_jct|buvid3|DedeUserID__ckMd5|DedeUserID|sid)=[^&\s"',;}]{4,}/gi, '$1=***')
   // 裸的 32+ 位十六进制/base64 长串（cookie 值常见形状）
   s = s.replace(/\b[A-Za-z0-9_\-]{40,}\b/g, (m) => (/\d/.test(m) && /[A-Za-z]/.test(m) ? '***' : m))
+  // 把标识符放回去
+  s = s.replace(/\u0000KEEP(\d+)\u0000/g, (_m, i) => kept[Number(i)] ?? '***')
   return s
 }
 

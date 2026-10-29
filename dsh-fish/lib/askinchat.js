@@ -102,11 +102,22 @@ async function waitAgent(ctx, sessionId, { totalMs = 0, signal = undefined } = {
   return null
 }
 
-/** 从回答里取出某个问题的选项（没选中返回 ''）。 */
+/**
+ * 从回答里取出某个问题的选项（没选中返回 ''）。
+ *
+ * 宿主回传的 `selected[0]` 不一定就是字符串：也可能是 `{label}` / `{value}` / `{text}`。
+ * 2026-10-30 真机（用户 m01756）：大肥鱼问了一次，卡片消失却没人记账——
+ * 旧实现直接 `String(sel[0])`，拿到对象就变成 `[object Object]`，永远对不上选项。
+ * 这里统一拆成文本；`ask.js` 的 `askChoiceIndex` 还会再兜一层下标。
+ */
 export function picked(answers, id) {
   const hit = (Array.isArray(answers) ? answers : []).find((a) => a?.id === id)
   const sel = hit?.selected
-  if (Array.isArray(sel) && sel.length) return String(sel[0] ?? '')
+  if (Array.isArray(sel) && sel.length) {
+    const one = sel[0]
+    const text = one && typeof one === 'object' ? one.label ?? one.value ?? one.text ?? '' : one
+    return String(text ?? '').trim()
+  }
   if (typeof hit?.custom === 'string' && hit.custom.trim()) return hit.custom.trim()
   return ''
 }

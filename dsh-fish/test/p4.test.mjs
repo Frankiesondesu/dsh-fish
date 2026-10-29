@@ -23,7 +23,7 @@ import {
   seenReplies, scanReplies, renderReplies, postComment, postReply,
   REPLY_LOOKBACK_DAYS, MAX_SCAN_ROOTS,
 } from '../lib/comment.js'
-import { speakOnce } from '../lib/speak.js'
+import { speakOnce, registerSpeak, noteSpeakEnabled } from '../lib/speak.js'
 import { normalizeConfig, dateKey } from '../lib/settings.js'
 import { readEvents, appendEvent, paths, writeConfig } from '../lib/store.js'
 import { describeState, resetAll, backupDirFor } from '../lib/reset.js'
@@ -373,6 +373,54 @@ test('speakOnce 关着时听起来像"不方便"，不像"被禁止"', async () 
     const r = await speakOnce({ root, client: fakeClient(), kind: 'comment', bvid: 'BV1', text: '你好', dateKey: dk })
     assert.equal(r.ok, false)
     assert.equal(r.note, '现在不方便说。')
+  })
+})
+
+// 2026-10-29：工具说明本身就带着"你能做这件事"的许诺。关着的时候，身份文档里没有
+// 「在网上说话」那一节（selfdoc.js 的 speak 判据），工具说明却还在说可以留评论——
+// 两个来源打架，她会照着工具说明去试，然后只听到一句"不方便"。所以说明得跟着开关走。
+function fakeCtxForSpeak() {
+  const defs = []
+  return { defs, tools: { register(d) { defs.push(d); return () => {} } } }
+}
+
+test('bili_speak 的说明随开关变：关着时不提"能留评论"，开着时才提', async () => {
+  await withRoot(async (root) => {
+    const ctx = fakeCtxForSpeak()
+    registerSpeak(ctx, { root, log: () => {} })
+    const def = ctx.defs.find((d) => d.name === 'bili_speak')
+    assert.ok(def, '得注册出 bili_speak')
+
+    noteSpeakEnabled(false)
+    const off = def.description
+    // 关着：不许出现任何"能发出去"的许诺
+    assert.doesNotMatch(off, /留一条评论|回一句别人|可以给你/)
+    // 也不许解释原因——"开不了"等于告诉她有个开关在管着这件事
+    assert.doesNotMatch(off, /开关|权限|管理员|不能用|开不了|暂时不/)
+    assert.match(off, /不想说就不说/)
+
+    noteSpeakEnabled(true)
+    const on = def.description
+    assert.match(on, /可以给你今天看过的某个视频留一条评论/)
+    assert.notEqual(on, off, 'description 必须每次重取，不能是注册时定死的一份')
+  })
+  // 收尾：别把开关状态漏给同进程后面的用例
+  noteSpeakEnabled(false)
+})
+
+test('bili_speak 关着时执行，说的话和说明对得上（都是"不方便"，不解释原因）', async () => {
+  await withRoot(async (root) => {
+    const dk = dateKey()
+    await mkdir(paths(root).root, { recursive: true })
+    await writeConfig(normalizeConfig({ comment: { enabled: false } }), root)
+    const ctx = fakeCtxForSpeak()
+    registerSpeak(ctx, { root, log: () => {} })
+    const def = ctx.defs.find((d) => d.name === 'bili_speak')
+    const out = await def.execute({ kind: 'comment', bvid: 'BV1', text: '你好' }, { sessionId: 's' })
+    assert.equal(out.ok, false)
+    assert.equal(out.note, '现在不方便说。')
+    // 执行完顺手把状态同步成"关着"，下一轮说明跟着变
+    assert.doesNotMatch(def.description, /留一条评论/)
   })
 })
 

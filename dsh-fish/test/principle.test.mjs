@@ -61,18 +61,20 @@ test('出图走服务端白名单路由，客户端不内联图', async () => {
   assert.ok(!cl.includes('<svg'), '客户端里不许内联 SVG（会让 bundle 无谓变大）')
 })
 
-test('页签顺序：插件 → 原理 → 数据 → 反馈 → 出门（发布版才藏）', async () => {
+test('页签顺序：插件 → 原理 → 数据 → 反馈；出门排在「上网」和「记忆」中间（对所有人可见）', async () => {
   const cl = await readFile(CLIENT, 'utf8')
   const tabs = cl.match(/const TABS = \[([\s\S]*?)\n {6}\]/)
   assert.ok(tabs, '必须能定位到 TABS')
   const ids = [...tabs[1].matchAll(/\['([a-z]+)', '[^']+'\]/g)].map((m) => m[1])
   // 2026-10-28 用户要求加第 9 个页签「反馈」（开发者 QQ + 交流群二维码），排在最后；
-  // 同一天加的「出门」页还要真机跑一段时间，只在开发副本里露出来，发布版由 devMode 过滤掉。
-  assert.deepEqual(ids, ['now', 'grow', 'home', 'bili', 'memory', 'env', 'principle', 'data', 'feedback', 'outing'])
-  // 藏的是入口，不是功能：发布版按 devMode 过滤，本机开发副本照常显示。
-  assert.ok(cl.includes('const [devMode, setDevMode] = useState(null)'), '要有 devMode 开关')
-  assert.ok(cl.includes("TABS.filter(([id]) => id !== 'outing' || devMode === true)"), '出门页要按 devMode 过滤')
-  assert.ok(cl.includes('setDevMode(o?.dev === true)'), '挂载时要从 /outing 读 dev')
+  // 出门页从 2026-10-30（用户 m01904）起对所有人可见，2026-10-30（m02207）挪到「上网」和「记忆」之间。
+  assert.deepEqual(ids, ['now', 'grow', 'home', 'bili', 'outing', 'memory', 'env', 'principle', 'data', 'feedback'])
+  // 门从「藏页签」改成「页面里一次性确认」：说明卡没点过，三个入口按钮先灰着。
+  assert.ok(!cl.includes('const [devMode, setDevMode] = useState(null)'), '不再有藏页签的 devMode 开关')
+  assert.ok(cl.includes('...TABS.map(([id, name]) =>'), '页签栏不过滤，出门页常驻')
+  assert.ok(cl.includes('const outingAck = outing?.ack === true'), '页面要读一次性确认')
+  assert.ok(cl.includes("jpost('/outing', { action: 'ack' })"), '确认按钮要能写回 ack')
+  assert.ok(cl.includes("groupFull('先确认一下'"), '没确认时要有一张确认卡')
   // 收起的是入口，不是功能：说明、页面、渲染树都还在，重新放出来不用重写。
   assert.ok(cl.includes("outing: '出门："), 'TAB_HELP 必须有出门页说明')
   assert.ok(/showTab\('outing'\) \? outingPage : null/.test(cl), '出门页要挂进渲染树')

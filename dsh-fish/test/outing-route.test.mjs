@@ -86,11 +86,11 @@ test('/outing 复核：接口层把 pending 从「死路」走通（0.6.32）', 
     assert.equal(before.json.away?.sessionShort, 'r1', 'GET 要把会话短号带上')
     assert.equal(before.json.away?.tripNo, 1)
 
-    // 2. 截短事件流，再点「这趟收下」
+    // 2. 截短事件流，再点「这趟算数」
     truncateSync(eventsFile, Math.max(0, statSync(eventsFile).size - 20))
     const ended = await call('POST', { action: 'end', kept: true })
     assert.equal(ended.status, 200)
-    assert.equal(ended.json.tampered, true, '变小必须判成对不上')
+    assert.equal(ended.json.tampered, true, '变短必须判成对不上')
     assert.equal(ended.json.outing.status, 'pending', '不许直接 done')
 
     // 3. GET 现在要把原因与「还不能复核」告诉界面
@@ -98,13 +98,13 @@ test('/outing 复核：接口层把 pending 从「死路」走通（0.6.32）', 
     assert.ok(mid.json.pendingReview, 'pending 之后 GET 必须带回 pendingReview')
     assert.equal(mid.json.pendingReview.sessionId, 'session-r1')
     assert.equal(mid.json.pendingReview.okNow, false)
-    assert.match(String(mid.json.pendingReview.reason), /变小/)
+    assert.match(String(mid.json.pendingReview.reason), /短了/)
     assert.equal(mid.json.away?.kind, null, 'pending 之后不再是 active，界面要按 kind 判「在家」')
 
     // 4. 还没还原就点「复核一次」：拒绝，而且台账不能被动
     const refused = await call('POST', { action: 'review' })
     assert.equal(refused.status, 409)
-    assert.match(String(refused.json.why), /变小/)
+    assert.match(String(refused.json.why), /短了/)
     const stillPending = (await readOutings(root)).outings.at(-1)
     assert.equal(stillPending.status, 'pending', '复核没过不能偷偷改台账')
 
@@ -119,7 +119,7 @@ test('/outing 复核：接口层把 pending 从「死路」走通（0.6.32）', 
     // 6. 再点一次：没有等复核的了
     const again = await call('POST', { action: 'review' })
     assert.equal(again.status, 409)
-    assert.match(String(again.json.why), /没有等复核/)
+    assert.match(String(again.json.why), /没有等着核对/)
   } finally {
     rmSync(root, { recursive: true, force: true })
   }
@@ -144,7 +144,7 @@ test('/outing 复核：GET 的 warning 能指出「这趟没挂上装备」（0.
     assert.equal(got.status, 200)
     // 假 ctx 里没有活的 agent，所以「没挂装备」要说出来，别让人以为一切正常
     assert.equal(got.json.away?.equipped, false)
-    assert.match(String(got.json.away?.warning), /没挂上装备/)
+    assert.match(String(got.json.away?.warning), /没接好/)
     assert.equal(readFileSync(eventsFile, 'utf8'), '', 'GET 只读，不该写事件流')
   } finally {
     rmSync(root, { recursive: true, force: true })
@@ -233,6 +233,34 @@ test('/outing 回家：逐条取消勾选只跳被挑中的，不该变成整趟
     const raw = readFileSync(eventsFile, 'utf8')
     const mark = raw.split('\n').find((l) => l.includes('outing-reject'))
     assert.equal(String(JSON.parse(mark).text), 'outing-reject:ev_u2', '只标被挑中的那条')
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+// 新用户第一次点进门页（2026-10-30，用户 m01904）：说明卡没确认过时三个入口按钮先灰着。
+// 这里只测服务端那一半：ack 默认 false、点一次落进配置、之后 GET 带回 true。
+test('/outing 确认门：ack 默认 false，点一次才写进配置', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'fish-outing-route-'))
+  try {
+    writeFileSync(join(root, 'events.jsonl'),
+      '{"id":"ev_home","v":1,"ts":"2026-10-29T00:00:00.000Z","day":1,"stage":1,"type":"utterance","source":"her","text":"在家","refs":[],"verdict":null,"confidence":0.5,"flags":[]}\n')
+    const { call } = harness(root)
+
+    const before = await call('GET')
+    assert.equal(before.status, 200)
+    assert.equal(before.json.ack, false, '没确认过时必须 false，界面靠它灰按钮')
+
+    const acked = await call('POST', { action: 'ack' })
+    assert.equal(acked.status, 200)
+    assert.equal(acked.json.ok, true)
+
+    const after = await call('GET')
+    assert.equal(after.json.ack, true, '点过之后 GET 要带回 true')
+
+    const { loadConfig } = await import('../lib/settings.js')
+    const { config } = await loadConfig(root)
+    assert.equal(config.outing.ack, true, '确认要落盘，重启之后不再问')
   } finally {
     rmSync(root, { recursive: true, force: true })
   }

@@ -16,7 +16,7 @@ import fs from 'node:fs'
 import { join } from 'node:path'
 
 /** 版本标记。改了说明正文就把它加一，这样旧文件会在下次打开设置页时被重写。 */
-export const README_VERSION = 1
+export const README_VERSION = 2
 export const README_MARK = `<!-- fish-docs:v${README_VERSION} -->`
 export const README_NAME = '说明.md'
 
@@ -36,6 +36,13 @@ export const README_TEXT = `${README_MARK}
 | \`out/\` | 每日报告，按日期一个文件。设置页「数据 → 每日报告」就是从这里读的。 |
 | \`out/covers/\` | 视频封面图缓存。 |
 | \`media/\` | 看视频时的画面拼图和收到的图片，只留几天。 |
+| \`keepsakes/\` | 她带回来的纪念品，按日期分文件夹。你点头之后才复制进来。 |
+| \`keepsakes.json\` | 带东西的台账：问过哪件、你准了还是没准。 |
+| \`outings.json\` | 出门台账：每趟去了哪、回来算不算数。 |
+| \`possessions.json\` | 请神台账：哪条对话被接管过、有没有结算。 |
+| \`instance.json\` | 哪个实例正在用这个文件夹（防两个窗口同时跑）。 |
+| \`session-notes.json\` | 她排着队、等下一次开口要说的话。 |
+| \`talk-recent.json\` | 最近几轮聊了什么（「她开始听你说话」用的摘要）。 |
 | \`home/\` | 她住的地方：身份文件 \`她的身份.md\`（插件每轮重写，别手改）、会话用过的工作区。 |
 | \`inbox.md\` | 她特意留给你的话（纯文本副本）。平常说的话在对话框里，不在这里。 |
 | \`logs/dsh-fish.log\` | 插件自己的运行日志，超 2MB 轮转、留两份。出事时从设置页「导出日志」。 |

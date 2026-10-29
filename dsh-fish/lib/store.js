@@ -18,6 +18,7 @@ import { promises as fs } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { validateEvent, EVENT_SCHEMA_VERSION } from './schema.js'
 import { defaultRoot, readLocationSync } from './locate.js'
+import { logLine } from './log.js'
 
 /**
  * 状态库的根目录。
@@ -155,10 +156,38 @@ export async function appendEvent(raw, ctx = {}, root = rootDir()) {
       knownIds = null
     }
   }
-  const ev = validateEvent(raw, { ...ctx, knownIds })
+  let ev
+  try {
+    ev = validateEvent(raw, { ...ctx, knownIds })
+  } catch (err) {
+    // 2026-10-29（用户 m02241）：校验拒收以前也不落盘日志。
+    // `capture.js` 只把 err.message 变成给她看的 note（「你不可以写 meta 类事件…」），
+    // 现场无痕——她说了写不进去，日志里却什么都没有。
+    logLine('warn', [
+      '事件被校验拒收：',
+      `type=${type || '?'}`,
+      `source=${String(ctx?.source ?? '?')}`,
+      String(err?.message ?? err).slice(0, 300),
+    ], root)
+    throw err
+  }
   const p = paths(root)
   await ensureDir(p.root)
-  await fs.appendFile(p.events, JSON.stringify(ev) + '\n', 'utf8')
+  try {
+    await fs.appendFile(p.events, JSON.stringify(ev) + '\n', 'utf8')
+  } catch (err) {
+    // 2026-10-29（用户 m02241）：写失败以前是**完全静默**的——磁盘满、权限、文件被独占，
+    // 调用方普遍写成 `.catch(() => {})`，于是「她说了但没落盘」这种最典型的故障
+    // 在日志里一个字都不留。0.7.4 那三个 appendEvent 参数错位 bug 能潜伏整个 0.6.x，
+    // 就是因为这一层没有声音。这里补一行，错误继续往上抛（调用方的语义不变）。
+    logLine('error', [
+      '事件没写进去：',
+      `type=${type || '?'}`,
+      `source=${String(ctx?.source ?? '?')}`,
+      `${err?.code ?? ''} ${String(err?.message ?? err).slice(0, 300)}`,
+    ], root)
+    throw err
+  }
   return ev
 }
 

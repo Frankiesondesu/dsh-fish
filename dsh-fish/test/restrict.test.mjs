@@ -66,8 +66,8 @@ function fakeAgent(cwd, { withRestrict = true, withGuard = true } = {}) {
 }
 
 test('清单里她该有的工具都在，且不含危险口子', () => {
-  // 六个是她自己的，外加 read_image（看图片/看视频画面都靠它）
-  for (const name of ['growth_commit', 'her_recall', 'her_leave', 'bili_look', 'bili_watch', 'bili_speak', 'read_image']) {
+  // 八个是她自己的（0.7.6 加了 ask_owner），外加 read_image（看图片/看视频画面都靠它）
+  for (const name of ['growth_commit', 'her_recall', 'her_diary', 'her_leave', 'bili_look', 'bili_watch', 'bili_speak', 'ask_owner', 'read_image']) {
     assert.ok(HER_TOOLS.includes(name), `清单里少了 ${name}`)
   }
   // 这几个一旦放进去，收窄就白做了

@@ -14,6 +14,7 @@ import { dateKey } from '../lib/settings.js'
 import { writeSelfDoc } from '../lib/selfdoc.js'
 import { clearWakeSection, getWakeSection } from '../lib/identity.js'
 import { WAKE_TRIGGER } from '../lib/wakeconst.js'
+import { logFile, logLine } from '../lib/log.js'
 
 async function withRoot(fn) {
   const root = await mkdtemp(join(tmpdir(), 'fish-boot-'))
@@ -686,6 +687,12 @@ test('手动唤醒：她在外面时不该把家里那条叫醒', async () => {
     assert.match(String(r.why), /家里这条先不叫她/, `要说清为什么没叫：${r.why}`)
     assert.equal(prompts.length, 0, '一条 prompt 都不许发出去')
 
+    // 0.7.7（用户 m02022）：被挡住时必须留一行日志。以前这里是静默 return，
+    // 日志里什么都没有 → 事后分不清「用户没点」和「点了被挡回去」。
+    const logged = await readFile(logFile(root), 'utf8')
+    assert.match(logged, /叫醒被挡住了（outing）/, `被挡住要在 dsh-fish.log 里留痕：${logged.slice(-400)}`)
+    assert.match(logged, /现在在外面：素材/, '日志得说清她在哪儿')
+
     // 显式 force 才穿透
     const forced = await wakeNow(ctx, { root, force: true })
     assert.equal(forced.ok, true, JSON.stringify(forced))
@@ -751,5 +758,90 @@ test('解禁申请真的会落盘（不再被 source 误判成她写的）', asy
     assert.ok(String(o.text).includes('我想试试'), `申请正文不对：${o.text}`)
     // 落了盘才可能被 pendingOffer 看见——否则第二天又出一张，还会盖住用户没处理的卡
     assert.ok(await readFile(paths(root).events, 'utf8').then((s) => s.includes('grant_offer')))
+  })
+})
+
+// 2026-10-29（用户 m02241）：出门期间 tick 每 60 秒跑一次，原来每次都写一条
+// 「away 现在在外面：X · 已 N 分钟」。出门一整晚就是几百行同样的字，
+// 真正的异常（装备没挂上、台账冲突）被淹在里面看不见。
+// 现在只在这一趟第一次看到时记一行；台账冲突才是每次都要说的异常。
+test('出门心跳只记第一行，不每 60 秒刷一遍', async () => {
+  await withRoot(async (root) => {
+    await writeConfig(normalizeConfig({ browse: { enabled: false }, window: ['00:00', '23:59'] }), root)
+    const startedAt = Date.now() - 5 * 60_000
+    await writeFile(
+      join(paths(root).root, 'outings.json'),
+      JSON.stringify({
+        outings: [{
+          sessionId: 'session-hb', workspaceId: 'w1', workspaceName: '素材', cwd: join(root, 'ws'),
+          startedAt, endedAt: 0, status: 'active', baseline: null, kept: null, identity: '',
+        }],
+      }),
+      'utf8',
+    )
+    const { ctx } = fakeCtx()
+    // 生产里 deps.log 接到 makeLogger.info，最终写进同一个日志文件；
+    // 这里用 logLine 直接把那句话落盘，等价于真实链路。
+    const s = startScheduler(ctx, { root, log: (...a) => logLine('info', a, root) })
+    const realNow = Date.now
+    let offset = 0
+    Date.now = () => realNow() + offset
+    try {
+      await s.tick()
+      // 推进 3 分钟，连跑三次 tick：如果还按老写法，日志里会有 4 行
+      for (let i = 0; i < 3; i += 1) {
+        offset += 61_000
+        await s.tick()
+      }
+    } finally {
+      Date.now = realNow
+      s.dispose()
+    }
+    const logged = await readFile(logFile(root), 'utf8')
+    const lines = logged.split('\n').filter((l) => l.includes('现在在外面：素材'))
+    assert.equal(lines.length, 1, `一趟只该记一行心跳，实际 ${lines.length} 行：\n${lines.join('\n')}`)
+  })
+})
+
+test('出门与请神同时开着是异常：这条每次 tick 都要说', async () => {
+  await withRoot(async (root) => {
+    await writeConfig(normalizeConfig({ browse: { enabled: false }, window: ['00:00', '23:59'] }), root)
+    const base = Date.now() - 5 * 60_000
+    await writeFile(
+      join(paths(root).root, 'outings.json'),
+      JSON.stringify({
+        outings: [{
+          sessionId: 'session-c1', workspaceId: 'w1', workspaceName: '素材', cwd: join(root, 'ws'),
+          startedAt: base, endedAt: 0, status: 'active', baseline: null, kept: null, identity: '',
+        }],
+      }),
+      'utf8',
+    )
+    await writeFile(
+      join(paths(root).root, 'possessions.json'),
+      JSON.stringify({
+        possessions: [{
+          sessionId: 'session-c2', title: '一条对话', cwd: join(root, 'ws2'),
+          startedAt: base + 1000, endedAt: 0, status: 'active', baseline: null, identity: '',
+        }],
+      }),
+      'utf8',
+    )
+    const { ctx } = fakeCtx()
+    const s = startScheduler(ctx, { root, log: (...a) => logLine('info', a, root) })
+    const realNow = Date.now
+    let offset = 0
+    Date.now = () => realNow() + offset
+    try {
+      await s.tick()
+      offset += 61_000
+      await s.tick()
+    } finally {
+      Date.now = realNow
+      s.dispose()
+    }
+    const logged = await readFile(logFile(root), 'utf8')
+    const lines = logged.split('\n').filter((l) => l.includes('出门与请神同时开着'))
+    assert.equal(lines.length, 2, `冲突态不能被去重，两次 tick 该有两行，实际 ${lines.length} 行`)
   })
 })

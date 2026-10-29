@@ -159,6 +159,9 @@ export const DEFAULTS = {
     beliefsShown: 3,        // 她一轮里逐条摆出来的判断数（1–8，默认 3）；其余折成一行
                             // 2026-10-25 用户问「想让她记住更多能不能调」——原来写死在
                             // persona.js 的 BELIEF_SHOWN，docBudget 调多大都不会多摆一条。
+    hearEvery: 3,           // 每几轮把你说的一句话记成「旁听」（0 = 不记，1–50）
+                            // 2026-10-30（用户 m00112 的 A2）：只存原话、不加工；
+                            // 记的是"你曾经说过什么"，不是"你当时是什么意思"。
   },
 
   // 规则与解禁（R3，2026-10-24）
@@ -168,6 +171,12 @@ export const DEFAULTS = {
     offers: true,           // 允许她在某次醒来里提出「我想改一条规矩」
     holdDays: 3,            // 一张申请几天不处理 = 搁置（不算驳回、不加重冷却）
     cooldownDays: 3,        // 被驳回后至少隔几天才能再提
+  },
+
+  // 出门（2026-10-30，用户 m01904）：发布前加一道一次性确认。
+  // 只记「说明卡看过一遍」，不是开关——看过的不用再看，没看过的按钮先挡着。
+  outing: {
+    ack: false,
   },
 
   // 观测台
@@ -208,6 +217,7 @@ const LIMITS = {
   'memory.sleepEveryDays': [0, 60],
   'memory.sleepKeep': [0, 100],
   'memory.beliefsShown': [1, 8],
+  'memory.hearEvery': [0, 50],
   'rules.holdDays': [1, 30],
   'rules.cooldownDays': [1, 30],
 }
@@ -305,6 +315,10 @@ export function normalizeConfig(raw = {}) {
     const cw = Array.isArray(cfg.comment.window) ? cfg.comment.window : DEFAULTS.comment.window
     cfg.comment.window = validWindow(cw, DEFAULTS.comment.window)
   }
+
+  // 出门：只存一个布尔（老配置里没有这一组）
+  cfg.outing = { ...DEFAULTS.outing, ...cfg.outing }
+  cfg.outing.ack = Boolean(cfg.outing.ack)
 
   // 她的工具面：preset 名 trim（空 = 用宿主默认组合），allow 去重去空
   // 不改 allow 的语义——它只是"额外放行"，真正的收窄由 preset 完成。

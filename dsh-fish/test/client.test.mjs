@@ -441,8 +441,8 @@ test('规则卡：没有待裁决的申请时不渲染空态行，有申请才�
   }
 
   // 1) 有 pending 通道但没有申请：整行不渲染，也不该出现裁决按钮
-  //    rules 是组件里第 10 个 useState（0 基下标 9），数据来自 /rules，不在 /state 里。
-  let react = fakeReact({ 0: stateWith(), 9: idle })
+  //    rules 是组件里第 12 个 useState（0 基下标 11；0.7.6 请求事件在它前面插了 asks/askMsg），数据来自 /rules，不在 /state 里。
+  let react = fakeReact({ 0: stateWith(), 11: idle })
   let loaded = await loadClient({ react })
   react.resetCursor()
   let txt = textOf(loaded.exports.FishSection()).join(' ')
@@ -451,7 +451,7 @@ test('规则卡：没有待裁决的申请时不渲染空态行，有申请才�
   assert.ok(!txt.includes('这次不行'), '没有申请就不该有裁决按钮')
 
   // 2) 有申请：卡片 + 两个按钮都要出来
-  react = fakeReact({ 0: stateWith(), 9: { ...idle, pending: { why: '想自己决定要不要出门。' } } })
+  react = fakeReact({ 0: stateWith(), 11: { ...idle, pending: { why: '想自己决定要不要出门。' } } })
   loaded = await loadClient({ react })
   react.resetCursor()
   txt = textOf(loaded.exports.FishSection()).join(' ')
@@ -459,7 +459,7 @@ test('规则卡：没有待裁决的申请时不渲染空态行，有申请才�
   assert.ok(txt.includes('可以') && txt.includes('这次不行'), '两个裁决按钮都要在')
 
   // 3) 通道关着：并进卡片说明行，不单独占一行
-  react = fakeReact({ 0: stateWith(), 9: { ...idle, offersOn: false } })
+  react = fakeReact({ 0: stateWith(), 11: { ...idle, offersOn: false } })
   loaded = await loadClient({ react })
   react.resetCursor()
   txt = textOf(loaded.exports.FishSection()).join(' ')
@@ -595,24 +595,93 @@ test('日记翻页：日期 ≥ 2 才出「← 更早 / 更晚 →」，一天�
 // ---------------------------------------------------------------------------
 // 2026-10-29：用户 m01474「请神让用户和鱼共用同一个守卫，
 // 『你自己在那条对话里也没法碰她家的路径』这个加到 ui 里」
+// 2026-10-30：用户 m00650 第三版文案把「守卫」统一说成「护栏」，并纠正原第三版
+// 的两处事实错误——护栏只作用于被接管的那一条对话（不是所有对话），
+// 结束也只能在界面里点（不是「只能由用户消息覆盖」）。
 // ---------------------------------------------------------------------------
 
-test('请神文案要说清守卫是共用的：用户自己在那条对话里也碰不了她家的路径（m01474）', async () => {
+test('请神文案要说清护栏是共用的：用户自己在那条对话里也改不了她家里的东西（m01474 / m00650）', async () => {
   const src = await readFile(CLIENT, 'utf8')
 
-  // 三处都要写「你也没法碰她家的路径」，不能只说「会连你一起拦」
-  const hits = src.split('你在那儿也没法碰她家的路径').length - 1
+  // 三处都要写「分不出谁在打字」，不能只说「会连你一起拦」
+  const hits = src.split('分不出谁在打字').length - 1
   assert.equal(hits, 3, '出门中那个卡 + 请神已上身 + 请神未上身，三处口径要一致')
 
-  // 每一处都得点明「共用同一个守卫」，否则读者会以为是各自一道闸
-  assert.ok(src.includes('守卫是那条对话共用的一个'), '出门中那张卡：写明是共用的一个')
-  const shared = src.split('守卫是你们共用的一个').length - 1
-  assert.equal(shared, 2, '请神那两块都写「你们共用的一个」')
-
-  // 括号里把「她家的路径」具体化，别让人以为只是屋子
-  const scope = src.split('（她的屋子、记忆、会话、配置档案）').length - 1
+  // 括号里把被挡的范围具体化，别让人以为只是屋子
+  const scope = src.split('屋子、记忆、对话、配置').length - 1
   assert.equal(scope, 3, '三处都要把被挡的范围写清楚')
 
-  // 旧说法（只提「分不出谁在说话」，不提用户自己也碰不了）不能残留
-  assert.ok(!src.includes('守卫也分不出谁在说话'), '旧文案要换掉')
+  // 第三版的事实纠正：只有被接管的那一条受影响，别的对话照常
+  // （两处文案 + 一处说明注释，共三次「别的对话照常」）
+  const others = src.split('别的对话照常').length - 1
+  assert.equal(others, 3, '请神两块都要点明「别的对话照常」')
+  assert.ok(src.includes('别的对话不受影响'), '出门中那张卡也要点明别的对话不受影响')
+
+  // 旧说法（「守卫」+「碰她家的路径」）不能残留
+  assert.ok(!src.includes('你在那儿也没法碰她家的路径'), '旧文案要换掉')
+  assert.ok(!src.includes('守卫是那条对话共用的一个'), '「守卫」这个说法已统一成「护栏」')
+})
+
+// ---------------------------------------------------------------------------
+// 2026-10-29：房客 upgrade 0.7.2 失败。`file:` 装法只覆盖源目录，跑的还是
+// node_modules 里的旧副本——没有任何报错。设置页要把这件事直接说出来。
+// ---------------------------------------------------------------------------
+
+test('升级自检卡：版本对不上时要说清「改的是源目录」（0.7.6）', async () => {
+  const src = await readFile(CLIENT, 'utf8')
+
+  // 卡的触发条件只认 stale，不要因为 skipped（没查到）就弹一张吓人的卡
+  assert.ok(src.includes('const upgradeCard = state?.upgrade?.stale === true'), '只在对不上时出现')
+  assert.ok(src.includes('升级没有真正装进去'), '标题要点破')
+  // 必须解释机制，否则用户只会以为是「升级没生效」这种玄学。
+  // 路径里带反斜杠，这里不按字面钉死，只钉「说清了加载的是哪一份」。
+  assert.ok(src.includes('DSH 加载的是 node_modules'), '要说加载的是 node_modules 里的副本')
+  assert.ok(src.includes('不是 profile 里写的那条源目录'), '要和源目录区分开')
+  // 要给可执行的修法，且两个都能用
+  assert.ok(src.includes('pnpm install --force'), '给 pnpm 修法')
+  assert.ok(src.includes('删掉 node_modules'), '给删目录修法')
+
+  // 位置：数据页最上面（在换家提示之前），别藏在别的页
+  const atCard = src.indexOf('const upgradeCard =')
+  const atTree = src.indexOf('        upgradeCard,')
+  const atHomes = src.indexOf('state?.homes?.changed === true', atTree)
+  assert.ok(atCard > 0 && atTree > atCard, '卡片要定义再放进树里')
+  assert.ok(atHomes > atTree, '要排在换家提示前面（先看版本，再看住哪儿）')
+})
+
+// ---------------------------------------------------------------------------
+// 2026-10-29，issue #12（TulleyT）：设置页「去上网页存」点了没反应。
+//
+// 原因不是按钮坏了，是这一处把**判据**当成了**开关**：
+//   showTab(id) 只回答「现在是不是这一页」（返回布尔），切页是 setTab(id)。
+//   `onClick: () => showTab('bili')` 的返回值被丢掉 —— 不跳页、也不报错，
+//   于是看起来就是「点了没反应」，而且从 0.6.1 起一直没人点到过。
+//
+// 这条测试守的不是那一行，是这个**类型混用**：判据只能出现在条件位置，
+// 不能出现在会被丢弃返回值的位置（箭头函数体的末尾）。
+// ---------------------------------------------------------------------------
+
+test('设置页切页不能把判据 showTab 当成开关用（issue #12）', async () => {
+  const src = await readFile(CLIENT, 'utf8')
+
+  // ① 判据的返回值不许被当成动作丢掉：`=> showTab('x')` 这种写法一律不许有。
+  const misused = [...src.matchAll(/=>\s*showTab\s*\(/g)]
+  assert.deepEqual(
+    misused.map((m) => m[0]),
+    [],
+    'showTab 只回答"是不是这一页"，切页要用 setTab —— 返回值被丢掉就等于点了没反应',
+  )
+
+  // ② onClick 里更不该出现它（同上，换个更贴近现场的判法）。
+  assert.ok(!/onClick:\s*(async\s*)?\(\)\s*=>\s*showTab\s*\(/.test(src), 'onClick 里不许出现 showTab')
+
+  // ③ 那张卡上的按钮必须真的是切页。
+  const atOwnerHint = src.indexOf("'去上网页存'")
+  assert.ok(atOwnerHint > 0, '「去上网页存」按钮要在')
+  const around = src.slice(Math.max(0, atOwnerHint - 200), atOwnerHint)
+  assert.ok(around.includes("setTab('bili')"), '它得调 setTab(\'bili\') 才跳得过去')
+
+  // ④ 对照：判据仍在、且只用于条件位置（防有人为了过测试把 showTab 删了）。
+  assert.match(src, /const showTab = \(id\) => tab === id/, 'showTab 的定义不能被删')
+  assert.match(src, /showTab\('bili'\) \? biliPage : null/, '判据照旧用于渲染条件')
 })
