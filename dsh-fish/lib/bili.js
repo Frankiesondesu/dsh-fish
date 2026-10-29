@@ -307,6 +307,7 @@ export function createClient(opts = {}) {
 
   let cookie = normalizeCookie(opts.cookie)
   let buvid = ''
+  let buvidFailAt = 0
   let mk = ''
   let mkAt = 0
   let lastReq = 0
@@ -406,15 +407,18 @@ export function createClient(opts = {}) {
   /** 拿 buvid3/buvid4（不带它搜索容易被 -412） */
   async function ensureBuvid() {
     if (buvid) return true
+    // 拿不到就 10 分钟内别再试：普通接口每次请求前都会走到这里，失败不能让请求数翻倍
+    if (buvidFailAt && now() - buvidFailAt < 10 * 60_000) return false
     try {
       const r = await throttle(() => raw(`${API}/x/frontend/finger/spi`))
       const j = await r.json()
       const b3 = j?.data?.b_3
       const b4 = j?.data?.b_4
-      if (!b3) return false
+      if (!b3) { buvidFailAt = now(); return false }
       buvid = `buvid3=${b3}${b4 ? `; buvid4=${b4}` : ''}`
       return true
     } catch (err) {
+      buvidFailAt = now()
       logger('buvid failed', err?.message ?? err)
       return false
     }
@@ -461,6 +465,10 @@ export function createClient(opts = {}) {
         if (!(await ensureMk(o.forceMk))) return { ok: false, code: 'NO_WBI', message: '取不到签名密钥', data: null }
         url += `?${signQuery(params, mk, Math.floor(now() / 1000))}`
       } else {
+        // 不签名的接口也要带 buvid3（2026-10-29 实测）：一个 cookie 都不带时，
+        // /x/web-interface/view 多半直接回 -412，读熔断随即把这一轮的标签/热评/弹幕全关掉，
+        // 定时刷站拼出来的素材只剩标题和播放量。带上匿名 buvid 就正常，不需要登录。
+        if (!/(?:^|;\s*)buvid3=/.test(cookie)) await ensureBuvid()
         const q = Object.keys(params)
           .filter((k) => params[k] !== undefined && params[k] !== null && params[k] !== '')
           .map((k) => `${encodeURIComponent(k)}=${encodeURIComponent(String(params[k]))}`)
