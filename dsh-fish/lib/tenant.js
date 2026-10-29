@@ -18,7 +18,7 @@
  */
 
 import { promises as fs } from 'node:fs'
-import { join, resolve } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { hostname } from 'node:os'
 
@@ -32,6 +32,62 @@ export const TENANT_FILE = 'instance.json'
  * 不能太长：崩过一次之后重启要能立刻接管。也不能太短：一次卡顿不该导致自己抢自己的家。
  */
 export const CLAIM_TTL_MS = 45_000
+
+/**
+ * 家里那把跨进程的锁（2026-10-29 m02162）。
+ *
+ * 为什么还要一把（instance.json 之后）：
+ *   占用权解决的是「谁是房主、谁不许写」，但解决不了「两个实例**同时**启动」——
+ *   两边都在认领之前各自读到「home.json 里没有会话」，然后各建一条。
+ *   房客日志里 `home.json.*.tmp` 成对残留就是这个形状。
+ *   进程内的单飞（home.js 的 inflight）管不到另一个进程，所以这里补一层
+ *   文件锁：`wx` 独占创建，谁先建出锁文件谁进临界区，另一个等着。
+ *
+ * 取舍：
+ *   - 不引依赖（零依赖铁律），只用 `wx` + mtime 判陈旧。
+ *   - 锁文件写在 root 里（`.talk-session.lock`），跟着数据目录走；不进 home.json，
+ *     避免和已有的原子写互相打架。
+ *   - 等不到就**不硬建**（返回 locked:false），交给调用方决定要不要只读复用。
+ */
+export const LOCK_TTL_MS = 30_000
+
+export async function withFileLock(file, fn, { ttl = LOCK_TTL_MS, timeout = 8_000, wait = 40 } = {}) {
+  const started = Date.now()
+  try { await fs.mkdir(dirname(String(file)), { recursive: true }) } catch { /* 建不出来就让 open 去报 */ }
+  for (;;) {
+    let fh = null
+    try {
+      fh = await fs.open(file, 'wx')
+      await fh.writeFile(JSON.stringify({ pid: process.pid, at: Date.now() }))
+      break
+    } catch (err) {
+      if (err?.code !== 'EEXIST') throw err
+      // 锁文件的 mtime 太老 = 上一任进程死在临界区里了（没来得及 unlink），直接接管。
+      let stale = false
+      try {
+        const st = await fs.stat(file)
+        stale = Date.now() - st.mtimeMs > ttl
+      } catch {
+        stale = true // 刚被别人删掉了：下一圈就能抢到
+      }
+      if (stale) {
+        try { await fs.unlink(file) } catch { /* 别人先删了也一样 */ }
+        continue
+      }
+      if (Date.now() - started > timeout) {
+        return { ok: false, locked: false, why: '另一个实例正在建这个家的会话，等了 8 秒还没交还' }
+      }
+      await new Promise((r) => setTimeout(r, wait))
+    } finally {
+      if (fh) await fh.close().catch(() => {})
+    }
+  }
+  try {
+    return await fn()
+  } finally {
+    try { await fs.unlink(file) } catch { /* 已经不在了 */ }
+  }
+}
 
 /** 心跳间隔。 */
 export const HEARTBEAT_MS = 15_000

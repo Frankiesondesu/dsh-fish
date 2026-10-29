@@ -39,10 +39,12 @@ import { logBoot, makeLogger } from './log.js'
 export const name = 'dsh-fish'
 
 /** 版本号：只用于日志导出（排查时第一件事是确认跑的是哪一版）。 */
-export const VERSION = '0.7.2'
+export const VERSION = '0.7.6'
 
 // ⚠️ 一个数组写全，不要拆成对象
-export const inject = ['sessionController', 'tools', 'webServer', 'connection']
+// `userQuestions`（0.7.5）：让她能在会话里直接问那个人（带东西回家、解锁申请）。
+// 这是宿主 base 层默认启用的服务，不用改 profile；缺了它插件照常跑，只是问不出去。
+export const inject = ['sessionController', 'tools', 'webServer', 'connection', 'userQuestions']
 
 const SEED_KEY = 'seed:'
 
@@ -208,11 +210,19 @@ export function apply(ctx, baseConfig = {}) {
 
     let home = { ok: false, why: 'not attempted', wsId: '', sessionId: '' }
     try {
-      home = await bootstrapHome(ctx, { root, preset: config?.tools?.preset ?? '', log: (...a) => logger.info(...a) })
+      home = await bootstrapHome(ctx, {
+        root,
+        preset: config?.tools?.preset ?? '',
+        tenant: tenancy.tenant,
+        log: (...a) => logger.info(...a),
+      })
     } catch (err) {
       home = { ok: false, why: String(err?.message ?? err).slice(0, 160), wsId: '', sessionId: '' }
     }
-    if (!home.ok) logger.warn(`[dsh-fish] 屋子没建起来：${home.why}`)
+    // 观测台要能把「这个家在别处也开着」和普通失败分开报（2026-10-29 m02162）。
+    tenancy.home = { ok: home.ok, blocked: home.blocked === true, sessionId: home.sessionId ?? '', why: home.why ?? '' }
+    if (home.blocked === true) logger.warn(`[dsh-fish] ${home.why}`)
+    else if (!home.ok) logger.warn(`[dsh-fish] 屋子没建起来：${home.why}`)
     else {
       // 屋子是空的（上一次开了但从没说过话）时，侧栏不会显示它——见 sessionVisible。
       // 启动时就叫一声，免得用户重启后以为"人不见了"。

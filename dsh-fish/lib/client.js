@@ -1179,6 +1179,20 @@ window.__ModuleLoader__.load({
                 busy === 'rebuild' ? '搭屋中…' : '重新搭一间')))
         : null
 
+      // 这个家在别处也开着（2026-10-29 m02162）：两个实例同时指向同一个 root 时，
+      // 后进来的这边只读、不建会话。得让用户看见原因，否则他只会觉得「她又不见了」。
+      const blockedCard = state?.home?.blocked === true
+        ? h('div', { className: 'card full' },
+            h('h3', null, '这个家在别处也开着'),
+            h('div', { className: 'dim' },
+              '同一个数据目录（root）现在被另一个实例占着——常见的是你开了第二个工作区窗口，'
+              + '或者两份插件都指向了同一个家。这边先只读：不建新会话、不写记忆，免得两边互相覆盖。'),
+            h('div', { className: 'dim' },
+              state?.home?.blockedWhy || '把另一个关掉之后，这边下次启动会自己接管。'),
+            h('div', { className: 'dim' },
+              '想真正并存，就别让两个家共用一个 root：在 cordis.patch.yml 里给每个条目配不同的 root。'))
+        : null
+
       const resetCard = h('div', { className: 'card full' },
         h('h3', null, '重置大肥鱼'),
         h('div', { className: 'dim' },
@@ -2532,13 +2546,19 @@ window.__ModuleLoader__.load({
         try {
           const r = await jpost('/outing', { action: 'end', kept: keep, rejectedIds: drop })
           setOuting(await jget('/outing'))
+          // 文案必须跟实现一致（0.7.4，用户 m00659 B）：原来写成「那部分判断会被跳过」，
+          // 而 0.6.12 起 kept=false 根本没写 outing-reject 标记 → 一条都没跳过。
+          // 现在 kept=false 会把这一趟的条目全部标上，所以要把真实条数说出来。
+          const autoN = Number(r?.rejected ?? 0)
           setOutingMsg(
             r?.status === 'pending'
               ? '这趟的文件对不上，先没结算。她本人已经回家了（装备也拆了）；把文件还原，再点下面「复核一次」就能收下。'
               : keep === false
-                ? '叫回来了。这趟不算数，那部分判断会被跳过。'
+                ? (autoN > 0
+                    ? `叫回来了。这趟不算数：她这趟写下的 ${autoN} 条全部跳过，不会长在她身上。`
+                    : '叫回来了。这趟不算数。不过这趟她没写下什么，所以没有东西要跳过。')
                 : drop.length
-                  ? '叫回来了。取消勾选了 ' + drop.length + ' 条，那部分会被跳过。'
+                  ? `叫回来了。取消勾选了 ${drop.length} 条，那几条会被跳过，其余照常算。`
                   : '叫回来了。',
           )
           setOutingEndAsk(false)
@@ -2740,8 +2760,11 @@ window.__ModuleLoader__.load({
               ? h('div', null,
                   h('p', { style: { margin: '0 0 6px', fontWeight: 600 } },
                     awayNowUI.line || '此刻在替人说话'),
+                  // 2026-10-29（用户 m01474）：把「你们共用同一个守卫」这件事写明白。
+                  // 守卫挂在 agent 上，不区分谁在说话——所以「拦她」和「拦你」是同一道闸，
+                  // 你在那条对话里伸手去碰她家的路径，一样会被挡回来。
                   h('p', { className: 'hint' },
-                    '这段时间那条对话里回你话的是她，不再是原来的那个人；守卫也分不出谁在说话，会连你一起拦。只能由你来结束。'),
+                    '这段时间那条对话里回你话的是她，不再是原来的那个人。守卫是那条对话共用的一个，分不出谁在说话——你在那儿也没法碰她家的路径（她的屋子、记忆、会话、配置档案），会跟她一起被拦。只能由你来结束。'),
                   h('p', { className: 'hint' },
                     '请神期间她说过的话会留在那条对话的历史里——结束时会补一条「我回去了」，想完全干净请新开一条对话。'))
               : h('p', { className: 'dim', style: { margin: 0 } }, '在家。'),
@@ -2838,8 +2861,9 @@ window.__ModuleLoader__.load({
             ? h('div', null,
                 h('p', { className: 'hint', style: { margin: 0, fontWeight: 600 } },
                   `现在上身：${possessActive.title || '还没起名字的对话'}${possessWhere(possessActive.cwd) ? ` · ${possessWhere(possessActive.cwd)}` : ''}`),
+                // 2026-10-29（用户 m01474）：守卫是那条对话共用的一个，不区分谁在说话。
                 h('p', { className: 'hint', style: { marginTop: '8px' } },
-                  '这段时间那条对话的守卫分不出谁在说话，会连你一起拦；它也不再是原来的那个人。'),
+                  '这段时间那条对话的守卫是你们共用的一个，分不出谁在说话——你在那儿也没法碰她家的路径（她的屋子、记忆、会话、配置档案），会跟她一起被拦；它也不再是原来的那个人。'),
                 h('p', { className: 'hint', style: { marginTop: '6px' } },
                   '请神期间她说过的话会留在这条对话的历史里——结束时会补一条「我回去了」进去，想完全干净请新开一条对话。'),
                 h('button', {
@@ -2860,7 +2884,7 @@ window.__ModuleLoader__.load({
                     onClick: doStartPossess,
                   }, possessBusy ? '正在请……' : '请她上身')),
                 h('p', { className: 'hint', style: { marginTop: '8px', fontWeight: 600 } },
-                  '注意：这段时间那条对话的守卫分不出谁在说话，会连你一起拦；它也不再是原来的那个人。只能由你结束。')),
+                  '注意：这段时间那条对话的守卫是你们共用的一个，分不出谁在说话——你在那儿也没法碰她家的路径（她的屋子、记忆、会话、配置档案），会跟她一起被拦；它也不再是原来的那个人。只能由你结束。')),
           possessMsg ? h('p', { className: 'hint', style: { margin: '8px 0 0' } }, possessMsg) : null))
 
       const envPage = h('div', { className: 'page' },
@@ -3100,6 +3124,8 @@ window.__ModuleLoader__.load({
           : null,
 
         archivedCard,
+
+        blockedCard,
 
         resetCard)
 

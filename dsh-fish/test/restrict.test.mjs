@@ -13,7 +13,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { HER_TOOLS, currentToolSurface, isHerAgent, knownToolNames, ownLayerNames, registerToolRestrict, rememberFromView, rememberKnownTools, readRestrictState, describeRestrict, toolSurfaceText } from '../lib/restrict.js'
+import { HER_TOOLS, currentToolSurface, isHerAgent, knownToolNames, ownLayerNames, registerToolRestrict, rememberFromView, rememberKnownTools, readRestrictState, describeRestrict, toolSurfaceText, toolSurfaceFor, outsideSurfaceText, visibleToolsOf } from '../lib/restrict.js'
 
 /** 一个够用的假插件 ctx：能 on('agent/created')，也能被我们主动触发。 */
 function fakeCtx() {
@@ -492,4 +492,84 @@ test('插件在 agent 建好之后才注册的工具，不重启也能认出来�
   assert.ok(known.includes('late_tool'), '每次问名单都现取一次 view，才认得到后注册的工具')
   assert.ok(ownLayerNames().includes('late_tool'), '晚来的 own 层工具也要能解释「收窄挡不住」')
   assert.equal(calls.length, 1, '这次刷新不该再下一次 restrict')
+})
+
+// ---------------------------------------------------------------------------
+// 出门在外的「手边有什么」（0.7.3，用户 m00339）
+//
+// 病根：`surfaceNow` 是进程级单例、只由 registerToolRestrict 写过一次，值是**家里的白名单**；
+// 而 attachIdentity 无条件挂 fish:tools 段 —— 出门那条会话照样念家里那份，
+// 于是她人在别人工作区、手里握着那个工作区的全部工具，提示词却说「那不是我的：别去调」。
+// 出门不收窄（isHerAgent 为假就 return），awayGuard 又只比对参数里的路径、不看工具名，
+// 所以她**调得动**，只是被自己吓住了。出门打工这个场景就废在这一段话上。
+// ---------------------------------------------------------------------------
+
+/** 一条「在外面」的假 agent：cwd 在别的工作区，view() 报得出此刻看得见的工具。 */
+function outsideAgent(cwd, visibleNames) {
+  const visible = new Map((visibleNames ?? []).map((n) => [n, {}]))
+  const restrictable = new Set(['growth_commit', 'her_recall'])
+  return {
+    session: { header: { cwd } },
+    ctx: {
+      tools: {
+        view: () => ({ visible, restrictableNames: restrictable }),
+      },
+      effect: () => {},
+    },
+  }
+}
+
+test('outsideSurfaceText：念的是那个工作区真给的工具，并且明说放开用', () => {
+  const txt = outsideSurfaceText(['bash', 'read', 'write', 'growth_commit'])
+  assert.match(txt, /bash/)
+  assert.match(txt, /read/)
+  assert.match(txt, /write/)
+  assert.match(txt, /growth_commit/)
+  // 出门就是来干活的：不许再出现「别去调」「那不是我的」这类自我劝阻
+  assert.doesNotMatch(txt, /别去调/)
+  assert.doesNotMatch(txt, /那不是我的/)
+  assert.doesNotMatch(txt, /只有这几样/)
+  // 唯一留着的一条：不许伸手回自己屋子，话术与 awayGuard 一致
+  assert.match(txt, /这件事我做不到/)
+  // 空名单 = 这一层不挂（拿不到工具表时宁可不说，也别瞎说「一样都没有」）
+  assert.equal(outsideSurfaceText([]), '')
+  assert.equal(outsideSurfaceText(null), '')
+})
+
+test('toolSurfaceFor：在家念白名单，在外面念那个工作区的工具', () => {
+  const herDir = 'C:/her-home'
+  registerToolRestrict(fakeCtx(), { herDir, log: () => {} })
+
+  // 在家里：照旧那份白名单（收窄真的在下，她确实只有那几样）
+  const atHome = { session: { header: { cwd: herDir } } }
+  assert.equal(toolSurfaceFor(atHome, { herDir }), currentToolSurface())
+  assert.match(toolSurfaceFor(atHome, { herDir }), /只有这几样/)
+
+  // 在外面：按此刻看得见的现算，绝不能是家里那份
+  const away = outsideAgent('D:/work/somewhere', ['bash', 'read', 'write', 'growth_commit'])
+  const txt = toolSurfaceFor(away, { herDir })
+  assert.match(txt, /bash/)
+  assert.match(txt, /write/)
+  assert.doesNotMatch(txt, /只有这几样/, '出门还念家里白名单就是把她说成残废')
+
+  // 拿不到工具表：说空串，不猜
+  const blind = { session: { header: { cwd: 'D:/work/x' } }, ctx: {} }
+  assert.equal(toolSurfaceFor(blind, { herDir }), '')
+
+  // 没传 herDir：退回家里那份（老调用点/单测兼容，生产上两个调用点都传了）
+  assert.equal(toolSurfaceFor(away, {}), currentToolSurface())
+})
+
+test('visibleToolsOf：优先 visible；老宿主没有 visible 才退回 restrictableNames', () => {
+  const a = outsideAgent('D:/w', ['bash', 'read'])
+  assert.deepEqual(visibleToolsOf(a).sort(), ['bash', 'read'])
+
+  const legacy = {
+    ctx: { tools: { view: () => ({ restrictableNames: new Set(['growth_commit', 'her_recall']) }) } },
+  }
+  assert.deepEqual(visibleToolsOf(legacy).sort(), ['growth_commit', 'her_recall'])
+
+  // 两条路都拿不到 = null（「不知道」不能当成「一样都没有」）
+  assert.equal(visibleToolsOf({ ctx: {} }), null)
+  assert.equal(visibleToolsOf(undefined), null)
 })
