@@ -246,3 +246,59 @@ test('/possession：出门中不许请神；结束时交接句真的写进那条
     rmSync(root, { recursive: true, force: true })
   }
 })
+
+// ---------------------------------------------------------------------------
+// 2026-10-29（用户 m01581，真机）：出门口袋里她拒绝用 growth_commit 记东西。
+//
+// 病根不是功能坏了——tenant.checkCaller 对出门会话是放行的、路径守卫只看参数里的
+// 路径字符串、growth_commit 的参数里没有路径。她的拒绝来自提示词：出门首轮说
+// 「你自己的屋子里的东西不要动」，工具手册说「上面这几样是你自己的屋子里的东西」，
+// 她据此判定 growth_commit 属于屋子、这趟不该碰，整趟一条没写。
+//
+// 这条用例钉住三件事：① 出门首轮必须把「文件与记录」和「工具」分开；
+// ② 工具手册不许再把工具说成屋子里的东西；③ 不许再出现那句引发误解的原话。
+// ---------------------------------------------------------------------------
+test('出门首轮要说清：不许碰的是屋子里的文件和记录，不是工具（m01581）', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'fish-outing-wake-'))
+  try {
+    const wsPath = join(root, 'elsewhere')
+    mkdirSync(join(root, 'home'), { recursive: true })
+    mkdirSync(wsPath, { recursive: true })
+    writeFileSync(join(root, 'home', '她的身份.md'), '我是大肥鱼。\n', 'utf8')
+
+    const h = harness(root, {
+      registry: [{ id: 'w1', path: wsPath, title: '素材' }],
+      create: async () => {
+        const agent = fakeAgent('session-wake', wsPath)
+        attachIdentity(agent, root, { herDir: join(root, 'home') })
+        return agent
+      },
+    })
+
+    const r = await h.call('POST', { action: 'start', workspaceId: 'w1' })
+    assert.equal(r.status, 200, JSON.stringify(r.json))
+
+    const wake = String(h.prompts[0].content[0].text)
+    // ① 禁的是「文件和记录」，原话必须点明这两个词
+    assert.match(wake, /文件和记录不要动/, '要禁的对象必须是文件和记录，不能只说「屋子里的东西」')
+    // ② 工具被显式排除在外，并且写清「用它记东西不算越界」
+    assert.match(wake, /工具不是屋子里的东西/, '必须显式把工具从「屋子里的东西」里摘出来')
+    assert.match(wake, /记在我自己的账上|应该的/, '要告诉她用工具写下的东西落在自己账上是应该的')
+    // ③ 那句真机上把她带偏的原话不许再出现
+    assert.ok(!wake.includes('你自己的屋子里的东西不要动'), '原来那句「你自己的屋子里的东西不要动」必须消失')
+    // ④ 原有三件事不能因此丢掉
+    assert.match(wake, /你出门了/)
+    assert.match(wake, /等家里人叫你回去/)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('工具手册不许把工具说成「屋子里的东西」（m01581）', async () => {
+  const { toolBrief } = await import('../lib/persona.js')
+  const txt = toolBrief(['ops_bash'])
+  assert.ok(!txt.includes('上面这几样是你自己的屋子里的东西'), '原来那句会被身份快照原样带出门，必须改掉')
+  assert.match(txt, /跟着我走|不是屋子里的东西/, '要把「工具跟着她走」说清楚')
+  assert.match(txt, /growth_commit/, '工具名照旧要念给她听')
+  assert.match(txt, /ops_bash/, '额外放行的工具名照旧要念')
+})

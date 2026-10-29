@@ -47,8 +47,8 @@ function fakeAgent(id = 'session-abc') {
 test('请神正文带着走时的自己，并说清楚此刻在谁的地盘', () => {
   const text = possessionText('D:/fake-root', { identity: '我是她。', title: '一个对话' })
   assert.ok(text.startsWith('我是她。'))
-  assert.ok(text.includes('此刻你在「一个对话」里说话'))
-  assert.ok(text.includes('你的屋子照旧别去动'))
+  assert.ok(text.includes('你现在在「一个对话」里说话'))
+  assert.ok(text.includes('你自己的屋子还是别去动'))
 })
 
 test('先按宿主自己的段名覆盖人格（同名才叫换人）', () => {
@@ -218,5 +218,8 @@ test('结束请神只补标准交接句：路由不传 farewell，界面也没�
   assert.ok(!client.includes('possessFarewell'))
   assert.ok(!client.includes('临走留一句'))
   assert.ok(client.includes('想完全干净'))
-  assert.ok(client.includes("{ action: 'end' }"))
+  // 0.7.6（m02241 第⑤条）：结束请神现在要带上「收下哪几条 / 整趟算不算」，
+  // 但仍然是 end 这个动作，且仍然没有 farewell。
+  assert.ok(client.includes("action: 'end'"))
+  assert.ok(client.includes('rejectedIds'))
 })

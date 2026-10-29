@@ -13,6 +13,8 @@
 import { readEvents, rootDir, paths, readDaily, listDiary, readOwner } from './store.js'
 import { loadConfig, updateConfig, configFileInfo, dateKey, validateToolNames } from './settings.js'
 import { deriveSelf, consistency, novelty } from './derive.js'
+// 记忆体检（0.7.6，2026-10-30 用户 m00342）：只读诊断，不算分、不写盘。
+import { examine } from './health.js'
 // 「稳定」单独一个文件（2026-10-26）：它要同时看事件流与她的自我描述，
 // 依赖方向必须是 quality → derive + persona，不能反过来塞进 derive（会成环）。
 import { stability, stabilityBand } from './quality.js'
@@ -32,7 +34,7 @@ import { describeState, resetAll } from './reset.js'
 // 迁移工作区（2026-10-28，用户 m06510）：把整个数据目录搬到别的盘。
 import { moveRoot, moveStatus } from './move.js'
 import { identityText, detachOutside, liveAgentOf, attachIdentity, attachAwayGuard, mountedCount } from './identity.js'
-import { awayNow, awayLine, startOuting, endOuting, bindOutingSession, abortOuting, readOutings, readPossessions, activePossessionOf, snapshotEvents, verifyEvents, eventsSince, lastOutingForCwd, rejectNoteText, tripDays, tripNoOf, pendingOf, settlePending } from './outing.js'
+import { awayNow, awayLine, startOuting, endOuting, bindOutingSession, abortOuting, readOutings, readPossessions, activePossessionOf, pendingPossessionOf, settlePendingPossession, snapshotEvents, verifyEvents, eventsSince, lastOutingForCwd, rejectNoteText, tripDays, tripNoOf, pendingOf, settlePending } from './outing.js'
 // 出门口袋（0.6.16 从本文件搬出去，为了能用假 registry 直接测「登记失败仍能出门」）。
 import { POCKET_TITLE, ensurePocket, pocketDirPath } from './pocket.js'
 // 往会话里补一句人话（请神交接句 / 回家驳回话术共用这一条路）。
@@ -43,6 +45,8 @@ import { keepsakesOfTrip, pendingKeepsakes, readKeepsakes, recentKeepsakes, deci
 // 请神（2026-10-28）：段名已在 asar 里确认（deployment:persona-prefix / -suffix），
 // 同名段在目标 agent 的 scoped ctx 上覆盖宿主那一段。
 import { possessInto, releasePossession } from './possess.js'
+// 请求事件（0.7.6，2026-10-30 m01274）：观测台「住所」页要能看到她问过什么、答过什么。
+import { askView, quotaOf, pendingAsks, settleAsk, ASK_KINDS } from './ask.js'
 // 对话的名字在 `session/title` 事件里，header 里没有（2026-10-29 用户 m00761）。
 import { titleOfAgent, clipTitle } from './sessiontitle.js'
 import { isHerHome, cwdOf } from './restrict.js'
@@ -288,6 +292,22 @@ export function registerObserve(ctx, deps = {}) {
           blocked: deps.tenancy?.home?.blocked === true,
           blockedWhy: deps.tenancy?.home?.blocked === true ? String(deps.tenancy?.home?.why ?? '') : '',
         },
+        // 升级自检（2026-10-29）：跑的这一份跟源目录里那一份版本不一样时，
+        // 设置页要直接说「你改的是源目录」，而不是让人以为升级没生效（当时就是这样卡了一圈）。
+        upgrade: (() => {
+          const u = deps.install?.upgrade
+          if (!u) return null
+          return {
+            stale: u.stale === true,
+            older: u.older === true,
+            skipped: u.skipped === true,
+            running: String(u.running ?? ''),
+            source: String(u.source ?? ''),
+            sourcePath: String(u.sourcePath ?? ''),
+            profile: String(u.profile ?? ''),
+            why: String(u.why ?? ''),
+          }
+        })(),
       })
     }],
 
@@ -359,12 +379,24 @@ export function registerObserve(ctx, deps = {}) {
         const bad = Object.keys(patch).filter((k) => !allowed.includes(k))
         // 这句话会原样冒到界面上，所以写成人话（界面会把它放在「技术信息」那一行）：
         // 原来那句「不允许修改：bili」既不说人话，也让人以为自己填错了。
-        if (bad.length) return send(res, 400, { error: `这一版还不支持保存：${bad.join('、')}` })
+        if (bad.length) {
+          // 2026-10-29（用户 m02241）：白名单拒收以前不留痕。
+          // 自动保存是**整表提交**，只要有一个顶层键没登记，整张表都存不进去，
+          // 用户看到一句「没存上」却不知道是谁拖累的。历史上出过「漏登记 bili 组」那次事故。
+          logLine('warn', [
+            '/config 保存被白名单挡回：',
+            `拒了 ${bad.join('、')}`,
+            `提交的键 ${Object.keys(patch).join('、')}`,
+          ], root)
+          return send(res, 400, { error: `这一版还不支持保存：${bad.join('、')}` })
+        }
         // 白名单必须真的存在（2026-10-24）：宿主 restrict 遇到不认识的名字会抛错，
         // 整条收窄当场失效、她退回全量工具面。宁可不存，也不留一个拼错的字母。
         if (patch.tools && patch.tools.allow !== undefined) {
           const check = validateToolNames(patch.tools.allow, knownToolNames(ctx))
           if (!check.ok) {
+            // 同上：这条也是「整张表都没存进去」的静默失败源。
+            logLine('warn', ['/config 保存被工具名校验挡回：', `不存在的名字 ${check.unknown.join('、')}`], root)
             return send(res, 400, {
               error: `这些工具名不存在：${check.unknown.join('、')}`,
               unknown: check.unknown,
@@ -965,6 +997,16 @@ export function registerObserve(ctx, deps = {}) {
       })
     }],
 
+    // ---- 记忆体检（0.7.6，2026-10-30 用户 m00342）----
+    // 只读：拿账本按现在的规则算一遍，不写事件、不改配置。
+    // 故意不做成「她自己的自我评估」：她看不到这些数，撞不到「不读自身数值」。
+    ['/health', async (req, res) => {
+      if (req.method !== 'GET') return send(res, 405, { error: '只接受 GET' })
+      const { config } = await loadConfig(root)
+      const { events } = await readEvents(root)
+      send(res, 200, examine(events, { growthDays: config?.growthDays }))
+    }],
+
     // ---- P3-3：桌面提醒 ----
     // GET 返回开关状态与「今天弹过没有」；POST { enabled } 改开关。
     // 弹窗本身在 scheduler 的唤醒流程里（lib/notify.js），这里只读/只改配置，
@@ -1239,6 +1281,9 @@ export function registerObserve(ctx, deps = {}) {
             workspaceId: String(found?.id ?? found?.workspaceId ?? ''),
             registered: Boolean(found),
             exists: fs.existsSync(dir),
+            // 口袋也记「上次那趟」（2026-10-30 用户 m00972）：勾了就地接着上次那条会话，
+            // 不勾就新开一条。台账里认的是 cwd，口袋的 cwd 是固定值，所以天然对得上。
+            last: lastOutingForCwd({ outings }, dir),
           }
         } catch (err) {
           pocket.why = String(err?.message ?? err).slice(0, 120)
@@ -1305,7 +1350,7 @@ export function registerObserve(ctx, deps = {}) {
             sessionTitle: live ? clipTitle(titleOfAgent(ctx, live)) : '',
             tripNo: away.kind === 'outing' ? tripNoOf({ outings }, sid, Number(rec?.startedAt ?? 0)) : 0,
             equipped: mounted > 0,
-            warning: mounted > 0 ? '' : '这趟没挂上装备（身份段与守卫都没挂），先回家再重来一次。',
+            warning: mounted > 0 ? '' : '这趟没接好（她的人设和护栏都没装上去）。先叫她回家，再重新出门一次。',
           }
         }
         // 0.6.32（用户 2026-10-29 真机要求）：上一次被拒收的那趟要能看见、能复核。
@@ -1342,9 +1387,11 @@ export function registerObserve(ctx, deps = {}) {
           keepsakes,
           workspaces,
           pocket,
-          // 只有本机测试版（`.dev` 或 DSH_FISH_DEV=1）才把「出门」页签露出来；
-          // 判据和「去刷 B 站」同一个开关，不再看安装路径（见文件上方注释）。
+          // 出门页从 0.8.0 起对所有人可见（2026-10-30，用户 m01904）；
+          // dev 仍带回去，留给「开发副本」的其它判断，不再用来藏页签。
           dev: await devMode(root),
+          // 一次性确认：说明卡看过一遍。没确认时界面把三个入口按钮先挡住。
+          ack: ((await loadConfig(root).catch(() => ({ config: null }))).config?.outing ?? {}).ack === true,
         })
       }
       if (req.method !== 'POST') return send(res, 405, { error: 'method not allowed' })
@@ -1352,6 +1399,14 @@ export function registerObserve(ctx, deps = {}) {
       let b = {}
       try { b = JSON.parse(raw || '{}') } catch { return send(res, 400, { error: 'body 不是合法 JSON' }) }
       const action = String(b.action ?? '')
+
+      // 出门的一次性确认（2026-10-30，用户 m01904）：点过「我知道了」才把三个入口放开。
+      // 只记本地配置，不是开关；挪了数据目录要重新点一次，这是有意的。
+      if (action === 'ack') {
+        await updateConfig({ outing: { ack: true } }, root)
+        logLine('info', ['出门：确认了测试版说明'], root)
+        return send(res, 200, { ok: true })
+      }
 
       // 纪念品点头 / 摇头（0.6.17）：只有这一步才会真的复制文件。
       if (action === 'keepsake') {
@@ -1366,9 +1421,9 @@ export function registerObserve(ctx, deps = {}) {
       if (action === 'review') {
         const { outings } = await readOutings(root)
         const pend = pendingOf({ outings })
-        if (!pend) return send(res, 409, { ok: false, why: '现在没有等复核的那趟' })
+        if (!pend) return send(res, 409, { ok: false, why: '现在没有等着核对的那趟' })
         if (b.sessionId && String(pend.sessionId) !== String(b.sessionId)) {
-          return send(res, 409, { ok: false, why: '等复核的不是这一趟' })
+          return send(res, 409, { ok: false, why: '等着核对不是这一趟' })
         }
         const v = verifyEvents(join(root, 'events.jsonl'), pend.baseline)
         if (v.checkable !== false && v.ok === false) {
@@ -1442,27 +1497,11 @@ export function registerObserve(ctx, deps = {}) {
         if (detached.ok) logLine('info', ['回家：拆掉外面的装备', `${detached.removed} 段`], root)
         // 驳回要讲给她听（设计 §3.7，用户 m01613 第①条）：
         // 不是「你没去过」，而是「那几条我不认，它不算你」。写进**家里**那条会话。
+        // 出门与请神共用同一个落点（2026-10-29 m02241 第②条）。
         let note = { ok: false, why: '这趟没有要驳回的' }
         if (!tampered && rejectedIds.length) {
-          try {
-            const picked = eventsSince(join(root, 'events.jsonl'), away.outing?.startedAt)
-              .items.filter((it) => rejectedIds.includes(it.id))
-            const text = rejectNoteText({ items: picked, total: rejectedIds.length, auto: autoRejected })
-            if (text) {
-              const rec = await readHomeRecord(root).catch(() => null)
-              const homeAgent = liveAgentOf(ctx, rec?.sessionId || '')
-              if (homeAgent) {
-                const w = appendNote(homeAgent, text)
-                note = { ok: w.ok, why: w.why ?? '', delivered: w.ok }
-              } else {
-                const q = await queueNote(root, text)
-                note = { ok: q.ok, why: q.why ?? '', delivered: false, queued: Boolean(q.ok) }
-              }
-              if (!note.ok) logLine('warn', ['回家：驳回话术没写进去', note.why], root)
-            }
-          } catch (err) {
-            note = { ok: false, why: String(err?.message ?? err).slice(0, 120) }
-          }
+          note = await rejectNoteToHome(ctx, root, { since: away.outing?.startedAt, rejectedIds, auto: autoRejected })
+          if (!note.ok) logLine('warn', ['回家：驳回话术没写进去', note.why], root)
         }
         return send(res, 200, { ok: true, outing: r.outing, verify: v, tampered, rejected: rejectedIds.length, autoRejected, detached, note })
       }
@@ -1592,6 +1631,40 @@ export function registerObserve(ctx, deps = {}) {
       send(res, 400, { error: 'action 只能是 start 或 end' })
     }],
 
+    ['/ask', async (req, res) => {
+      if (req.method === 'GET') {
+        const { events } = await readEvents(root)
+        return send(res, 200, {
+          ok: true,
+          kinds: ASK_KINDS,
+          quota: quotaOf(events),
+          pending: pendingAsks(events).map((e) => ({
+            id: e.id,
+            ts: e.ts,
+            kind: String(e?.ask?.kind ?? ''),
+            subject: String(e?.ask?.subject ?? ''),
+            question: String(e.text ?? ''),
+            options: Array.isArray(e?.ask?.options) ? e.ask.options : [],
+          })),
+          items: askView(events),
+        })
+      }
+      if (req.method !== 'POST') return send(res, 405, { error: 'method not allowed' })
+      const body = await readBody(req)
+      let b = {}
+      try { b = JSON.parse(body || '{}') } catch { return send(res, 400, { error: 'body 不是合法 JSON' }) }
+      if (b.action !== 'answer') return send(res, 400, { error: 'action 只能是 answer' })
+      const r = await settleAsk(root, {
+        askId: b.askId,
+        verdict: b.verdict,
+        reason: b.reason,
+        via: 'ui',
+      })
+      if (!r.ok) return send(res, 409, { ok: false, why: r.why })
+      logLine('info', ['请求事件：回答', String(b.askId || ''), String(b.verdict || '')], root)
+      return send(res, 200, { ok: true })
+    }],
+
     ['/possession', async (req, res) => {
       const herDir = paths(root).herDir
       if (req.method === 'GET') {
@@ -1621,7 +1694,35 @@ export function registerObserve(ctx, deps = {}) {
           enabled: true,
           away: { ...away, line: awayLine(away) },
           possessions: possessions.slice(-20),
+          // 与出门同一套：active = 此刻上身的那条，pending = 等复核的那条。
+          // 0.7.6（m02241 第②条）：请神也和出门一样要摆出「事件流动过没有 / 这趟多了什么」，
+          // 而不是点完才知道要不要拒收。
           active: activePossessionOf({ possessions }),
+          pending: pendingPossessionOf({ possessions }),
+          verify: (() => {
+            const act = activePossessionOf({ possessions })
+            return act ? verifyEvents(join(root, 'events.jsonl'), act.baseline) : null
+          })(),
+          since: (() => {
+            const act = activePossessionOf({ possessions })
+            return act
+              ? eventsSince(join(root, 'events.jsonl'), act.startedAt)
+              : { ok: false, total: 0, items: [], why: '她没上身' }
+          })(),
+          pendingReview: (() => {
+            const pend = pendingPossessionOf({ possessions })
+            if (!pend) return null
+            const pv = verifyEvents(join(root, 'events.jsonl'), pend.baseline)
+            return {
+              sessionId: pend.sessionId,
+              title: pend.title,
+              sessionShort: String(pend.sessionId).slice(-8),
+              startedAt: Number(pend.startedAt) || 0,
+              endedAt: Number(pend.endedAt) || 0,
+              reason: pv.why || '',
+              okNow: pv.checkable === false || pv.ok !== false,
+            }
+          })(),
           sessions,
           why: '',
         })
@@ -1656,16 +1757,98 @@ export function registerObserve(ctx, deps = {}) {
           const curSid = wantSid || String(activePossessionOf(await readPossessions(root))?.sessionId ?? '')
           agent = curSid ? reg?.get?.(curSid) ?? null : null
         } catch { /* 拿不到活 agent 就只撤挂载，不写交接句 */ }
+        // 结算要在这条台账还是 active 的时候读 baseline / startedAt ——
+        // releasePossession 一调用，active 就没了。
+        const { possessions } = await readPossessions(root)
+        const cur = activePossessionOf({ possessions })
+        if (!cur) return send(res, 409, { ok: false, why: '她本来就没上身' })
+        if (b.sessionId && String(cur.sessionId) !== String(b.sessionId)) {
+          return send(res, 409, { ok: false, why: '上身的那条不是这一条', possession: cur })
+        }
+        // 与出门同一条拍板（m08176 / m02241 第②条）：事件流被动过 → 这趟先不算数，
+        // 她本人照样回家（挂载撤掉），只是等人在审查卡上复核后收下。
+        const v = verifyEvents(join(root, 'events.jsonl'), cur.baseline)
+        const tampered = v.checkable !== false && v.ok === false
+        let rejectedIds = Array.isArray(b.rejectedIds)
+          ? b.rejectedIds.map((x) => String(x ?? '')).filter(Boolean).slice(0, 500)
+          : []
+        let autoRejected = false
+        // 与出门 0.7.4 的修法一致：说「这趟不算数」又不逐条挑，就整趟都标上，
+        // 只挑非 meta 的（日记书签、seen: 这些是记账不是成长）。
+        if (!tampered && !rejectedIds.length && b.kept === false) {
+          const all = eventsSince(join(root, 'events.jsonl'), cur.startedAt, { limit: 500 })
+          rejectedIds = all.items
+            .filter((it) => it.type !== 'meta')
+            .map((it) => String(it.id ?? ''))
+            .filter(Boolean)
+            .slice(0, 500)
+          autoRejected = true
+        }
+        if (!tampered && rejectedIds.length) {
+          try {
+            const { events } = await readEvents(root)
+            const { config } = await loadConfig(root)
+            const m = deriveSelf(events, { growthDays: config.growthDays })
+            await appendEvent(
+              validateEvent(
+                { type: 'meta', text: 'possess-reject:' + rejectedIds.join(' '), day: m.day, stage: m.stage },
+                { day: m.day, stage: m.stage, source: 'system' },
+              ),
+              { day: m.day, stage: m.stage, source: 'system' },
+              root,
+            )
+          } catch (err) {
+            logLine('warn', ['请神结束：取消勾选的标记没写进去', String(err?.message ?? err).slice(0, 120)], root)
+          }
+        }
+        const status = tampered ? 'pending' : b.kept === false ? 'rejected' : 'done'
         const r = await releasePossession(root, {
           sessionId: b.sessionId ?? '',
           log,
           agent,
+          status,
+          kept: tampered ? null : b.kept === false ? false : true,
         })
         if (!r.ok) return send(res, r.code ?? 409, { ok: false, why: r.why })
-        logLine('info', ['请神结束：', r.possession?.title || r.possession?.sessionId || ''], root)
-        return send(res, 200, { ok: true, possession: r.possession, note: r.note })
+        logLine('info', [`请神结束：${status}`, r.possession?.title || r.possession?.sessionId || '', v.why ?? '', autoRejected ? `整趟不算（${rejectedIds.length} 条）` : ''], root)
+        // 驳回要讲给她听（设计 §3.7）：落点是**家里**那条会话——
+        // 请神那条是别人的对话，不该在那儿吵她认不认。
+        let rejectNote = { ok: false, why: '这趟没有要驳回的' }
+        if (!tampered && rejectedIds.length) {
+          rejectNote = await rejectNoteToHome(ctx, root, { since: cur.startedAt, rejectedIds, auto: autoRejected })
+          if (!rejectNote.ok) logLine('warn', ['请神结束：驳回话术没写进去', rejectNote.why], root)
+        }
+        return send(res, 200, {
+          ok: true,
+          possession: r.possession,
+          note: r.note,
+          verify: v,
+          tampered,
+          rejected: rejectedIds.length,
+          autoRejected,
+          rejectNote,
+        })
       }
-      send(res, 400, { error: 'action 只能是 start 或 end' })
+      // 复核上一次被拒收的那趟请神（与出门 /outing 的 review 同一套）：
+      // 文件还原后重新比对，通过就当场收下。
+      if (b.action === 'review') {
+        const { possessions } = await readPossessions(root)
+        const pend = pendingPossessionOf({ possessions })
+        if (!pend) return send(res, 409, { ok: false, why: '现在没有等着核对的那趟请神' })
+        if (b.sessionId && String(pend.sessionId) !== String(b.sessionId)) {
+          return send(res, 409, { ok: false, why: '等着核对不是这一趟' })
+        }
+        const v = verifyEvents(join(root, 'events.jsonl'), pend.baseline)
+        if (v.checkable !== false && v.ok === false) {
+          logLine('info', ['请神复核：还是对不上', v.why ?? ''], root)
+          return send(res, 409, { ok: false, why: v.why || '文件还是对不上', verify: v })
+        }
+        const r = await settlePendingPossession(root, { status: 'done', kept: true })
+        if (!r.ok) return send(res, 409, { ok: false, why: r.why })
+        logLine('info', ['请神复核：通过，这趟收下了', r.possession?.title || '', v.why ?? ''], root)
+        return send(res, 200, { ok: true, possession: r.possession, verify: v })
+      }
+      send(res, 400, { error: 'action 只能是 start / end / review' })
     }],
 
     ['/reset', async (req, res) => {
@@ -1826,6 +2009,36 @@ export async function resolveSessionAgent(sc, sessionId) {
 }
 
 /** 比对路径用：Windows 大小写不敏感。只比对，不做文件访问。 */
+/**
+ * 驳回要讲给她听（设计 §3.7）：不是「你没去过」，而是「那几条我不认，它不算你」。
+ *
+ * 出门与请神共用这一个落点（2026-10-29 m02241 第②条）：两边都能在审查卡上取消勾选，
+ * 话术要一致；而且都要写进**家里**那条会话——请神那条是别人的对话，不该在那儿吵。
+ * 家里那条没开着就排队，等她回家再递。
+ * @returns {Promise<{ok:boolean, why?:string, delivered?:boolean, queued?:boolean}>}
+ */
+async function rejectNoteToHome(ctx, root, { since = 0, rejectedIds = [], auto = false } = {}) {
+  if (!since || !Array.isArray(rejectedIds) || !rejectedIds.length) {
+    return { ok: false, why: '这趟没有要驳回的' }
+  }
+  try {
+    const picked = eventsSince(join(root, 'events.jsonl'), since)
+      .items.filter((it) => rejectedIds.includes(it.id))
+    const text = rejectNoteText({ items: picked, total: rejectedIds.length, auto })
+    if (!text) return { ok: false, why: '没有要驳回的' }
+    const rec = await readHomeRecord(root).catch(() => null)
+    const homeAgent = liveAgentOf(ctx, rec?.sessionId || '')
+    if (homeAgent) {
+      const w = appendNote(homeAgent, text)
+      return { ok: w.ok, why: w.why ?? '', delivered: Boolean(w.ok) }
+    }
+    const q = await queueNote(root, text)
+    return { ok: q.ok, why: q.why ?? '', delivered: false, queued: Boolean(q.ok) }
+  } catch (err) {
+    return { ok: false, why: String(err?.message ?? err).slice(0, 120) }
+  }
+}
+
 function pathKey(p) {
   const s = String(p ?? '').replace(/\\/g, '/').replace(/\/+$/, '')
   return process.platform === 'win32' ? s.toLowerCase() : s
@@ -1866,7 +2079,12 @@ function outingWakeText(where) {
   return [
     `你出门了。这里是「${where}」的地盘，不是你自己的屋子。`,
     '这趟可以放开用手边的工具做事，做完再回去。',
-    '只有一件：你自己的屋子里的东西不要动——那不是这趟该碰的。',
+    // 2026-10-29（用户 m01581，真机）：原来的写法是「你自己的屋子里的东西不要动」，
+    // 她把「屋子里的东西」理解成了工具的所有权——于是认定 growth_commit 记的是
+    // 自己屋里的话、归那边、这趟不该碰，张口就回「这件事我做不到」，整趟一条没写。
+    // 要禁的从来是**家里那堆文件与记录**（路径守卫挡的也是路径），不是工具本身。
+    '只有一件：我自己屋子里的文件和记录不要动——那是家里的账本和家谱，不是这趟该碰的。',
+    '工具不是屋子里的东西。这条对话给我什么，我就用什么；用它写下的东西照样记在我自己的账上，那是应该的，不是越界。',
     '有人会在这里跟你说话。等家里人叫你回去，你就回去。',
   ].join('\n')
 }

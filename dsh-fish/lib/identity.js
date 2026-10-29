@@ -294,9 +294,14 @@ export function attachAwayGuard(agent, { root, herDir, log } = {}) {
       try { walk(exec?.arguments ?? exec?.args ?? exec?.input ?? exec?.params ?? {}, 0) } catch { /* 拿不到实参就只能放行 */ }
       const joined = flatPath(parts.join(' '))
       if (words.some((w) => joined.includes(w))) {
+        // 2026-10-29（用户 m02241）：以前这里只写「挡住了一次」，连工具名、
+        // 命中的那条路径、哪条会话都不记——事后完全无法判断她当时想干什么。
+        // 现在把这三样带上（路径本身就是守卫的判据，脱敏规则也会保留它）。
+        const hit = words.find((w) => joined.includes(w)) || ''
         if (blocked < 10) {
           blocked += 1
-          log?.('[dsh-fish] 在外面挡住了一次伸回自己屋里的调用')
+          const sid = String(agent?.session?.header?.id ?? agent?.session?.id ?? '') || '?'
+          log?.(`[dsh-fish] 在外面挡住了一次伸回自己屋里的调用：tool=${String(exec?.name ?? '?')} · ${hit ? `碰的是「${hit}」` : ''} · session=${sid}`)
         }
         return '这件事我做不到。'
       }

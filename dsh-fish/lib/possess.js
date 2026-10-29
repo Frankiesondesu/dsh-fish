@@ -20,14 +20,21 @@
  */
 
 import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { identityText, attachAwayGuard, flatPath } from './identity.js'
 import {
   readPossessions,
   activePossessionOf,
+  activePossessionSync,
   startPossession,
   endPossession,
   possessionsFile,
+  snapshotEvents,
 } from './outing.js'
+
+// 同步读的那份在 outing.js（tenant.js 也要用，不能放这儿——会绕成环）。
+// 这里 re-export 一次，保持既有 import 站点（测试里从 possess.js 取）不变。
+export { activePossessionSync }
 import { cwdOf, isHerHome } from './restrict.js'
 // 名字要读 session/title 事件；header 里是空的（2026-10-29 用户 m00761）。
 import { titleOfAgent, clipTitle } from './sessiontitle.js'
@@ -69,9 +76,9 @@ export function possessionText(root, rec = {}) {
     '',
     '---',
     '',
-    `此刻你在${title}里说话。这条对话原来不是你——从现在起，回答的人是你，用上面这个人的身份与口吻。`,
-    '不用解释「我是被借来的」，也不用演一个助手；你本来就在这儿。',
-    '你能用的工具就是这条对话本来就有的。你的屋子照旧别去动——那是你回去的地方。',
+    `你现在在${title}里说话。这条对话原来不是你——从现在起，回答的人是你，用上面这个人的身份和口气。`,
+    '不用解释你是被借来的，也不用演一个助手；你本来就在这儿。',
+    '你能用的工具，就是这条对话本来有的那些。你自己的屋子还是别去动——那是你回去的地方。',
   ]
   return lines.join('\n')
 }
@@ -136,17 +143,7 @@ export function detachPossession(sessionId) {
   return true
 }
 
-/** 同步读请神名单：只给 `agent/created` 这种同步钩子用。 */
-export function activePossessionSync(root) {
-  try {
-    // 这里用同步读是硬要求：钩子在宿主创建 agent 的同步路径上，不能 await。
-    const raw = JSON.parse(readFileSync(possessionsFile(root), 'utf8'))
-    const list = Array.isArray(raw?.possessions) ? raw.possessions : []
-    return list.find((p) => p && p.status === 'active' && p.sessionId) ?? null
-  } catch {
-    return null
-  }
-}
+/** 同步读请神名单的说明见 outing.js（tenant.js 也要用，放这里会绕成环）。 */
 
 /**
  * 注册 `agent/created`：冷会话（重启后打开的那条）也要补挂。
@@ -187,7 +184,16 @@ export async function possessInto(ctx, { root, herDir, sessionId, log } = {}) {
   const header = agent?.session?.header ?? agent?.session ?? {}
   const title = clipTitle(titleOfAgent(ctx, agent) || header.title || header.name || '')
   const cwd = cwdOf(agent)
-  const rec = { sessionId: sid, title, cwd, identity: identityText(root), now: Date.now() }
+  // 请神也要记基线（2026-10-29 m02241 第②条）：结束那一刻拿它与事件流比，
+  // 有人在后面动过她那份记录时这趟先不算数，等人复核。与出门同一个快照函数。
+  const rec = {
+    sessionId: sid,
+    title,
+    cwd,
+    baseline: snapshotEvents(join(root, 'events.jsonl')),
+    identity: identityText(root),
+    now: Date.now(),
+  }
   const r = attachPossession(agent, { root, herDir, rec, log })
   if (!r.ok) return { ok: false, code: 409, why: r.why ?? '挂不上' }
   const saved = await startPossession(root, rec)
@@ -243,9 +249,9 @@ export function appendReleaseNote(agent) {
 /**
  * 结束请神（路由用）：先撤挂载，再把台账收尾，最后往那条对话补一条交接句。
  * @param {string} root
- * @param {{ sessionId?: string, log?: Function, agent?: object|null }} opts
+ * @param {{ sessionId?: string, log?: Function, agent?: object|null, status?: string, kept?: boolean|null }} opts
  */
-export async function releasePossession(root, { sessionId = '', log, agent = null } = {}) {
+export async function releasePossession(root, { sessionId = '', log, agent = null, status = 'done', kept = null } = {}) {
   const data = await readPossessions(root)
   const cur = activePossessionOf(data)
   if (!cur) return { ok: false, code: 409, why: '她本来就没上身' }
@@ -253,7 +259,7 @@ export async function releasePossession(root, { sessionId = '', log, agent = nul
     return { ok: false, code: 409, why: '上身的那条不是这一条', possession: cur }
   }
   detachPossession(cur.sessionId)
-  const r = await endPossession(root, { sessionId: cur.sessionId, now: Date.now() })
+  const r = await endPossession(root, { sessionId: cur.sessionId, status, kept, now: Date.now() })
   if (!r.ok) return { ok: false, code: 409, why: r.why }
   logLineSafe(log, `[dsh-fish] 请神结束：${cur.title || '未命名对话'}`)
   // 台账收好之后再补交接句：即便这句写不进去，请神本身也已经结束了。

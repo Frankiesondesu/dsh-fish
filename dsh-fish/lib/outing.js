@@ -84,6 +84,8 @@ export async function readPossessions(root) {
       endedAt: p.endedAt ? Number(p.endedAt) : 0,
       status: String(p.status ?? 'active'),
       baseline: p.baseline && typeof p.baseline === 'object' ? p.baseline : null,
+      // 与出门同一套语义：null = 还没结算（等复核），false = 这趟不算数。
+      kept: p.kept === undefined || p.kept === null ? null : Boolean(p.kept),
       identity: String(p.identity ?? ''),
     }))
     .sort((a, b) => a.startedAt - b.startedAt)
@@ -139,10 +141,16 @@ export async function awayNow(root) {
 }
 
 /**
- * `events.jsonl` 的基线：字节数 + 尾部 sha256。
+ * `events.jsonl` 的基线：字节数 + 整文件 sha256（+ 尾部 sha256 作旧档兼容）。
  *
- * 为什么是「尾部」而不是整文件哈希：她的日记级文件会一直长，整文件哈希每次回家
- * 都要把几兆读一遍；尾部的稳定性足够发现「有人在后面动过笔」，成本是常数。
+ * 为什么从「只哈希尾部 4096 字节」改成整文件（2026-10-29 用户 m02241 第③条）：
+ *   尾部哈希有个洞——改中间字节、只要字节数不变、尾部还是原来那 4096 字节，
+ *   就一点都看不出来。当初用尾部是怕文件长到几兆、每次回家都要全读一遍；
+ *   实际 events.jsonl 到 2026-10 也才 100KB 级，全量 sha256 是毫秒级，
+ *   用常数成本换一个盲区不值得。
+ *
+ * 兼容：旧基线只有 `tailSha256`，没有 `hash`。`verifyEvents` 见到没有 `hash`
+ * 的旧基线就退回尾部比对（不能让历史台账在升级后集体变成「判不了」）。
  */
 export function snapshotEvents(file) {
   try {
@@ -157,47 +165,66 @@ export function snapshotEvents(file) {
     }
     return {
       size: st.size,
+      // 整文件哈希：中间被改也能看出来。
+      hash: createHash('sha256').update(readFileSync(file)).digest('hex'),
       tailSha256: createHash('sha256').update(buf).digest('hex'),
       at: Date.now(),
     }
   } catch {
-    return { size: -1, tailSha256: '', at: Date.now() }
+    return { size: -1, hash: '', tailSha256: '', at: Date.now() }
   }
 }
 
 /**
  * 回家时比对基线。三态：
- * - `ok: true`   没动过（大小一致、尾部一致）
- * - `ok: false`  **动过**：大小变小 / 尾部哈希变了（追加也会改尾部哈希，见 `appended`）
+ * - `ok: true`   没动过（大小没缩、开头 baseline.size 字节逐字节一致）
+ * - `ok: false`  **动过**：大小变小 / 开头那段变了（含「大小不变原地改写」）
  * - `appended: n` 允许的正常增长：她这趟用 `growth_commit` 写的事件（合法，不算改）
  *
- * 判据刻意保守：**只认「尾部哈希一致 + 大小没缩」为没动过**。
+ * 判据（2026-10-29 m02241 第③条改）：基线有 `hash` 时比的是**开头 baseline.size 字节**
+ * 的整段哈希——追加不影响这一段的哈希，所以「追加了但把前面的行改了」也躲不掉。
+ * 旧基线只有 `tailSha256`：只能退回尾比，且只能在大小不变时判。
  * 追加之后尾部哈希必然变，所以「追加算不算篡改」不在这里判——交给审查卡，
  * 由人看着差异决定收不收（方案 3.5 第④层）。
  */
 export function verifyEvents(file, baseline) {
   const now = snapshotEvents(file)
   if (!baseline || typeof baseline.size !== 'number' || baseline.size < 0) {
-    return { ok: null, checkable: false, why: '出门时没记下基线（文件还不存在？）', before: baseline ?? null, after: now }
+    return { ok: null, checkable: false, why: '出门时没记下她自己的记录（文件还不存在？）', before: baseline ?? null, after: now }
   }
   if (now.size < 0) {
-    return { ok: false, checkable: true, why: 'events.jsonl 读不到了', before: baseline, after: now }
+    return { ok: false, checkable: true, why: '记录读不到了', before: baseline, after: now }
   }
   if (now.size < baseline.size) {
     return {
       ok: false,
       checkable: true,
-      why: `事件流变小了：${baseline.size} → ${now.size} 字节（被删过行）`,
+      why: '记录比出门时短了（被删过行）',
       before: baseline,
       after: now,
     }
   }
   const appended = now.size - baseline.size
-  if (appended === 0 && now.tailSha256 !== baseline.tailSha256) {
+  // ① 新基线（有整段哈希）：比开头那 baseline.size 字节，追加不影响它。
+  if (baseline.hash) {
+    const head = hashHead(file, baseline.size)
+    if (head !== baseline.hash) {
+      return {
+        ok: false,
+        checkable: true,
+        why: appended === 0
+          ? '记录长度没变，但里面的字被改过。'
+          : '出门前那段内容被改过（后面的新增是正常的，改前面就不行）。',
+        before: baseline,
+        after: now,
+      }
+    }
+  } else if (appended === 0 && now.tailSha256 !== baseline.tailSha256) {
+    // ② 旧基线（只有尾部哈希，升级前记的）：只能在大小不变时判。
     return {
       ok: false,
       checkable: true,
-      why: '事件流大小没变但尾部内容变了（被原地改写）',
+      why: '记录长度没变，但末尾的字被改过。',
       before: baseline,
       after: now,
     }
@@ -207,9 +234,33 @@ export function verifyEvents(file, baseline) {
     ok: true,
     checkable: true,
     appended,
-    why: `这趟新增了 ${appended} 字节（正常写入；尾部必然变，不据此判篡改）`,
+    why: `这趟新增了 ${appended} 字节（正常写入；追加不算篡改）`,
     before: baseline,
     after: now,
+  }
+}
+
+/**
+ * 只哈希文件开头 n 字节。
+ *
+ * 为什么要它：整文件哈希在「追加之后」必然对不上，而追加是正常写入。
+ * 拿出门时那段的长度去哈希当前文件的开头，就能既允许追加、又不放过
+ * 「追加前把中间某行改了」。
+ */
+function hashHead(file, n) {
+  try {
+    const size = Number(n) || 0
+    if (size <= 0) return ''
+    const buf = Buffer.alloc(size)
+    const fd = openSync(file, 'r')
+    try {
+      readSync(fd, buf, 0, size, 0)
+    } finally {
+      closeSync(fd)
+    }
+    return createHash('sha256').update(buf).digest('hex')
+  } catch {
+    return ''
   }
 }
 
@@ -363,7 +414,7 @@ export async function startPossession(root, rec = {}) {
   return { ok: true, possession }
 }
 
-export async function endPossession(root, { sessionId = '', status = 'done', now = Date.now() } = {}) {
+export async function endPossession(root, { sessionId = '', status = 'done', kept = null, now = Date.now() } = {}) {
   const data = await readPossessions(root)
   const cur = activePossessionOf(data)
   if (!cur) return { ok: false, why: '她本来就没上身' }
@@ -371,7 +422,34 @@ export async function endPossession(root, { sessionId = '', status = 'done', now
     return { ok: false, why: '上身的那条不是这一条', possession: cur }
   }
   cur.status = String(status)
+  cur.kept = kept === null ? null : Boolean(kept)
   cur.endedAt = Number(now) || Date.now()
+  await writePossessions(root, data)
+  return { ok: true, possession: cur }
+}
+
+/** 最近一趟「等复核」的请神：事件流被动过、还没结算的那趟；没有就 null。 */
+export function pendingPossessionOf({ possessions = [] } = {}) {
+  for (let i = possessions.length - 1; i >= 0; i -= 1) {
+    if (possessions[i]?.status === 'pending') return possessions[i]
+  }
+  return null
+}
+
+/**
+ * 复核通过后把 last pending 那趟请神收下（与出门的 settlePending 同一套语义）。
+ * 只改台账，不改事件流。
+ */
+export async function settlePendingPossession(root, { status = 'done', kept = true, sessionId = '', now = Date.now() } = {}) {
+  const data = await readPossessions(root)
+  const cur = pendingPossessionOf(data)
+  if (!cur) return { ok: false, why: '没有等复核的那趟请神' }
+  if (sessionId && cur.sessionId !== String(sessionId)) {
+    return { ok: false, why: '等复核的不是这一趟', possession: cur }
+  }
+  cur.status = String(status)
+  cur.kept = Boolean(kept)
+  cur.endedAt = Number(cur.endedAt) || Number(now) || Date.now()
   await writePossessions(root, data)
   return { ok: true, possession: cur }
 }
@@ -401,8 +479,12 @@ export function eventsSince(file, since, { limit = 300 } = {}) {
     let ev = null
     try { ev = JSON.parse(line) } catch { continue }
     if (!ev || !(tsMs(ev) >= at)) continue
-    // 审查标记本身不是她做的事，不进列表。
-    if (ev.type === 'meta' && /^outing-(reject|keep):/.test(String(ev.text ?? ''))) continue
+    // 审查标记本身不是她做的事，不进列表（出门与请神两套前缀）。
+    if (ev.type === 'meta' && /^(outing|possess)-(reject|keep):/.test(String(ev.text ?? ''))) continue
+    // `seen:` 是「这天的材料她读过了」的记账行，人看了只会以为是乱码（用户 2026-10-30 真机反馈：
+    // 列表里除了她写的，还多出一串数字和英文）。它跟着每条成长各写一行，摆在审查卡上纯属噪音，
+    // 也不该被勾成「跳过」——跳过一条 seen 什么都不影响，只会让台账里多一串看不懂的 id。
+    if (ev.type === 'meta' && /^seen:/.test(String(ev.text ?? ''))) continue
     items.push({
       id: String(ev.id ?? ''),
       ts: tsMs(ev),
@@ -430,6 +512,23 @@ export function activeOutingSync(root) {
 }
 
 /**
+ * 同步读请神名单：只给同步钩子用（`agent/created`、`checkCaller`）。
+ *
+ * 为什么放在这个文件而不是 possess.js：`lib/tenant.js` 要用它做「请神期间允许写回自己家」
+ * 的判据，而 `possess.js` → `identity.js` → `selfdoc.js` → `tenant.js` 已经是一条链，
+ * 再从 tenant 反向引 possess 就成了环。台账的读写本来就在这里，同步版也放这里。
+ */
+export function activePossessionSync(root) {
+  try {
+    const raw = JSON.parse(readFileSync(possessionsFile(root), 'utf8'))
+    const list = Array.isArray(raw?.possessions) ? raw.possessions : []
+    return list.find((p) => p && p.status === 'active' && p.sessionId) ?? null
+  } catch {
+    return null
+  }
+}
+
+/**
  * 状态卡上那一行。没有 active 就返回空串（调用方据此决定加不加这行）。
  * 只写时间长度，不写「想念」之类的情绪评价——那是她的事，不是状态卡的。
  */
@@ -444,10 +543,10 @@ export function awayLine(away, { now = Date.now() } = {}) {
   const dur = days >= 1 ? `${days} 天` : hours >= 1 ? `${hours} 小时` : `${Math.max(1, mins)} 分钟`
   if (away.kind === 'outing') {
     const where = away.outing?.workspaceName || away.outing?.workspaceId || '别的工作区'
-    return `此刻在外面：${where} · 已 ${dur}`
+    return `现在在外面：${where} · 已经 ${dur}`
   }
   const where = away.possession?.title || '一条对话'
-  return `此刻在替人说话：${where} · 已 ${dur}`
+  return `现在在这条对话里替人说话：${where} · 已经 ${dur}`
 }
 
 /** 比对目录：反斜杠、大小写、尾斜杠都抹平（只比对，不访问盘）。 */

@@ -26,6 +26,7 @@ import { deriveSelf } from './derive.js'
 import { writeInboxFile, newHerEventsSince } from './inbox.js'
 import { bumpTurns, rotateTalkSession, talkSessionId } from './home.js'
 import { addExchange } from './talkmem.js'
+import { hearTurn } from './hear.js'
 import { slashed } from './posix.js'
 import { refreshSelfDoc } from './selfdoc.js'
 import { looksLikeRewriting } from './guard.js'
@@ -202,6 +203,10 @@ export async function sayToHer(ctx, text, deps = {}) {
   if (!sessionId) {
     sessionId = await talkSessionId(ctx, { root, log: deps.log })
     if (!sessionId) {
+      // 2026-10-29（用户 m02241）：这条以前什么都不留。
+      // 「设置页说了话，她没反应」最常见的根因就是屋子没接上，
+      // 而日志里当时一片空白，只能靠用户在界面上复述那句提示。
+      log?.('say: 屋子没接上，这句没递出去（没有 home.json 或它坏了）')
       return { ok: false, said: [], note: '屋子没接上，这句没递出去。看看设置页的「她住在哪」。' }
     }
   }
@@ -251,6 +256,9 @@ export async function sayToHer(ctx, text, deps = {}) {
     let note = said.length ? '' : '她这次没说话。'
     await addExchange(root, { me: body, her: herReply }).catch(() => {})
     const turns = await bumpTurns(root, 1)
+    // A2（2026-10-30，用户 m00112）：每 hearEvery 轮，把他说的**一句原话**记下来。
+    // 没写字只发了图时 body 为空，pickHearSentence 会自己跳过。
+    await hearTurn(root, { text: body, turns, day: model.day, stage: model.stage, config, log })
     const rotateAfter = Number(config?.chat?.rotateAfter ?? 0)
     if (rotateAfter > 0 && turns >= rotateAfter) {
       const rot = await rotateTalkSession(ctx, { root, wsId: deps.wsId })
@@ -262,6 +270,13 @@ export async function sayToHer(ctx, text, deps = {}) {
       } else {
         log('rotate failed', rot.why)
       }
+    }
+
+    // 2026-10-29（用户 m02241）：投递成功的收尾也留一行，但压到最短。
+    // 只在「她一条都没说」时记——她开口了的话事件流里本来就有；
+    // 这里要能回答的只是「话送进去了吗、她为什么没回」。
+    if (!said.length) {
+      log?.('say: 递进去了，她这次没说话', `session=${sessionId}`, `waited=${Date.now() - t0}ms`)
     }
 
     return {

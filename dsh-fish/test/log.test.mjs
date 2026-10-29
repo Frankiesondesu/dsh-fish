@@ -105,6 +105,25 @@ test('裸长串也抹：40 位以上且字母数字混杂的当凭据处理', ()
   assert.match(scrub('a'.repeat(45)), /^a+$/)
 })
 
+test('自家的会话 id 与事件 id 不能被当成凭据抹掉（2026-10-29 用户 m02241）', () => {
+  // 病根：规则②「40 位以上字母数字混杂」把 `session-<uuid>` 整条抹成 ***，
+  // 于是日志里到处是「会话 ***」「woke ***」，要查「是哪条会话出的问题」时
+  // 日志一个字都给不出，只能翻 outings.json 反推。
+  const sid = 'session-058a9c4d-0999-4772-8264-c289f799fd09'
+  assert.equal(scrub(`出门：装配完成 会话 ${sid}`), `出门：装配完成 会话 ${sid}`)
+  assert.equal(scrub('woke session-abc123 test_first'), 'woke session-abc123 test_first')
+  const evId = 'ev_01M62M5R78EJRR5P3393B80R22'
+  assert.equal(scrub(`标记 ${evId}`), `标记 ${evId}`)
+  // 但真凭据还是要抹：会话 id 放行不等于放行 cookie
+  // 注意用 `session=` 而不是 `sid=`——`sid=` 是 cookie 参数名，规则①会连值一起抹掉
+  // （那是 0.1.x 起的凭据规则，行为正确，不改）。
+  const mixed = scrub(`SESSDATA=abcdef123456&bili_jct=deadbeef99&session=${sid}`)
+  assert.doesNotMatch(mixed, /abcdef123456/)
+  assert.doesNotMatch(mixed, /deadbeef99/)
+  assert.match(mixed, /SESSDATA=\*\*\*/)
+  assert.match(mixed, /session-058a9c4d/, '同一行里的会话 id 仍要留着')
+})
+
 test('export 里不留配置与 owner 的凭据', () => {
   const cfg = { comment: { enabled: true }, cookie: 'SESSDATA=xxx', owner: { mid: '1', cookie: 'SESSDATA=yyy' } }
   const out = redactConfig(cfg)

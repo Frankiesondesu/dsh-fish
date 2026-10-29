@@ -36,6 +36,8 @@ import { refreshSelfDoc } from './selfdoc.js'
 import { setWakeSection, clearWakeSection } from './identity.js'
 import { awayNow, awayLine } from './outing.js'
 import { askInChat, picked } from './askinchat.js'
+import { restedToday, settleStaleAsks } from './ask.js'
+import { logLine } from './log.js'
 import { recordGrant } from './grant.js'
 
 const TICK_MS = 60_000
@@ -113,6 +115,14 @@ export function startScheduler(ctx, deps = {}) {
   // skip 日志去重（2026-10-28）：同一小时、同一原因只记一次。
   // 存成 `${dk}T${hour}|${why}` 一行，交给 shouldLogSkip 判。
   let skipLogged = ''
+  // away 心跳降噪（2026-10-29 用户 m02241）：出门/请神期间 tick 每 60 秒跑一次，
+  // 原来每次都写一条「away 此刻在外面：X · 已 N 分钟」——一晚上几百行同样的东西，
+  // 真正的异常（装不上装备、台账冲突）反而被淹掉看不见。
+  // 现在只在这一趟**第一次**看到时记一行，之后静默；只有台账出现异常（conflict）
+  // 或者这趟换了（key 变了）才再记。回家/结束请神后清空，下一趟再记一行。
+  let awayLogged = ''
+  // 今天她请过假（请求事件 rest）只记一次日志：tick 每分钟跑，别把这一行刷成弹幕。
+  let restLogged = ''
 
   // 哪个会话正在一轮里（turn/start → turn/end）。叫醒排在她正在说的那一轮后面时，
   // 那一轮的 turn/end 会先把 fish:wake 段清掉，真正醒来的那一轮反而看不到处境。
@@ -146,9 +156,21 @@ export function startScheduler(ctx, deps = {}) {
     try {
       const away = await awayNow(root)
       if (away.kind) {
-        log('away', awayLine(away))
+        // 0.7.6（2026-10-29 用户 m02241）：心跳只在「这一趟第一次看到」和「台账不对劲」时记。
+        // 以前的写法是每次 tick 都 log('away', ...)，一晚几百行，把真正的报错淹掉。
+        const key = `${away.kind}|${away.kind === 'outing' ? away.outing?.sessionId ?? '' : away.possession?.sessionId ?? ''}|${away.conflict ? 'conflict' : ''}`
+        if (away.conflict) {
+          // 异常态：两条台账同时 active。这个每次都要说，不能去重——
+          // 它意味着 awayNow 只能挑先开始的那条，另一条的行为不可预期。
+          log('away', `${awayLine(away)} · 出门与请神同时开着（${away.why || '另一条需要手动结束'}）`)
+        } else if (key !== awayLogged) {
+          awayLogged = key
+          log('away', awayLine(away))
+        }
         return
       }
+      // 回来了：清掉记忆，下一趟重新记第一行。
+      awayLogged = ''
     } catch { /* 静默放行 */ }
 
     try {
@@ -163,6 +185,20 @@ export function startScheduler(ctx, deps = {}) {
       const { events } = await readEvents(root)
       const { config } = await loadConfig(root)
       const dk = dateKey()
+
+      // 请求事件（0.7.6，2026-10-30 m01274）：超过 24 小时没人答的，记成「以后再说」。
+      // 放在 tick 里而不是专用定时器：这里本来就在读事件流，省一次闹钟。
+      try { await settleStaleAsks(root, { now }) } catch { /* 结算失败不影响叫醒 */ }
+
+      // 她今天主动请了假（kind=rest 被同意 → meta `rest:<dk>`）→ 今天不叫她。
+      // 「不许连续两天」落在她那边（ask.js 的配额与她的判断），这里只读结论。
+      if (restedToday(events, dk)) {
+        if (restLogged !== dk) {
+          restLogged = dk
+          log('rest', '她今天请了假，家里不叫她。')
+        }
+        return
+      }
 
       // 日程：每天在时间窗内抽一个点。抽到的点已存在（今天已经安排过）就不再改。
       const scheduled = await ensureSchedule(root, config, events, dk)
@@ -188,7 +224,10 @@ export function startScheduler(ctx, deps = {}) {
         // 一天记一次就够：它只是给状态卡解释「为什么今天什么都没发生」，不是行动。
         const alreadyQuiet = events.some((e) => e.type === 'meta' && String(e.text ?? '').startsWith(`quiet:${dk}`))
         if (alreadyQuiet) {
-          log('quiet', '今天已经记过「没有该问的事」，不再重复写')
+          // 0.7.6（2026-10-29 用户 m02241）：这里原来是每次都 log 一行
+          // 「今天已经记过『没有该问的事』，不再重复写」——它自己就是那句
+          // 「不再重复写」，却每 60 秒重复写一遍，一晚几百行。
+          // 事件流里已经有 `quiet:<dk>` 这条了，日志不需要再说第二次。
           return
         }
         await appendEvent({ type: 'meta', text: `quiet:${dk} 无候选模板，今天不打扰` }, { day: model.day, stage: model.stage, source: 'timer' }, root)
@@ -750,6 +789,13 @@ export async function wakeNow(ctx, deps = {}) {
   const away = deps.force ? { kind: null } : await awayNow(root)
   if (away.kind) {
     const line = awayLine(away)
+    // 0.7.6（2026-10-29 用户 m02022）：这道闸门以前是**静默**的——被挡住时一行日志都不留，
+    // 于是点了「叫她一次」之后，日志里什么都没有，事后分不清「用户没点」和「点了被挡回去」。
+    // 现在落一行，带上是哪种 away 和当时的 why；这条走 logLine 直接写盘，
+    // 因为下面那句 `const log = deps.log ?? ...` 还没执行到。
+    const told = `叫醒被挡住了（${away.kind}）：${line || '她在外面'}`
+    logLine('info', [told], root)
+    try { deps.log?.(told) } catch { /* 宿主 logger 坏了不能影响返回值 */ }
     return {
       ok: false,
       away,

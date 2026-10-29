@@ -79,16 +79,51 @@ function softReason(why) {
   return w.slice(0, 40) || '没说出来。'
 }
 
+/**
+ * 工具说明随开关变（2026-10-29）。
+ *
+ * 为什么需要这个：工具定义每轮都在她的上下文里，`description` 本身就是一段广告。
+ * 原来不管开关开没开都写「可以给你今天看过的某个视频留一条评论」——而关着的时候
+ * 身份文档里**没有**「在网上说话」那一节（selfdoc.js 的 `speak` 判据）。
+ * 一边说能说、一边一句不提，两个来源当场打架。
+ *
+ * 为什么不写成「这个眼下还开不了」：那等于告诉她「有个开关在管着这件事」，
+ * 与文件顶上那条原则冲突（她不该知道自己被管理着）。所以关着时只留一句
+ * 不带任何许诺的短说明——它不承诺发得出去，也不解释为什么发不出去。
+ *
+ * 为什么要用 getter：`ctx.tools.register` 只在启动时跑一次，而配置随时能改。
+ * 存一份「最近一次看到的状态」，宿主每轮序列化工具表时会再取一次 description，
+ * 于是开关一翻，下一轮就跟着变。`execute` 里本来就要读配置，顺手同步一次，
+ * 兜住「启动之后才被改、她还没调过」的中间态。
+ */
+let speakEnabled = false
+
+/** 测试与调用方同步用：告诉这里「开关现在是什么样」。 */
+export function noteSpeakEnabled(on) {
+  speakEnabled = on === true
+}
+
+/** 关着时的那一段必须**不含**任何"能发出去"的暗示，也不解释原因。 */
+function speakDescription(on) {
+  if (!on) {
+    return '在 B 站说一句话。不想说就不说，没有人等着你回答。'
+  }
+  return (
+    '在 B 站说一句话。可以给你今天看过的某个视频留一条评论，或者回一句别人留在你评论下面的话。' +
+    '这是会留下来的东西——别人看得见，你也删不掉别人已经看到的。' +
+    '不想说就不说，没有人等着你回答。'
+  )
+}
+
 export function registerSpeak(ctx, deps = {}) {
   const root = deps.root ?? rootDir()
+  // 启动时先按当时看到的配置定一次；之后靠 execute 与调用方同步刷新。
+  if (deps.speakEnabled !== undefined) noteSpeakEnabled(deps.speakEnabled)
 
   return ctx.tools.register(
     defineTool({
       name: 'bili_speak',
-      description:
-        '在 B 站说一句话。可以给你今天看过的某个视频留一条评论，或者回一句别人留在你评论下面的话。' +
-        '这是会留下来的东西——别人看得见，你也删不掉别人已经看到的。' +
-        '不想说就不说，没有人等着你回答。',
+      get description() { return speakDescription(speakEnabled) },
       parameters: toJsonSchema({
         kind: {
           type: 'string',
@@ -121,7 +156,9 @@ export function registerSpeak(ctx, deps = {}) {
         const who = guardWrite(deps.tenant, exec, 'bili_speak')
         if (!who.ok) return { ok: false, said: '', note: who.note }
         const { config } = await loadConfig(root)
-        if (config?.comment?.enabled !== true) return { ok: false, said: '', note: '现在不方便说。' }
+        // 顺手同步一次：启动之后才被改的开关，靠这里让下一轮的 description 跟上。
+        noteSpeakEnabled(config?.comment?.enabled === true)
+        if (config?.comment?.enabled !== true) return { ok: false, said: '', note: softReason('没开这个权限') }
         return speakOnce({
           kind: args?.kind,
           bvid: args?.bvid,

@@ -22,7 +22,8 @@ import { dirname, join, resolve } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { hostname } from 'node:os'
 
-import { activeOutingSync } from './outing.js'
+import { activeOutingSync, activePossessionSync } from './outing.js'
+import { logLine } from './log.js'
 
 /** 占用声明文件名（放在 root 里，跟着数据目录一起搬走）。 */
 export const TENANT_FILE = 'instance.json'
@@ -206,15 +207,42 @@ export function checkCaller(root, exec, { herDir = '', tool = 'growth_commit', o
       return { ok: true, sessionId, cwd, outside: true }
     }
   }
+  // 3.6) 请神这一条：她被请到别人的对话里说话，那条会话的 cwd 在别人的工作区，
+  //      但她写的字还是要写回自己的屋子（不然回家审查看不到她说了什么）。
+  //      判据同样不是 cwd，而是「这条会话正是当前被请上身的那一条」。
+  //      身份文件那条调用传 outsideOk:false，所以请神期间改不了自己的身份（与出门一致）。
+  if (outsideOk && sessionId) {
+    let possessed = null
+    try {
+      possessed = activePossessionSync(root)
+    } catch {
+      possessed = null
+    }
+    if (possessed && String(possessed.sessionId ?? '') === sessionId) {
+      return { ok: true, sessionId, cwd, possessed: true }
+    }
+  }
+  // 2026-10-29（用户 m02241）：这个文件以前**一行日志都没有**——
+  // `checkCaller` 拒绝时只 return {ok:false, why}，于是「她写了但没落盘」
+  // 这种最需要现场证据的故障，日志里一个字都不留；只能靠那句 why 出现在
+  // 她的回话里才反推得出来。补一行，带上工具名、两条路径和会话 id。
+  const denyWhy =
+    `这条调用来自另一个家（${cwd}），不是这里（${root}）。` +
+    `为了不把话写进别人的屋子，${tool} 这次没有落盘。` +
+    `如果这里就是她该待的地方，检查 profile 的 cordis.patch.yml 里这个插件的 root 配置；` +
+    `如果你只是从别的窗口顺手点了一下，回到她自己的那条对话再说。`
+  logLine('warn', [
+    '写入被拒（不在这个家）：',
+    `tool=${tool}`,
+    `session=${sessionId || '?'}`,
+    `cwd=${cwd}`,
+    `root=${root}`,
+  ], root)
   return {
     ok: false,
     sessionId,
     cwd,
-    why:
-      `这条调用来自另一个家（${cwd}），不是这里（${root}）。` +
-      `为了不把话写进别人的屋子，${tool} 这次没有落盘。` +
-      `如果这里就是她该待的地方，检查 profile 的 cordis.patch.yml 里这个插件的 root 配置；` +
-      `如果你只是从别的窗口顺手点了一下，回到她自己的那条对话再说。`,
+    why: denyWhy,
   }
 }
 
@@ -320,6 +348,14 @@ export async function releaseRoot(root, instanceId, { now = Date.now() } = {}) {
 export function guardWrite(state, exec, tool) {
   // 房主的身份优先：root 已经被别人占着时，这个实例的任何写入都不该落盘。
   if (state && state.tenant && state.tenant.ok === false) {
+    // 2026-10-29（用户 m02241）：只读降级这条分支以前也不留痕。
+    // 真机日志里那句「这个数据目录已经被另一个插件实例占着」来自 claimRoot 的返回值，
+    // 不是这里——于是「因为她家被占着所以写不进去」这件事，日志里查不到。
+    logLine('warn', [
+      '写入被拒（家被另一个实例占着）：',
+      `tool=${tool}`,
+      String(state?.tenant?.why ?? '').slice(0, 200),
+    ], state?.root)
     return { ok: false, note: state.tenant.why || '这个家被另一个实例占着，这次没有写。' }
   }
   const res = checkCaller(state?.root, exec, { herDir: state?.herDir, tool })

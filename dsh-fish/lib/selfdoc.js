@@ -27,7 +27,7 @@ import { join } from 'node:path'
 import { rootDir, paths, readEvents, readJson, writeAtomic } from './store.js'
 import { loadConfig } from './settings.js'
 import { deriveSelf } from './derive.js'
-import { personaLine, toolBrief, RECALL_BRIEF, SPEAK_BRIEF, LETTER_BRIEF, DIARY_BRIEF, SLEEP_BRIEF } from './persona.js'
+import { personaLine, toolBrief, RECALL_BRIEF, SPEAK_BRIEF, LETTER_BRIEF, ASK_BRIEF, DIARY_BRIEF, SLEEP_BRIEF } from './persona.js'
 import { LOOK_BRIEF, WATCH_RULE } from './browse.js'
 import { activeCarry } from './home.js'
 import { activeGrants } from './unlock.js'
@@ -79,6 +79,10 @@ export function renderSelfDoc(model, { budget, carry, browse = true, speak = fal
     '',
     // R4：留话不需要权限、不看配置，所以永远在这一节里，不做开关。
     LETTER_BRIEF,
+    '',
+    // 请求事件（0.7.6，用户 m01274 / m01292）：唯一一个要等对方点头的工具。
+    // 和留话一样不需要配置开关——工具注册了就该知道怎么用；上限写死在代码里。
+    ASK_BRIEF,
     '',
   ]
   // 能力说明写在这里、而不是塞进唤醒消息：

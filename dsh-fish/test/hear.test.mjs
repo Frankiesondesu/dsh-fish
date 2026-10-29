@@ -1,0 +1,157 @@
+/**
+ * hear.test.mjs —— 旁听（A2，2026-10-30 用户 m00112）与回忆检索的排序变化
+ *
+ * 覆盖：
+ *   1. 从一段话里只挑一句原话；太短不记；超长截断
+ *   2. 每 hearEvery 轮才写一条；0 = 不记
+ *   3. 她写不了 heard（只有系统侧能写）——旁听的凭据价值全靠这一点
+ *   4. 她翻回忆时，heard 明确写成「他说：」，不会被当成自己说过的话
+ *   5. 默认翻全部时间（30 天以前也翻得到）；kind 只看一类
+ *   6. 显著性加权：被固化/被检验过的条目排在同样字面命中前面
+ */
+
+import { test } from 'node:test'
+import assert from 'node:assert/strict'
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+
+import { pickHearSentence, hearTurn, HEAR_SNIPPET, HEAR_MIN_CHARS } from '../lib/hear.js'
+import { readEvents } from '../lib/store.js'
+import { validateEvent } from '../lib/schema.js'
+import { searchEvents, renderRecall, RECALL_LIMIT, RECALL_DAYS } from '../lib/recall.js'
+
+const DAY = 86_400_000
+
+async function withRoot(fn) {
+  const root = await mkdtemp(join(tmpdir(), 'fish-hear-'))
+  try {
+    return await fn(root)
+  } finally {
+    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
+  }
+}
+
+function at(daysAgo) {
+  return new Date(Date.now() - daysAgo * DAY).toISOString()
+}
+
+// ---------------------------------------------------------------- 挑句子
+
+test('旁听：只留最长的一句，句号问号都切掉', () => {
+  const s = pickHearSentence('嗯。今天我在想一件事，想了很久。你呢？')
+  assert.equal(s, '今天我在想一件事，想了很久')
+})
+
+test('旁听：太短的话不记', () => {
+  assert.equal(pickHearSentence('嗯。'), '')
+  assert.equal(pickHearSentence('好'), '')
+  assert.ok(HEAR_MIN_CHARS >= 2)
+})
+
+test('旁听：太长截断到上限', () => {
+  const s = pickHearSentence('我' + '很'.repeat(500) + '。')
+  assert.ok(s.length <= HEAR_SNIPPET)
+  assert.ok(s.endsWith('…'))
+})
+
+// ---------------------------------------------------------------- 写事件
+
+test('旁听：不到轮数不写，到了才写一条 heard', async () => {
+  await withRoot(async (root) => {
+    const cfg = { memory: { hearEvery: 3 } }
+    const text = '今天我在想一件事，想了很久'
+    assert.equal((await hearTurn(root, { text, turns: 1, day: 2, stage: 1, config: cfg })).written, false)
+    assert.equal((await hearTurn(root, { text, turns: 2, day: 2, stage: 1, config: cfg })).written, false)
+    const ok = await hearTurn(root, { text, turns: 3, day: 2, stage: 1, config: cfg })
+    assert.equal(ok.written, true)
+    assert.ok(ok.id)
+
+    const { events } = await readEvents(root)
+    const heard = events.filter((e) => e.type === 'heard')
+    assert.equal(heard.length, 1)
+    assert.equal(heard[0].source, 'system')
+    assert.equal(heard[0].text, '今天我在想一件事，想了很久')
+    assert.equal(heard[0].day, 2)
+  })
+})
+
+test('旁听：hearEvery=0 就是完全不记', async () => {
+  await withRoot(async (root) => {
+    const r = await hearTurn(root, { text: '今天我在想一件事，想了很久', turns: 30, day: 5, stage: 1, config: { memory: { hearEvery: 0 } } })
+    assert.equal(r.written, false)
+    const { events } = await readEvents(root)
+    assert.equal(events.filter((e) => e.type === 'heard').length, 0)
+  })
+})
+
+test('旁听：她不能自己伪造一条「他说过」', () => {
+  const ok = validateEvent({ type: 'heard', text: '今天我在想一件事' }, { day: 1, stage: 1, source: 'system' })
+  assert.equal(ok.type, 'heard')
+  let err = null
+  try {
+    validateEvent({ type: 'heard', text: '今天我在想一件事' }, { day: 1, stage: 1, source: 'tool' })
+  } catch (e) {
+    err = e
+  }
+  assert.ok(err, 'tool 侧写 heard 必须被拒')
+  assert.equal(err.code, 'NOT_HER_TYPE')
+})
+
+// ---------------------------------------------------------------- 翻回忆
+
+test('旁听：她翻到时看到的是「他说：」，不是自己的口吻', () => {
+  const rows = [{
+    id: 'ev_1', date: '2026-10-20', ago: 9, type: 'heard', text: '今天我在想一件事，想了很久',
+  }]
+  const out = renderRecall(rows)
+  assert.match(out, /他说：今天我在想一件事/)
+  assert.match(out, /9 天前/)
+  assert.match(out, /（ev_1）/)
+})
+
+test('回忆：默认翻全部时间，一个月以前的也翻得到', () => {
+  assert.equal(RECALL_DAYS, 0, '0 = 全部')
+  const now = Date.now()
+  const events = [{ id: 'old', type: 'utterance', ts: at(200), text: '很久以前的评论' }]
+  const { rows } = searchEvents(events, '评论', { now })
+  assert.equal(rows.length, 1)
+  assert.equal(rows[0].id, 'old')
+  assert.ok(rows[0].ago >= 199)
+})
+
+test('回忆：kind 只看他听过的话', () => {
+  const now = Date.now()
+  const events = [
+    { id: 'a', type: 'utterance', ts: at(1), text: '评论这件事我说不好' },
+    { id: 'b', type: 'heard', ts: at(2), text: '你在评论里那句话我喜欢' },
+  ]
+  const all = searchEvents(events, '评论', { now })
+  assert.equal(all.rows.length, 2)
+  const onlyHeard = searchEvents(events, '评论', { now, kind: 'heard' })
+  assert.equal(onlyHeard.rows.length, 1)
+  assert.equal(onlyHeard.rows[0].id, 'b')
+})
+
+test('回忆：固化/被检验过的排在同样字面命中的前面', () => {
+  const now = Date.now()
+  const events = [
+    { id: 'plain', type: 'utterance', ts: at(0), text: '评论' },
+    { id: 'solid', type: 'utterance', ts: at(10), text: '评论' },
+    { id: 't', type: 'test', ts: at(1), text: '检验一下', refs: ['plain'] },
+  ]
+  // 不加权：新的在前
+  assert.equal(searchEvents(events, '评论', { now, weigh: false }).rows[0].id, 'plain')
+  // 加权：solid 先
+  const { rows } = searchEvents(events, '评论', { now, solidIds: new Set(['solid']) })
+  assert.equal(rows[0].id, 'solid')
+})
+
+test('回忆：条数上限是 8', () => {
+  assert.equal(RECALL_LIMIT, 8)
+  const now = Date.now()
+  const events = Array.from({ length: 30 }, (_, i) => ({
+    id: `x${i}`, type: 'utterance', ts: at(i), text: `评论第 ${i} 条`,
+  }))
+  assert.equal(searchEvents(events, '评论', { now }).rows.length, RECALL_LIMIT)
+})

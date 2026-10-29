@@ -22,7 +22,7 @@ import { toJsonSchema } from './toolschema.js'
 import { inWake } from './wakewin.js'
 import { refreshSelfDoc } from './selfdoc.js'
 import { guardWrite } from './tenant.js'
-import { activeOf, readOutings } from './outing.js'
+import { activeOf, activePossessionOf, readOutings, readPossessions } from './outing.js'
 import { tripKey } from './keepsake.js'
 
 /**
@@ -157,10 +157,23 @@ export function registerCapture(ctx, deps = {}) {
                 trip = tripKey(active)
               }
             } catch { trip = '' }
+            // 请神那趟也要留标记（2026-10-29 m02241 第④条）：出门用 trip:<key>，
+            // 请神用 possess:<开始时刻>——两条路的日记要能分开数，别混成一趟。
+            // 判据与出门一致：写这条日记的会话，正是当前被请上身的那一条。
+            let possessed = ''
+            if (!trip) {
+              try {
+                const { possessions } = await readPossessions(root)
+                const on = activePossessionOf({ possessions })
+                if (on?.sessionId && String(on.sessionId) === String(who.sessionId ?? '')) {
+                  possessed = ` possess:${Number(on.startedAt) || 0}`
+                }
+              } catch { possessed = '' }
+            }
             // source 必须是 system：schema 规定 tool 只能写 HER_TYPES，
             // meta 写错成 'tool' 会被 NOT_HER_TYPE 拒掉 —— 日记就会变成"写下了但没标记"。
             await appendEvent(
-              { type: 'meta', text: `diary:${dk}${trip ? ` trip:${trip}` : ''}`, sessionId: who.sessionId },
+              { type: 'meta', text: `diary:${dk}${trip ? ` trip:${trip}` : ''}${possessed}`, sessionId: who.sessionId },
               { ...stamp, source: 'system' },
               root,
             )

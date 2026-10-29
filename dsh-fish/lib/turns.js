@@ -34,6 +34,8 @@ import { addExchange } from './talkmem.js'
 import { newHerEventsSince } from './inbox.js'
 import { HER_TYPES } from './schema.js'
 import { refreshSelfDoc } from './selfdoc.js'
+import { growthDay, stageOf } from './derive.js'
+import { hearTurn } from './hear.js'
 
 /**
  * 我们自己 prompt 进去的消息，rpcId 会带这些前缀。
@@ -165,6 +167,18 @@ export function registerTurns(ctx, deps = {}) {
       await addExchange(root, { me: p.msgs.join('\n'), her }).catch(() => {})
       const turns = await bumpTurns(root, 1)
       const { config } = await loadConfig(root).catch(() => ({ config: null }))
+      // A2（2026-10-30，用户 m00112）：每 hearEvery 轮，把他说的**一句原话**记下来。
+      // 放在换会话判断之前：这一轮已经结完账，换不换会话都该记。
+      // 用 after.events 算成长日——这时还没写 heard，差一天也不会差在这一条上。
+      const day = growthDay(after.events)
+      await hearTurn(root, {
+        text: p.msgs.join('\n'),
+        turns,
+        day,
+        stage: stageOf(day, Number(config?.growthDays ?? 30)),
+        config,
+        log,
+      })
       const rotateAfter = Number(config?.chat?.rotateAfter ?? 0)
       if (!(rotateAfter > 0) || turns < rotateAfter) return
 

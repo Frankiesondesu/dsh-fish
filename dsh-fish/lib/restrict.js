@@ -44,7 +44,7 @@
 
 import { resolve } from 'node:path'
 
-/** 插件自己注册的七个工具。顺序无意义，但**必须全部真实存在**（名字错会抛错）。 */
+/** 插件自己注册的八个工具。顺序无意义，但**必须全部真实存在**（名字错会抛错）。 */
 export const FISH_TOOLS = Object.freeze([
   'growth_commit', // 记下自己的想法（唯一的写入口）
   'her_recall', // 翻自己的旧事
@@ -53,6 +53,7 @@ export const FISH_TOOLS = Object.freeze([
   'bili_look', // 看 B 站的列表
   'bili_watch', // 看一条视频的画面
   'bili_speak', // 在评论区说话
+  'ask_owner', // 有事想征得同意（请求事件，2026-10-30 m01274）
 ])
 
 /**
@@ -352,7 +353,16 @@ export function registerToolRestrict(ctx, { herDir, extra = [], enabled = true, 
             if (!name || allowSet.has(name)) return undefined
             if (blocked < 20) {
               blocked += 1
-              say(`[dsh-fish] 挡住了一次不该有的调用：${name}`)
+              // 2026-10-29（用户 m02241）：以前只写工具名，没有会话 id、也没有实参。
+              // 事后要判断「她当时拿到的是不是那份过期名单」「这个工具是从哪层漏出来的」，
+              // 光一个名字不够。这里补上会话 id 与实参摘要（实参走 scrub，凭据照样抹）。
+              const sid = String(exec?.agent?.session?.header?.id ?? exec?.agent?.session?.id ?? exec?.session?.header?.id ?? '') || '?'
+              let argBrief = ''
+              try {
+                const a = exec?.arguments ?? exec?.args ?? exec?.input ?? exec?.params
+                if (a && typeof a === 'object') argBrief = JSON.stringify(a).slice(0, 200)
+              } catch { argBrief = '' }
+              say(`[dsh-fish] 挡住了一次不该有的调用：${name} · session=${sid}${argBrief ? ` · ${argBrief}` : ''}`)
             }
             // 话术刻意不带「权限/禁止/违规」这类系统词——她要以为是自己做不了，
             // 不是以为背后有个管理员在拦她。
