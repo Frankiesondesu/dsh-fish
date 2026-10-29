@@ -12,9 +12,10 @@
  * 时间判断全部走本地时区；跨零点的时间窗（20:00–02:00）按 inWindow 处理。
  */
 
+import { join } from 'node:path'
 import { deriveSelf } from './derive.js'
 import { validateEvent } from './schema.js'
-import { readEvents, appendEvent, rootDir, ensureHer } from './store.js'
+import { readEvents, appendEvent, rootDir, ensureHer, paths, readJson } from './store.js'
 import { loadConfig, dateKey, inWindow, pickWakeTime } from './settings.js'
 import { plan } from './generator.js'
 import { findTemplate } from './events.js'
@@ -41,6 +42,12 @@ const WAKE_TIMEOUT_MS = 5 * 60_000
 // 等她的回合结束时最多等这么久。一次唤醒的思考通常 10–40 秒，
 // 90 秒足够；再久就说明卡住了，先把报告写出去，别让用户干等。
 const REPORT_WAIT_MS = 90_000
+// 一天的第二次及以后的叫醒，离上一次至少隔这么久（见 nextWakeAt）
+const WAKE_MIN_GAP_MS = 45 * 60_000
+// 她正在某一轮里时先等她说完，最多等这么久
+const IDLE_WAIT_MS = 10 * 60_000
+// turn/start 之后迟迟等不到 turn/end（宿主重启、事件丢了），超过这么久就不再当她在忙
+const BUSY_STALE_MS = 15 * 60_000
 
 // 2026-10-26（用户 m00507）：她看不懂对话里那句「……」。
 // 真机 reasoning 原话是「用户发来的只有一个省略号，没有实质请求」，接着猜
@@ -105,6 +112,23 @@ export function startScheduler(ctx, deps = {}) {
   // 存成 `${dk}T${hour}|${why}` 一行，交给 shouldLogSkip 判。
   let skipLogged = ''
 
+  // 哪个会话正在一轮里（turn/start → turn/end）。叫醒排在她正在说的那一轮后面时，
+  // 那一轮的 turn/end 会先把 fish:wake 段清掉，真正醒来的那一轮反而看不到处境。
+  const busy = new Map()
+  const offBusy = ctx.on?.('session/event', (session, event) => {
+    const id = session?.header?.id ?? session?.id
+    if (!id) return
+    if (event?.type === 'turn/start') busy.set(id, Date.now())
+    else if (event?.type === 'turn/end') busy.delete(id)
+  })
+  const isBusy = (id) => {
+    const t = busy.get(id)
+    return t !== undefined && Date.now() - t < BUSY_STALE_MS
+  }
+  const waitIdle = async (id) => {
+    const until = Date.now() + IDLE_WAIT_MS
+    while (!disposed && isBusy(id) && Date.now() < until) await new Promise((r) => setTimeout(r, 2000))
+  }
 
   async function tick() {
     if (disposed || running) return
@@ -183,9 +207,21 @@ export function startScheduler(ctx, deps = {}) {
         return
       }
 
+      // 落点之后 plan() 每分钟都会说「该醒了」，直到配额用完——不拦的话一天的几次叫醒
+      // 一分钟一个地连着发进同一个会话。第二次起要和上一次隔开，而且不在她正说着话时叫。
+      if (now < nextWakeAt(events, config, dk)) return
+      // 叫醒进的是哪个会话：调用方指定的优先，否则就是屋子那条（home.json）
+      const sid = deps.sessionId ?? (await readJson(join(paths(root).root, 'home.json'), null).catch(() => null))?.sessionId
+      if (sid && isBusy(sid)) {
+        const why = '她正在说话，等这一轮结束再叫'
+        const next = shouldLogSkip(skipLogged, dk, now, why)
+        if (next) { skipLogged = next; log('skip', why) }
+        return
+      }
+
       running = true
       try {
-        await wake(ctx, root, model, config, decision, dk, log, { ...deps, events })
+        await wake(ctx, root, model, config, decision, dk, log, { ...deps, events, isBusy, waitIdle })
       } finally {
         running = false
       }
@@ -204,6 +240,7 @@ export function startScheduler(ctx, deps = {}) {
     tick,
     dispose() {
       disposed = true
+      try { offBusy?.() } catch { /* ignore */ }
       if (timer) clearInterval(timer)
       if (wakeTimer) clearTimeout(wakeTimer)
       timer = null
@@ -549,6 +586,10 @@ async function wake(ctx, root, model, config, decision, dk, log, deps = {}) {
     }).catch(() => null)
   }
 
+  // 刷站那几十秒里她可能刚好开始了别的一轮（有人找她）。等那一轮说完再挂处境、再叫：
+  // watcher 认的是会话不是这一轮，挂早了会被那一轮的 turn/end 收走。
+  if (typeof deps.waitIdle === 'function') await deps.waitIdle(sessionId)
+
   const watcher = watchTurnEnd(ctx, sessionId, () => { void writeReport(); clearWakeSection() })
 
   // 处境走 system prompt 段；对话里只留这一句（她看到的是「有人来了」，不是剧本）。
@@ -598,10 +639,17 @@ async function wake(ctx, root, model, config, decision, dk, log, deps = {}) {
     // 她还没开始想，这里清掉等于她根本看不到这次处境。
     // 兜底：如果 turn/end 一直不来，最迟 REPORT_WAIT_MS 后也把段落清掉，
     // 免得残留到下一轮（他之后主动聊天时会看到她上一次的处境）。
-    setTimeout(() => {
+    // 兜底只管「turn/end 一直不来」：她还在这一轮里（读字幕、看画面常常超过 90 秒）
+    // 就别把处境抽走，过一会儿再看；isBusy 自带过期，不会一直拖下去。
+    const fallback = () => {
+      if (!watcher.fired && typeof deps.isBusy === 'function' && deps.isBusy(sessionId)) {
+        setTimeout(fallback, 30_000).unref?.()
+        return
+      }
       try { watcher.off?.() } catch { /* ignore */ }
-      clearWakeSection()
-    }, REPORT_WAIT_MS).unref?.()
+      if (!watcher.fired) clearWakeSection()
+    }
+    setTimeout(fallback, REPORT_WAIT_MS).unref?.()
   } catch (err) {
     // 这一次没起来，处境要立刻清掉。
     clearWakeSection()
@@ -704,6 +752,36 @@ export function isLastWakeOfDay(config, counts) {
   const cap = Math.min(Number(config?.daily?.events ?? 1), Number(config?.wakesPerDay ?? 1))
   if (!Number.isFinite(cap) || cap <= 0) return false
   return Number(counts?.sent ?? 0) + 1 >= cap
+}
+
+/**
+ * 今天下一次叫醒最早什么时候（2026-10-29）。
+ *
+ * 今天还没醒过就不拦（返回 0，交给落点判断）。醒过之后，把剩下的几次摊在
+ * 「上一次 → 今天时段结束」这段里：间隔 = 剩余时长 / (剩余次数 + 1)，至少 WAKE_MIN_GAP_MS。
+ * 结束点取时段结束与当天午夜里早的那个——过了零点日期一换，计数就从头算了。
+ * 配额已满返回 0：那是 plan() 的事（它会 skip），这里不重复判断。
+ */
+export function nextWakeAt(events = [], config = {}, dk = dateKey()) {
+  let last = 0
+  for (const e of events) {
+    if (e?.type !== 'meta') continue
+    const [head] = String(e.text ?? '').startsWith('wake:') ? String(e.text).slice(5).trim().split(/\s+/) : []
+    if (head !== dk) continue
+    const at = Date.parse(e.ts || '') || 0
+    if (at > last) last = at
+  }
+  if (!last) return 0
+  const quota = Math.min(Number(config?.daily?.events ?? 1), Number(config?.wakesPerDay ?? 1))
+  const left = quota - todayCounts(events, dk).sent
+  if (!(left > 0)) return 0
+  const d = new Date(last)
+  let end = new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1).getTime()
+  const [eh, em] = String(config?.window?.[1] ?? '').split(':').map(Number)
+  const windowEnd = new Date(d.getFullYear(), d.getMonth(), d.getDate(), eh, em).getTime()
+  // 不跨零点的时段，或跨零点而这次是零点后醒的：时段在今天之内就结束
+  if (Number.isFinite(windowEnd) && windowEnd > last) end = Math.min(end, windowEnd)
+  return last + Math.max(WAKE_MIN_GAP_MS, Math.floor((end - last) / (left + 1)))
 }
 
 /**
