@@ -25,6 +25,7 @@
 import { promises as fs } from 'node:fs'
 import { join } from 'node:path'
 import { rootDir, paths, readJson, writeAtomic } from './store.js'
+import { withFileLock } from './tenant.js'
 import { recentExchanges, renderCarry } from './talkmem.js'
 import { freshWakeText } from './wakeconst.js'
 
@@ -118,6 +119,17 @@ export const HOME_GRACE_MS = 10 * 60_000
 const inflight = new Map()
 
 /**
+ * 跨进程那把锁的文件位置。
+ *
+ * 为什么单独一个文件而不是复用 instance.json：占用权是「谁是房主」的长效声明
+ * （心跳续期），锁是「我正在写 home.json」的瞬时标记，生命周期和归属都不一样，
+ * 混在一起会让心跳把锁续活、锁又把占用权读成过期。
+ */
+function sessionLockFile(root) {
+  return join(paths(root).root, '.talk-session.lock')
+}
+
+/**
  * 找到或创建那个对话会话。
  *
  * 判定「还活着」的口径（0.6.8 改）：
@@ -132,7 +144,27 @@ export async function ensureTalkSession(ctx, opts = {}) {
   const root = opts.root ?? rootDir()
   const key = String(root).toLowerCase()
   if (inflight.has(key)) return inflight.get(key)
-  const p = ensureTalkSessionOnce(ctx, { ...opts, root }).finally(() => inflight.delete(key))
+  const p = (async () => {
+    try {
+      const res = await withFileLock(
+        sessionLockFile(root),
+        () => ensureTalkSessionOnce(ctx, { ...opts, root }),
+        opts.lockOpts,
+      )
+      if (res && res.locked === false) {
+        // 另一个进程正在建/写这个家：不硬建。它建完会把 sessionId 写进 home.json，
+        // 这里读一眼就复用；读不到才算这次失败（下次启动再来）。
+        const saved = await readJson(homeFile(root), null).catch(() => null)
+        if (saved?.sessionId && String(saved.status ?? '') !== 'archived') {
+          return { ok: true, sessionId: String(saved.sessionId), reused: true, waited: true }
+        }
+        return { ok: false, why: res.why }
+      }
+      return res
+    } catch (err) {
+      return { ok: false, why: `建会话的锁没拿到：${String(err?.message ?? err).slice(0, 120)}` }
+    }
+  })().finally(() => inflight.delete(key))
   inflight.set(key, p)
   return p
 }
@@ -357,7 +389,26 @@ async function markWoke(root, sessionId) {
   } catch { /* 记不下来就下次多叫一次，没有更坏的后果 */ }
 }
 
-export async function bootstrapHome(ctx, { root = rootDir(), log, preset = '', force = false } = {}) {
+export async function bootstrapHome(ctx, { root = rootDir(), log, preset = '', force = false, tenant } = {}) {
+  // 这个家已经被别的实例住着：**不建会话**，只把已知的那条报上去。
+  // 为什么放在最前面（2026-10-29 m02162）：占用权只在工具写入口挡着（guardWrite），
+  // 启动链路照样会走到这里建一条 —— 两个实例同时启动时，两边都判「没有会话」，
+  // 于是各建一条，房客日志里 `home.json.*.tmp` 成对残留就是这么来的。
+  // 房主那边已经建好的那条，home.json 里就记着；这边只读不建，重启/双开都不再多长。
+  if (tenant && tenant.ok === false) {
+    const saved = await readJson(homeFile(root), null).catch(() => null)
+    const sid = String(saved?.sessionId ?? '')
+    const archived = String(saved?.status ?? '') === 'archived'
+    log?.('这个家在别处也开着（另一个实例占用中），这边不建会话')
+    return {
+      ok: false,
+      blocked: true,
+      why: '这个家在别处也开着（另一个实例占用中）；这边只读，不建新会话',
+      wsId: String(saved?.wsId ?? ''),
+      sessionId: archived ? '' : sid,
+      archived,
+    }
+  }
   const ws = await ensureWorkspace(ctx, { root })
   if (!ws.ok) return { ok: false, why: ws.why, wsId: '', sessionId: '' }
 

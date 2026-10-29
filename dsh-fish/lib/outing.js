@@ -512,7 +512,16 @@ export function tripNoOf({ outings } = {}, sessionId, startedAt = 0) {
  * 它不算你」。所以句子只否定那几条，不否定整趟，也不带惩罚口吻。
  * @returns {string} 没有条目时返回空串（调用方据此决定写不写）
  */
-export function rejectNoteText({ items = [], total = 0 } = {}) {
+export function rejectNoteText({ items = [], total = 0, auto = false } = {}) {
+  // 「整趟不算数」（0.7.4，用户 m00659 A）：不是挑几条，是这一趟全部不收。
+  // 逐条念出来会变成一堵墙，所以这里只讲两件事：全都不算、以及这不是否定她去过。
+  if (auto) {
+    const n = Math.max(0, Number(total) || 0)
+    return [
+      n ? `这趟里的 ${n} 条，我一条都不收。` : '这趟我一条都不收。',
+      '不是说你白去了，是这一趟学到的，我不当成你自己。',
+    ].join('\n')
+  }
   const list = (Array.isArray(items) ? items : [])
     .map((it) => String(it?.text ?? '').replace(/\s+/g, ' ').trim().slice(0, 60))
     .filter(Boolean)

@@ -150,3 +150,90 @@ test('/outing 复核：GET 的 warning 能指出「这趟没挂上装备」（0.
     rmSync(root, { recursive: true, force: true })
   }
 })
+
+// 0.7.4（用户 m00659 A）：「这趟不算数」必须真的不算数。
+// 病根：0.6.12 起 kept=false 只把台账写成 rejected，而 deriveSelf 压根不读台账，
+// 它只认 meta 里的 outing-reject: —— 于是「不算数」是一条都不跳过的空操作（真机三趟都是）。
+test('/outing 回家：点「这趟不算数」会把这一趟写下的条目全部标上', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'fish-outing-route-'))
+  try {
+    const eventsFile = join(root, 'events.jsonl')
+    const line = (id, ts, type, text) => JSON.stringify({ id, v: 1, ts, day: 1, stage: 1, type, source: 'her', text, refs: [], verdict: null, confidence: 0.5, flags: [] }) + '\n'
+    // 出门前一条；这趟写三条，其中一条是 meta 记账（不该被一起抹掉）
+    const before = line('ev_before', '2026-10-29T00:00:00.000Z', 'utterance', '出门前')
+    writeFileSync(eventsFile, before)
+    const baseline = snapshotEvents(eventsFile)
+    const startedAt = Date.parse('2026-10-29T00:10:00.000Z')
+    await startOuting(root, {
+      sessionId: 'session-a1',
+      workspaceId: 'w1',
+      workspaceName: '素材',
+      cwd: join(root, 'ws'),
+      baseline,
+      identity: '',
+      now: startedAt,
+    })
+    writeFileSync(eventsFile, before + [
+      line('ev_t1', '2026-10-29T00:11:00.000Z', 'utterance', '这趟第一句'),
+      line('ev_t2', '2026-10-29T00:12:00.000Z', 'refusal', '这句我不认'),
+      line('ev_t3', '2026-10-29T00:13:00.000Z', 'meta', 'diary:2026-10-29'),
+    ].join(''))
+    const { call } = harness(root)
+
+    const ended = await call('POST', { action: 'end', kept: false })
+    assert.equal(ended.status, 200, JSON.stringify(ended.json))
+    assert.equal(ended.json.outing.status, 'rejected')
+    assert.equal(ended.json.outing.kept, false)
+    assert.equal(ended.json.autoRejected, true, '没逐条挑 + 说了不算数 → 自动整趟不算')
+    // 只有她写下的两条成长事件被标；记账 meta 不进（跳掉它会让冷落/日记趟次统计失真）
+    assert.equal(ended.json.rejected, 2, '这趟她写下的两条成长事件要全部标上')
+
+    const raw = readFileSync(eventsFile, 'utf8')
+    const marks = raw.split('\n').filter((l) => l.includes('outing-reject'))
+    assert.equal(marks.length, 1, '只追加一条标记，不删任何原文')
+    const ids = String(JSON.parse(marks[0]).text).slice('outing-reject:'.length).split(' ')
+    assert.deepEqual([...ids].sort(), ['ev_t1', 'ev_t2'])
+    assert.ok(!ids.includes('ev_before'), '出门前的那条不能被算进这一趟')
+
+    // 真正的验收：deriveSelf 里这趟一条都不算
+    const { deriveSelf } = await import('../lib/derive.js')
+    const { readEvents } = await import('../lib/store.js')
+    const { events } = await readEvents(root)
+    const m = deriveSelf(events)
+    assert.equal(m.refusals.length, 0, '整趟不算之后，这趟的拒绝不该长在她身上')
+    assert.ok(!m.refusals.some((r) => r.id === 'ev_t2'))
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+// 反向：逐条取消勾选（没点「整趟不算数」）仍然只跳过被挑中的那几条。
+test('/outing 回家：逐条取消勾选只跳被挑中的，不该变成整趟不算', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'fish-outing-route-'))
+  try {
+    const eventsFile = join(root, 'events.jsonl')
+    const line = (id, ts, type, text) => JSON.stringify({ id, v: 1, ts, day: 1, stage: 1, type, source: 'her', text, refs: [], verdict: null, confidence: 0.5, flags: [] }) + '\n'
+    writeFileSync(eventsFile, line('ev_before', '2026-10-29T00:00:00.000Z', 'utterance', '出门前'))
+    await startOuting(root, {
+      sessionId: 'session-a2',
+      workspaceId: 'w1',
+      workspaceName: '素材',
+      cwd: join(root, 'ws'),
+      baseline: snapshotEvents(eventsFile),
+      identity: '',
+      now: Date.parse('2026-10-29T00:10:00.000Z'),
+    })
+    writeFileSync(eventsFile, readFileSync(eventsFile, 'utf8') + line('ev_u1', '2026-10-29T00:11:00.000Z', 'utterance', '留下的那句') + line('ev_u2', '2026-10-29T00:12:00.000Z', 'utterance', '不要的那句'))
+    const { call } = harness(root)
+
+    const ended = await call('POST', { action: 'end', kept: true, rejectedIds: ['ev_u2'] })
+    assert.equal(ended.status, 200, JSON.stringify(ended.json))
+    assert.equal(ended.json.autoRejected, false, '逐条挑的时候不该自动扩成整趟')
+    assert.equal(ended.json.rejected, 1)
+    const raw = readFileSync(eventsFile, 'utf8')
+    const mark = raw.split('\n').find((l) => l.includes('outing-reject'))
+    assert.equal(String(JSON.parse(mark).text), 'outing-reject:ev_u2', '只标被挑中的那条')
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})

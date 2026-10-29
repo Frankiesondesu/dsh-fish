@@ -10,7 +10,7 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, rm, readFile, stat } from 'node:fs/promises'
+import { mkdtemp, rm, readFile, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -438,4 +438,81 @@ test('观测台的 /home 现读工作区标题，不靠 home.json 的旧值', as
   const src = await readFile(new URL('../lib/observe.js', import.meta.url), 'utf8')
   assert.match(src, /title: wsTitle/, '/home 要带标题')
   assert.match(src, /reg\?\.get\?\.\(h\.wsId\)\?\.title/, '标题要现读，不能记在 home.json 里')
+})
+
+// ------------------------------------------------- 双开同一家（2026-10-29 m02162）
+//
+// 房客日志里成对的 `home.json.*.tmp`：两个实例同时启动，各自读到「家里还没有会话」，
+// 于是各建一条。占用权（instance.json）只管「谁是房主」，管不到这个同时窗口。
+// 这里钉两件事：房主不在时这边只读不建；临界区靠文件锁串行。
+
+test('bootstrapHome：这个家在别处也开着 → 只读、不建会话，但报出已知的那条', async () => {
+  const root = await tmpRoot()
+  try {
+    const { ctx, created } = fakeCtx()
+    await writeFile(join(root, 'home.json'), JSON.stringify({
+      wsId: 'ws-1',
+      sessionId: 'ses-owner',
+      title: '跟大肥鱼说话',
+      createdAt: new Date().toISOString(),
+    }))
+
+    const r = await bootstrapHome(ctx, { root, tenant: { ok: false, why: '这个家被另一个实例占着' } })
+    assert.equal(r.ok, false)
+    assert.equal(r.blocked, true)
+    assert.equal(r.sessionId, 'ses-owner', '别处已经建好的那条要报出来，别让界面以为她没了')
+    assert.match(r.why, /别处也开着|占用/)
+    assert.equal(created.length, 0, '不许在建会话上动手')
+  } finally { await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) }
+})
+
+test('bootstrapHome：占着的时候连工作区都不建（避免又长一间空屋）', async () => {
+  const root = await tmpRoot()
+  try {
+    const { ctx, sessions } = fakeCtx()
+    const r = await bootstrapHome(ctx, { root, tenant: { ok: false, why: '这个家被另一个实例占着' } })
+    assert.equal(r.blocked, true)
+    assert.equal(r.sessionId, '')
+    assert.equal(sessions.size, 0, '工作区也不该建')
+  } finally { await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) }
+})
+
+test('ensureTalkSession：锁被别人握着 → 等一会儿读 home.json 复用，不硬建', async () => {
+  const root = await tmpRoot()
+  try {
+    const { ctx, created } = fakeCtx()
+    await writeFile(join(root, 'home.json'), JSON.stringify({
+      wsId: 'ws-1',
+      sessionId: 'ses-other',
+      createdAt: new Date().toISOString(),
+    }))
+    await writeFile(join(root, '.talk-session.lock'), JSON.stringify({ pid: 1, at: Date.now() }))
+
+    const r = await ensureTalkSession(ctx, {
+      root,
+      wsId: 'ws-1',
+      lockOpts: { timeout: 200, wait: 20 },
+    })
+    assert.equal(r.ok, true)
+    assert.equal(r.sessionId, 'ses-other')
+    assert.equal(r.waited, true)
+    assert.equal(created.length, 0)
+  } finally { await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) }
+})
+
+test('ensureTalkSession：锁被握着且家里还没有会话 → 失败并说清楚，不硬建', async () => {
+  const root = await tmpRoot()
+  try {
+    const { ctx, created } = fakeCtx()
+    await writeFile(join(root, '.talk-session.lock'), JSON.stringify({ pid: 1, at: Date.now() }))
+
+    const r = await ensureTalkSession(ctx, {
+      root,
+      wsId: 'ws-1',
+      lockOpts: { timeout: 120, wait: 20 },
+    })
+    assert.equal(r.ok, false)
+    assert.match(r.why, /另一个实例|交还/)
+    assert.equal(created.length, 0)
+  } finally { await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) }
 })

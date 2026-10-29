@@ -215,3 +215,81 @@ test('bring_back：参数是合法 JSON Schema，回执只回机器状态', () =
   assert.equal(tool.output.render({}, { ok: true })[0].text, '[已问]')
   assert.match(tool.output.render({}, { ok: false, note: '太大了' })[0].text, /没问/)
 })
+
+// ---- 0.7.5：点头从出门页搬进会话（用户 m00239）----
+// 上面那条老用例的 ctx 没有 userQuestions，走的就是「没问到 → 保持 asked」这条降级路，
+// 恰好也是超时/人不在时的真实行为。下面三条把每个答案分支钉住。
+
+/** 造一个会替人点头的上下文：宿主那边「回答」直接由测试给定。 */
+function answeringCtx(selected) {
+  const agent = { id: 'session-abc' }
+  const regs = new Map()
+  const ctx = {
+    tools: { register: (spec) => { regs.set(spec.name, spec); return () => {} } },
+    get: (name) => (name === 'agents'
+      ? {
+          get: (id) => (String(id).replace(/^session-/, '') === 'abc' ? agent : undefined),
+          list: () => [agent],
+          roots: () => [agent],
+        }
+      : undefined),
+    userQuestions: { ask: async () => ({ answers: [{ id: 'keepsake', selected: [selected] }] }) },
+  }
+  return { ctx, regs, agent }
+}
+
+async function outInTrip(selected) {
+  const root = mkdtempSync(join(tmpdir(), 'fish-keep-ask-'))
+  const cwd = join(root, 'ws')
+  mkdirSync(cwd, { recursive: true })
+  writeFileSync(join(cwd, 'notes.txt'), 'a note\n', 'utf8')
+  const outing = {
+    sessionId: 'session-abc',
+    workspaceId: 'w-1',
+    workspaceName: '素材区',
+    cwd,
+    startedAt: Date.now(),
+    status: 'active',
+  }
+  writeFileSync(join(root, 'outings.json'), JSON.stringify({ version: 1, outings: [outing] }), 'utf8')
+  const { ctx, regs } = answeringCtx(selected)
+  registerBringBack(ctx, { root, tenant: { root, herDir: join(root, 'her'), tenant: { ok: true } } })
+  const out = await regs.get('bring_back').execute(
+    { path: 'notes.txt', why: '想学这种写法' },
+    { session: { header: { id: 'session-abc', cwd } }, cwd },
+  )
+  return { root, out, regs, cleanup: () => rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) }
+}
+
+test('bring_back：会话里点「准了」当场复制进家，回执只说机器状态', async () => {
+  const { root, out, regs, cleanup } = await outInTrip('准了')
+  try {
+    assert.equal(out.ok, true)
+    assert.equal(out.said, 'yes')
+    assert.equal(pendingKeepsakes(root).length, 0, '点头之后不该还挂着')
+    const db = readKeepsakes(root)
+    assert.equal(db.items[0].status, 'kept')
+    assert.ok(statSync(join(root, 'keepsakes', db.items[0].keptAs)).isFile(), '文件真的在家里了')
+    assert.equal(regs.get('bring_back').output.render({}, out)[0].text, '[准了]')
+  } finally { cleanup() }
+})
+
+test('bring_back：会话里点「算了」什么都不复制，记为 declined', async () => {
+  const { root, out, regs, cleanup } = await outInTrip('算了')
+  try {
+    assert.equal(out.ok, true)
+    assert.equal(out.said, 'no')
+    assert.equal(out.note, '没带。')
+    assert.equal(readKeepsakes(root).items[0].status, 'declined')
+    assert.equal(regs.get('bring_back').output.render({}, out)[0].text, '[算了]')
+  } finally { cleanup() }
+})
+
+test('bring_back：回答里没有这两个词（人自己写的话）就当作没答，仍挂着', async () => {
+  const { root, out, cleanup } = await outInTrip('我自己想想')
+  try {
+    assert.equal(out.said, '')
+    assert.match(out.note, /等他点头/)
+    assert.equal(pendingKeepsakes(root).length, 1, '没答就等于没答，出门页还能点头')
+  } finally { cleanup() }
+})

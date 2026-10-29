@@ -35,6 +35,8 @@ import { WAKE_TRIGGER } from './wakeconst.js'
 import { refreshSelfDoc } from './selfdoc.js'
 import { setWakeSection, clearWakeSection } from './identity.js'
 import { awayNow, awayLine } from './outing.js'
+import { askInChat, picked } from './askinchat.js'
+import { recordGrant } from './grant.js'
 
 const TICK_MS = 60_000
 const INITIAL_DELAY_MS = 20_000
@@ -473,7 +475,10 @@ async function wake(ctx, root, model, config, decision, dk, log, deps = {}) {
   // 时机：由「最后一条证据是哪天」+ 稳定偏移（1–3 天）算出来，不用随机数（每次 tick 重算会抖）。
   // 内容：不是随机抽的，是某个她已经用行为走到门边的规则。
   // 一次醒来最多提一条；上一张没处理就不出新的。
-  let askedOffer = false
+  // 0.7.5：这一轮如果真的出了一张申请，等她的回合起来之后要**在会话里问她那个人**。
+  // 为什么不能在这里直接问：此刻还在拼正文，会话还没建、agent 还没醒，
+  // 宿主只认 live root agent（见 askinchat.js 的说明），问出去必得 CALLER_NOT_LIVE。
+  let offered = null
   if (config?.rules?.offers !== false) {
     const ev2 = (await readEvents(root).catch(() => ({ events: [] }))).events
     if (!pendingOffer(ev2, Date.now())) {
@@ -491,9 +496,13 @@ async function wake(ctx, root, model, config, decision, dk, log, deps = {}) {
             },
             { day: model.day, stage: model.stage, source: 'system' },
           )
-          await appendEvent(ev, root)
+          // 0.7.4 修：第二参是 ctx、第三参才是 root。
+          // 原来写成 appendEvent(ev, root)，root 落在 ctx 位置 → source 落回默认 'tool'
+          // → schema 以 NOT_HER_TYPE 拒掉 grant_offer（她不能写系统事件），
+          // 于是「我想试试『X』」这条申请从来没进过事件流，整个授予规则是死的。
+          await appendEvent(ev, { day: model.day, stage: model.stage, source: 'system' }, root)
           parts.push('', offerPrompt(r))
-          askedOffer = true
+          offered = { id: ev.id, rule: r.id, title: r.title }
         } catch (err) {
           log('grant offer failed', err?.message || err)
         }
@@ -501,8 +510,6 @@ async function wake(ctx, root, model, config, decision, dk, log, deps = {}) {
       }
     }
   }
-  void askedOffer
-
   // 「这一次的处境」不再放进对话（2026-10-25 晚，用户 m04080）。
   // 宿主没有「模型看得见、用户看不见」的通道（asar 已核实：PromptContentPart
   // 没有 hidden 字段、SurfaceOp 只有 append/replace），所以正文改走 system prompt
@@ -601,6 +608,14 @@ async function wake(ctx, root, model, config, decision, dk, log, deps = {}) {
         ac.signal,
       )
     })
+    // ---- 在会话里问她那个人（0.7.5，用户 m00239）----
+    // 申请已经落盘（pendingOffer 从此看得见），这里补的是「让她当面问出来」：
+    // 卡片弹在她那条会话的输入框上方，人选「可以 / 这次不行」当场落成一条 grant。
+    // 不阻塞唤醒：问不问得到都不影响这一轮她自己说话，报告也照常先写一版。
+    // 没问到（超时 / 答人不在线 / 宿主没这服务）就什么都不做——
+    // 观测台的规则页仍然看得见这张申请，那条老路一直留着当兜底。
+    if (offered) void askOfferInChat(ctx, root, { sessionId, offer: offered, log })
+
     await appendEvent(
       { type: 'meta', text: `wake:${dk} ${decision.template?.id ?? '?'}` },
       { day: model.day, stage: model.stage, source: 'timer' },
@@ -666,6 +681,48 @@ async function wake(ctx, root, model, config, decision, dk, log, deps = {}) {
 }
 
 /**
+ * 在会话里问她那个人（0.7.5，用户 m00239）。
+ *
+ * 为什么不能在她申请的那一刻当场问：申请是在 tick()/wake() 里写的，
+ * 那时会话还没建、agent 还没醒，宿主的 user-questions 只认**活着的 root agent**
+ * （`assertLiveRoot`），问出去必得 CALLER_NOT_LIVE。所以她先把申请落盘，
+ * 等这一轮真的醒过来了，再借那条会话的输入框把话问出去。
+ *
+ * 三件事写死在这里：
+ * - 不抛、不 await 到阻塞唤醒：`void` 调，失败只留一条日志。
+ * - 没答到（超时 / 人不在 / 宿主没这服务）什么都不写——申请仍是 pending，
+ *   观测台规则页那条老路照样能裁决。
+ * - 只认「可以」和「这次不行」两个词，别的当没答。
+ */
+async function askOfferInChat(ctx, root, { sessionId, offer, log = () => {} } = {}) {
+  if (!sessionId || !offer?.id) return
+  try {
+    const r = await askInChat(ctx, {
+      sessionId,
+      questions: [
+        {
+          id: 'grant',
+          header: '大肥鱼想申请一件事',
+          question: `她想试试「${offer.title}」。不是现在就要，是想问问你。`,
+          options: [{ label: '可以' }, { label: '这次不行' }],
+        },
+      ],
+    })
+    if (!r.ok) {
+      log('offer ask skipped', r.code)
+      return
+    }
+    const said = picked(r.answers, 'grant')
+    const verdict = said === '可以' ? 'approve' : said === '这次不行' ? 'reject' : ''
+    if (!verdict) return
+    const w = await recordGrant(root, { offerId: offer.id, rule: offer.rule, verdict })
+    if (!w.ok) log('offer grant failed', w.error)
+  } catch (err) {
+    log('offer ask failed', err?.message || err)
+  }
+}
+
+/**
  * 手动唤醒（观测台上的按钮 / 测试用）。不受时间窗限制。
  *
  * 注意 dk 必须是**纯日期**，不能像早期那样传 `${dk}-manual`：
@@ -684,6 +741,21 @@ async function wake(ctx, root, model, config, decision, dk, log, deps = {}) {
  */
 export async function wakeNow(ctx, deps = {}) {
   const root = deps.root ?? rootDir()
+  // 0.7.4（用户 m00659 C）：手动叫醒也要认「她不在家」。
+  // tick() 早就有一道闸门（下面 109 行一带）：有 active 出门/请神就整段 return，
+  // 理由是「两条会话并行会互相踩 events.jsonl，还会在侧栏里凭空多出一条『家里醒了』」。
+  // 手动 /wake 以前绕过了它 —— 出门期间点「叫她一次」会把**家里**那条真叫醒一轮，
+  // 那一轮写出的事件 cwd 在家、guardWrite 全放行，回家核对时又被判成「正常追加」，
+  // 于是出门那趟的账上凭空多出几条家里发生的事。现在同样拒绝，除非显式 force。
+  const away = deps.force ? { kind: null } : await awayNow(root)
+  if (away.kind) {
+    const line = awayLine(away)
+    return {
+      ok: false,
+      away,
+      why: `${line || '她正在外面'}。家里这条先不叫她——两边同时醒着会互相踩同一份记录。`,
+    }
+  }
   const { events } = await readEvents(root)
   const { config } = await loadConfig(root)
   const model = deriveSelf(events, { growthDays: config.growthDays })

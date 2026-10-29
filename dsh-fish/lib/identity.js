@@ -26,7 +26,7 @@
 
 import { existsSync, readFileSync, statSync } from 'node:fs'
 import { selfDocPath } from './selfdoc.js'
-import { cwdOf, isHerHome, currentToolSurface } from './restrict.js'
+import { cwdOf, isHerHome, toolSurfaceFor } from './restrict.js'
 import { activeOutingSync, bindOutingSession } from './outing.js'
 import { deliverQueued } from './sessionnote.js'
 
@@ -173,9 +173,13 @@ export function liveAgentOf(ctx, sessionId) {
  * 把身份段挂到某个 agent 的 system prompt 上。
  * @param {object} agent
  * @param {string} root
+ * @param {object} [opts]
+ * @param {string} [opts.frozen] 出门那一刻的身份快照（空 = 每轮现读文件）
+ * @param {string} [opts.herDir] 她的屋子。给了才能分清「在家里」与「出门在外」，
+ *   这两种情况「手边有什么」的答案不一样（0.7.3，见 restrict.js 的 toolSurfaceFor）
  * @returns {{ ok: boolean, why?: string }}
  */
-export function attachIdentity(agent, root, { frozen = '' } = {}) {
+export function attachIdentity(agent, root, { frozen = '', herDir = '' } = {}) {
   const sp = agent?.ctx?.systemPrompt
   if (!sp || typeof sp.section !== 'function') {
     return { ok: false, why: '宿主的 agent.ctx 上没有 systemPrompt.section（版本不支持）' }
@@ -203,10 +207,15 @@ export function attachIdentity(agent, root, { frozen = '' } = {}) {
     // 照样会出现在她的工具表里，schema 有名字她就会当成「我能用」。
     // 这一段把「哪几样真是我的」说死；越界调用由 guard 回一句「这件事我做不到」。
     // 白名单变了下一轮就生效（text 是函数），不需要重建会话。
+    //
+    // 0.7.3（用户 m00339）：**出门在外不能念家里那份白名单**。出门那条会话不收窄
+    // （restrict.js 的 onCreated 见 isHerAgent 为假就直接 return），那个工作区的工具
+    // 她全都能调；念错会让她以为自己做不到，出门打工就废了。所以按 cwd 分流：
+    // 在家里照旧念白名单，在外面按她此刻真看得见的工具现算。
     remember(agent, 'section', sp.section({
       name: TOOLS_SECTION,
       order: TOOLS_ORDER,
-      text: () => currentToolSurface(),
+      text: () => toolSurfaceFor(agent, { herDir }),
     }))
     return { ok: true }
   } catch (err) {
@@ -344,7 +353,7 @@ export function registerIdentity(ctx, { root, herDir, log } = {}) {
       const outside = isOuting
       // ③ 那种情况顺手把 id 补进台账；写盘是异步的，钩子不能等，失败就算了。
       if (outside && sid && !outing?.sessionId) void bindOutingSession(root, { sessionId: sid }).catch(() => {})
-      const r = attachIdentity(agent, root, { frozen: outside ? outing.identity : '' })
+      const r = attachIdentity(agent, root, { frozen: outside ? outing.identity : '', herDir })
       if (outside) {
         const g = attachAwayGuard(agent, { root, herDir, log })
         if (g.ok) log?.('[dsh-fish] 外面这一条挂上了兜底守卫')

@@ -653,3 +653,103 @@ test('调度器 skip 日志：同一小时同一原因只记一条，换小时�
   const nextDay = shouldLogSkip('2026-10-28T22|' + why, '2026-10-29', at(22, 5), why)
   assert.match(nextDay, /^2026-10-29T22\|/)
 })
+
+// 0.7.4（用户 m00659 C）：手动叫醒也要认「她不在家」。
+// tick() 早就有这道闸门，理由写在调度器里：两条会话并行会互相踩 events.jsonl，
+// 还会在侧栏里凭空多出一条「家里醒了」的对话。手动 /wake 以前绕过去了。
+test('手动唤醒：她在外面时不该把家里那条叫醒', async () => {
+  await withRoot(async (root) => {
+    await writeConfig(normalizeConfig({ browse: { enabled: false } }), root)
+    // 造一条 active 出门：cwd 在别的工作区
+    await writeFile(
+      join(paths(root).root, 'outings.json'),
+      JSON.stringify({
+        outings: [{
+          sessionId: 'session-out1',
+          workspaceId: 'w1',
+          workspaceName: '素材',
+          cwd: join(root, 'ws'),
+          startedAt: Date.now() - 60_000,
+          endedAt: 0,
+          status: 'active',
+          baseline: null,
+          kept: null,
+          identity: '',
+        }],
+      }),
+      'utf8',
+    )
+    const { ctx, prompts } = fakeCtx()
+    const r = await wakeNow(ctx, { root })
+    assert.equal(r.ok, false, '出门期间不许叫醒家里那条')
+    assert.equal(r.away?.kind, 'outing')
+    assert.match(String(r.why), /家里这条先不叫她/, `要说清为什么没叫：${r.why}`)
+    assert.equal(prompts.length, 0, '一条 prompt 都不许发出去')
+
+    // 显式 force 才穿透
+    const forced = await wakeNow(ctx, { root, force: true })
+    assert.equal(forced.ok, true, JSON.stringify(forced))
+    assert.equal(prompts.length, 1)
+  })
+})
+
+test('手动唤醒：请神期间同样不叫家里那条', async () => {
+  await withRoot(async (root) => {
+    await writeConfig(normalizeConfig({ browse: { enabled: false } }), root)
+    await writeFile(
+      join(paths(root).root, 'possessions.json'),
+      JSON.stringify({
+        possessions: [{
+          sessionId: 'session-pos1',
+          title: '在写方案的那条',
+          cwd: join(root, 'ws2'),
+          startedAt: Date.now() - 30_000,
+          endedAt: 0,
+          status: 'active',
+          identity: '',
+        }],
+      }),
+      'utf8',
+    )
+    const { ctx, prompts } = fakeCtx()
+    const r = await wakeNow(ctx, { root })
+    assert.equal(r.ok, false)
+    assert.equal(r.away?.kind, 'possession')
+    assert.equal(prompts.length, 0)
+  })
+})
+
+// 0.7.4（真机 bug，2026-10-29）：`appendEvent(ev, root)` 把 root 传在了 ctx 的位置，
+// ctx 于是成了一个字符串 → source 落回默认的 'tool' → schema 以 NOT_HER_TYPE 拒掉
+// `grant_offer`（她不能写系统事件）。外面套着 try/catch，只留一行「grant offer failed」。
+// 结果：申请从来没进过事件流，整个 R3 授予规则是死的——出卡、裁决、解禁一条链全断。
+test('解禁申请真的会落盘（不再被 source 误判成她写的）', async () => {
+  await withRoot(async (root) => {
+    await writeConfig(normalizeConfig({ browse: { enabled: false } }), root)
+    // seed 往前放 20 天，growthDay 才会越过「证据最后一天 + 1~3 天」的到期日
+    const seedTs = new Date(Date.now() - 20 * 86400000).toISOString()
+    await appendEvent({ type: 'seed', ts: seedTs, text: '开局' }, { day: 1, stage: 1, source: 'system' }, root)
+    const ev = (body, day) => appendEvent(body, { day, stage: 1, source: 'tool' }, root)
+    // revise 必须带 refs（0.5.8 起还会校验 id 真在事件流里），所以先拿原话的 id
+    const said = await ev({ type: 'utterance', text: '我错了，那个说法不对' }, 3)
+    await ev({ type: 'revise', text: '改成这样说', verdict: 'refined', refs: [said.id] }, 4)
+    await ev({ type: 'revise', text: '再改一次', verdict: 'refined', refs: [said.id] }, 5)
+    await ev({ type: 'refusal', text: '不要' }, 6)
+    await ev({ type: 'refusal', text: '我不想' }, 7)
+    await ev({ type: 'narration', text: '我没想清楚' }, 8)
+
+    const { ctx } = fakeCtx()
+    const r = await wakeNow(ctx, { root })
+    assert.equal(r.ok, true, JSON.stringify(r))
+
+    const { events } = await readEvents(root)
+    const offers = events.filter((e) => e.type === 'grant_offer')
+    assert.equal(offers.length, 1, '证据够了就必须真的写下一条申请，而不是只在日志里报错')
+    const o = offers[0]
+    assert.equal(o.source, 'system', '这条是系统替她出的卡，source 必须是 system')
+    assert.equal(o.grant?.rule, 'learn-affection')
+    assert.ok(String(o.text).includes('我想试试'), `申请正文不对：${o.text}`)
+    // 落了盘才可能被 pendingOffer 看见——否则第二天又出一张，还会盖住用户没处理的卡
+    assert.ok(await readFile(paths(root).events, 'utf8').then((s) => s.includes('grant_offer')))
+  })
+})

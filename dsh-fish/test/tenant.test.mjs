@@ -23,6 +23,7 @@ import {
   releaseRoot,
   isInside,
   normPath,
+  withFileLock,
   TENANT_FILE,
   CLAIM_TTL_MS,
 } from '../lib/tenant.js'
@@ -214,4 +215,73 @@ test('身份文件：家被别人占着 / 调用者不在这个家 → 不落盘
   })
   assert.equal(outside.ok, false)
   assert.match(outside.why, /另一个家|不属于/)
+})
+
+// ---------------------------------------------------------------------------
+// 跨进程锁（2026-10-29 m02162）
+//
+// 占用权只回答「谁是房主」，回答不了「两个实例同时启动、各自读到空 home.json」。
+// 房客日志里成对的 `home.json.*.tmp` 就是那个窗口留下的。锁要保证：
+//   1. 同一时刻只有一个持有者；后来的等着，不交叉。
+//   2. 上一任死在临界区里（锁文件还在、mtime 很老）→ 能接管，不永久卡死。
+//   3. 等太久就拿不到（locked:false），由调用方决定只读复用还是失败——
+//      绝不硬闯去建第二条会话。
+// ---------------------------------------------------------------------------
+
+test('withFileLock：两次并发进来是串行的，后来的等前一个出来', async () => {
+  const root = await tmpRoot()
+  const lock = join(root, '.lock')
+  const order = []
+  const first = withFileLock(lock, async () => {
+    order.push('a-in')
+    await new Promise((r) => setTimeout(r, 120))
+    order.push('a-out')
+    return 'A'
+  })
+  // 给第一个足够时间抢到锁（文件锁不是排队公平的，但这两个调用间隔很短）
+  await new Promise((r) => setTimeout(r, 30))
+  const second = withFileLock(lock, async () => {
+    order.push('b-in')
+    order.push('b-out')
+    return 'B'
+  })
+  const [a, b] = await Promise.all([first, second])
+  assert.equal(a, 'A')
+  assert.equal(b, 'B')
+  assert.deepEqual(order, ['a-in', 'a-out', 'b-in', 'b-out'])
+  await assert.rejects(fs.stat(lock), /ENOENT/, '出来后锁文件要收掉')
+})
+
+test('withFileLock：上一任死在临界区（陈旧锁）能被接管', async () => {
+  const root = await tmpRoot()
+  const lock = join(root, '.lock')
+  await fs.writeFile(lock, JSON.stringify({ pid: 999999, at: 0 }))
+  const old = (Date.now() - 10 * 60_000) / 1000
+  await fs.utimes(lock, old, old)
+  const got = await withFileLock(lock, async () => 'took-over', { ttl: 30_000, timeout: 1_000 })
+  assert.equal(got, 'took-over')
+})
+
+test('withFileLock：等不到就返回 locked:false，不硬闯、也不删别人的锁', async () => {
+  const root = await tmpRoot()
+  const lock = join(root, '.lock')
+  let release
+  const holder = withFileLock(lock, () => new Promise((r) => { release = r }))
+  await new Promise((r) => setTimeout(r, 20))
+  const res = await withFileLock(lock, async () => 'should-not-run', { timeout: 120, wait: 20 })
+  assert.equal(res.ok, false)
+  assert.equal(res.locked, false)
+  assert.match(res.why, /另一个实例|交还/)
+  // 别人的锁不能被超时那方删掉（否则两个进程会同时进临界区）——先查，再放行
+  assert.equal((await fs.stat(lock)).isFile(), true)
+  release('held')
+  assert.equal(await holder, 'held')
+  await assert.rejects(fs.stat(lock), /ENOENT/, '持有者出来后锁要收掉')
+})
+
+test('withFileLock：fn 抛错也要把锁收掉', async () => {
+  const root = await tmpRoot()
+  const lock = join(root, '.lock')
+  await assert.rejects(withFileLock(lock, async () => { throw new Error('boom') }), /boom/)
+  await assert.rejects(fs.stat(lock), /ENOENT/)
 })

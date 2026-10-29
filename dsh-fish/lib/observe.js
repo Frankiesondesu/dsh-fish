@@ -68,6 +68,7 @@ import { ruleById } from './rules.js'
 import { appendEvent } from './store.js'
 import { validateEvent } from './schema.js'
 import { refreshSelfDoc } from './selfdoc.js'
+import { recordGrant } from './grant.js'
 import { readPending, markShown } from './notify.js'
 import { deriveStatus } from './status.js'
 import { publicOwner, saveOwner, saveAccount } from './owner.js'
@@ -281,7 +282,12 @@ export function registerObserve(ctx, deps = {}) {
           return { changed: h.changed === true, from: String(h.from ?? ''), to: String(h.to ?? '') }
         })(),
         // 会话被用户收起来了（归档）——设置页据此显示「重新搭一间」，而不是假装一切正常。
-        home: await homeStatus(root),
+        // blocked（2026-10-29 m02162）：这个家在另一个实例手里，这边不建会话。
+        home: {
+          ...(await homeStatus(root)),
+          blocked: deps.tenancy?.home?.blocked === true,
+          blockedWhy: deps.tenancy?.home?.blocked === true ? String(deps.tenancy?.home?.why ?? '') : '',
+        },
       })
     }],
 
@@ -430,29 +436,15 @@ export function registerObserve(ctx, deps = {}) {
       const { events } = await readEvents(root).catch(() => ({ events: [] }))
       const p = pendingOffer(events, Date.now())
       if (!p) return send(res, 409, { error: '现在没有待裁决的申请' })
-      const { config } = await loadConfig(root)
-      const model = deriveSelf(events, config)
-      try {
-        await appendEvent(
-          validateEvent(
-            {
-              type: 'grant',
-              text: typeof body.reason === 'string' && body.reason.trim() ? body.reason.trim() : verdict === 'approve' ? '可以。' : '这次不行。',
-              grant: { rule: p.grant?.rule || '', offerId: p.id, verdict },
-              day: model.day,
-              stage: model.stage,
-            },
-            { day: model.day, stage: model.stage, source: 'system' },
-          ),
-          root,
-        )
-      } catch (err) {
-        return send(res, 400, { error: err?.message || '写入失败' })
-      }
-      if (verdict === 'approve') {
-        // 批准之后要立刻重写身份文档：她下一次开口就得看得见"这件事现在可以了"。
-        await refreshSelfDoc(root, { config }).catch(() => {})
-      }
+      // 0.7.5：写入逻辑搬到 lib/grant.js——会话里的提问卡片也走同一条路，
+      // 两个入口必须写同一份事件（两个坑的注释也一起搬过去了）。
+      const r = await recordGrant(root, {
+        offerId: p.id,
+        rule: p.grant?.rule || '',
+        verdict,
+        reason: typeof body.reason === 'string' ? body.reason : '',
+      })
+      if (!r.ok) return send(res, 400, { error: r.error })
       return send(res, 200, { ok: true, verdict })
     }],
 
@@ -1398,9 +1390,25 @@ export function registerObserve(ctx, deps = {}) {
         const tampered = v.checkable !== false && v.ok === false
         // 取消勾选的条目：先追加一条 meta 记下 id（不删行——第 5 条铁律）。
         // deriveSelf 读到这条就跳过那些条目，原文仍在事件流里，谁都能复核。
-        const rejectedIds = Array.isArray(b.rejectedIds)
+        let rejectedIds = Array.isArray(b.rejectedIds)
           ? b.rejectedIds.map((x) => String(x ?? '')).filter(Boolean).slice(0, 500)
           : []
+        // 0.7.4（用户 m00659 A）：点「这趟不算数」必须真的不算数。
+        // 0.6.12 起 `kept === false` 只把台账写成 rejected，而 deriveSelf 压根不读台账，
+        // 它只认下面那条 `outing-reject:` meta —— 于是「不算数」是一条都不跳过的空操作。
+        // 现在：明确说了不算数、又没逐条挑，就把这一趟她自己写下的全部条目都标上。
+        // 只挑非 meta 的：日记书签、seen:、wake: 这些是记账不是成长，
+        // 一并跳过会让冷落检测与日记趟次统计失真。
+        let autoRejected = false
+        if (!tampered && !rejectedIds.length && b.kept === false) {
+          const all = eventsSince(join(root, 'events.jsonl'), away.outing?.startedAt, { limit: 500 })
+          rejectedIds = all.items
+            .filter((it) => it.type !== 'meta')
+            .map((it) => String(it.id ?? ''))
+            .filter(Boolean)
+            .slice(0, 500)
+          autoRejected = true
+        }
         if (!tampered && rejectedIds.length) {
           try {
             const { events } = await readEvents(root)
@@ -1411,6 +1419,11 @@ export function registerObserve(ctx, deps = {}) {
                 { type: 'meta', text: 'outing-reject:' + rejectedIds.join(' '), day: m.day, stage: m.stage },
                 { day: m.day, stage: m.stage, source: 'system' },
               ),
+              // 0.7.4 修（真机 bug，2026-10-29）：第二参是 ctx、第三参才是 root。
+              // 原来 root 传在第二位 → ctx 是个字符串 → source 落回 'tool'
+              // → schema 以 NOT_HER_TYPE 拒掉 meta → **「取消勾选」从来没写进去过**，
+              // 被 .catch 吞成一条 warn 日志，界面上却一直说「那部分会被跳过」。
+              { day: m.day, stage: m.stage, source: 'system' },
               root,
             )
           } catch (err) {
@@ -1420,7 +1433,7 @@ export function registerObserve(ctx, deps = {}) {
         const status = tampered ? 'pending' : b.kept === false ? 'rejected' : 'done'
         const r = await endOuting(root, { status, kept: tampered ? null : b.kept === false ? false : true })
         if (!r.ok) return send(res, 409, { ok: false, why: r.why })
-        logLine('info', [`回家：${status}`, r.outing?.workspaceName || r.outing?.workspaceId || '', v.why ?? ''], root)
+        logLine('info', [`回家：${status}`, r.outing?.workspaceName || r.outing?.workspaceId || '', v.why ?? '', autoRejected ? `整趟不算（${rejectedIds.length} 条）` : ''], root)
         // 回家这一刻，「这条会话还算不算她的」就有了答案：不再算 → 当场拆掉
         // 身份段 / 处境段 / 兜底守卫（0.6.16）。不等进程退出，也不靠重启。
         const outSid = String(r.outing?.sessionId || away.outing?.sessionId || '')
@@ -1434,7 +1447,7 @@ export function registerObserve(ctx, deps = {}) {
           try {
             const picked = eventsSince(join(root, 'events.jsonl'), away.outing?.startedAt)
               .items.filter((it) => rejectedIds.includes(it.id))
-            const text = rejectNoteText({ items: picked, total: rejectedIds.length })
+            const text = rejectNoteText({ items: picked, total: rejectedIds.length, auto: autoRejected })
             if (text) {
               const rec = await readHomeRecord(root).catch(() => null)
               const homeAgent = liveAgentOf(ctx, rec?.sessionId || '')
@@ -1451,7 +1464,7 @@ export function registerObserve(ctx, deps = {}) {
             note = { ok: false, why: String(err?.message ?? err).slice(0, 120) }
           }
         }
-        return send(res, 200, { ok: true, outing: r.outing, verify: v, tampered, rejected: rejectedIds.length, detached, note })
+        return send(res, 200, { ok: true, outing: r.outing, verify: v, tampered, rejected: rejectedIds.length, autoRejected, detached, note })
       }
 
       if (action === 'start') {
@@ -1522,7 +1535,7 @@ export function registerObserve(ctx, deps = {}) {
             // 挂着的老会话：`agent/created` 不会再触发，这里直接把装备挂回去。
             const live = liveAgentOf(ctx, reuseId)
             if (live) {
-              attachIdentity(live, root, { frozen: identity })
+              attachIdentity(live, root, { frozen: identity, herDir: paths(root).herDir })
               const g = attachAwayGuard(live, { root, herDir: paths(root).herDir, log: (m) => logLine('info', [m], root) })
               if (!g.ok) logLine('warn', ['出门：接回的老会话兜底守卫没挂上', g.why ?? ''], root)
               await bindOutingSession(root, { sessionId })
@@ -1535,7 +1548,7 @@ export function registerObserve(ctx, deps = {}) {
               const back = await resolveSessionAgent(sc, reuseId)
               // 恢复之后宿主的 agent/created 可能已经补挂过；没挂上就在这里补一次并记下来。
               if (back && mountedCount(back) === 0) {
-                attachIdentity(back, root, { frozen: identity })
+                attachIdentity(back, root, { frozen: identity, herDir: paths(root).herDir })
                 attachAwayGuard(back, { root, herDir: paths(root).herDir, log: (m) => logLine('info', [m], root) })
               }
             }

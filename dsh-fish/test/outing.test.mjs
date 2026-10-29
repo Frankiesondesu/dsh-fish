@@ -274,6 +274,17 @@ test('驳回话术：只否定那几条，不否定整趟，也不带惩罚口�
   assert.equal(rejectNoteText({}), '')
 })
 
+// 0.7.4（用户 m00659 A）：「整趟不算数」的话术不能逐条念——那不是挑几条，是这一趟全不收。
+test('驳回话术：整趟不算数说的是「一条都不收」，不是逐条念墙', () => {
+  const text = rejectNoteText({ items: [{ text: '第一句' }, { text: '第二句' }], total: 7, auto: true })
+  assert.match(text, /这趟里的 7 条，我一条都不收/)
+  assert.match(text, /不是说你白去了/)
+  assert.ok(!text.includes('「第一句」'), '整趟不算时不该逐条列出来')
+  assert.ok(!/不应该|不许|惩罚|下不为例/.test(text))
+  // 这一趟什么都没写：话还得说得出口，不能变成空串
+  assert.match(rejectNoteText({ items: [], total: 0, auto: true }), /这趟我一条都不收/)
+})
+
 // ------------------------------------------------------------------
 // 0.6.26（用户 m03194）：复用的那趟要能说清「第几趟」，装配失败不能留幽灵记录
 // ------------------------------------------------------------------
@@ -310,8 +321,18 @@ test('出门 start：先写日志再装配，装配失败强制撤掉，不留�
   assert.ok(src.includes('装备挂上了'), '装配完要再写一行，说明装备到底挂上没有')
   // 提前那行日志必须在「挂装备」之前，否则中途抛错又会只剩台账。
   const logAt = src.indexOf("（接回第 ${tripNo} 趟）")
-  const attachAt = src.indexOf('attachIdentity(live, root, { frozen: identity })')
+  const attachAt = src.indexOf('attachIdentity(live, root, {')
   assert.ok(logAt > 0 && attachAt > 0 && logAt < attachAt, '日志要排在装配之前')
+  // 0.7.3：装配这两个入口都必须把 herDir 传下去，否则「手边有什么」分不清
+  // 家里与外面，出门那条会话会继续念家里的白名单（用户 m00339）。
+  assert.ok(
+    src.includes('attachIdentity(live, root, { frozen: identity, herDir: paths(root).herDir })'),
+    '接回老会话那一路要传 herDir',
+  )
+  assert.ok(
+    src.includes('attachIdentity(back, root, { frozen: identity, herDir: paths(root).herDir })'),
+    'resolveAgent 恢复那一路也要传 herDir',
+  )
 })
 
 test('接回上次那趟：这版宿主没有 sessionController.resume，要走 resolveAgent（0.6.27 真机 500）', async () => {

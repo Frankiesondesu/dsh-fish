@@ -90,9 +90,92 @@ export function toolSurfaceText(names = HER_TOOLS) {
 /** 提示词里当前该说的那份（registerToolRestrict 每次算完 allow 就刷新）。 */
 let surfaceNow = toolSurfaceText()
 
-/** 读当前提示词段。收窄关着时是空串。 */
+/**
+ * 读**家里**那份提示词段。收窄关着时是空串。
+ *
+ * 注意这只是「她在家」的答案。出门那条会话必须用 `toolSurfaceFor()`——
+ * 见下面 0.7.3 的说明。
+ */
 export function currentToolSurface() {
   return surfaceNow
+}
+
+/** 归一化一份工具名：去重、去空白、排序（顺序稳定，提示词前缀才对得上缓存）。 */
+function cleanNames(names) {
+  return [...new Set((names ?? []).map((s) => String(s ?? '').trim()).filter(Boolean))].sort()
+}
+
+/**
+ * 出门在外那一段「手边有什么」——**按那个 agent 此刻真看得见的工具现算**（0.7.3）。
+ *
+ * 为什么不能复用家里那份（真机问题，用户 m00339 点出来）：
+ *   家里那份是 `currentToolSurface()`，也就是**配置里的白名单**（HER_TOOLS + 额外放行）。
+ *   它被挂在 module 级单例 `surfaceNow` 上，只由 `registerToolRestrict` 写过一次。
+ *   而 `fish:tools` 这一段是 `attachIdentity()` **无条件**挂的——出门那条会话照样挂，
+ *   于是她人在别人工作区、手里握着那个工作区的全部工具，system prompt 里却写着
+ *   「我手边能用的东西只有这几样：growth_commit、her_recall…」并且明说
+ *   「工具表里如果还列着别的名字…那不是我的：别去调」「真伸手去用，只会得到一句
+ *   『这件事我做不到』」。
+ *
+ *   事实是：出门时 `restrict()` 根本不下（`isHerAgent` 为假就直接 return，见本文件
+ *   后面的 onCreated），`attachAwayGuard()` 也只比对调用参数里的路径、不看工具名。
+ *   所以她**调得动**那些工具 —— 是提示词把她自己劝住了。出门打工这个场景
+ *   于是退化成「她只会用那 8 个鱼工具」，而请神反而没这一段（possess.js 不挂
+ *   fish:tools），比出门还放得开。
+ *
+ * 这里的立场：出门在外，能用什么由**那个工作区**决定，不由家里的白名单决定。
+ * 所以按 `agent.ctx.tools.view(agent)` 里此刻 visible 的名字现念一遍，并明说
+ * 「出来就是来干活的」——把 0.7.2 之前那句「别去调」彻底拿掉。
+ *
+ * @param {string[]} names 这个 agent 此刻真看得见的工具名
+ * @returns {string} 空串表示这一层不挂（拿不到工具表时宁可不说，也不要瞎说）
+ */
+export function outsideSurfaceText(names = []) {
+  const list = cleanNames(names)
+  if (!list.length) return ''
+  return [
+    `这趟在外面，手边能用的是这些：${list.join('、')}。`,
+    '这里不是我的屋子，能用什么由这个工作区给：工具表里列着、也在这份清单里的，我都可以直接调。',
+    '出来就是来干活的，别因为「这不是我家的东西」就推说做不到。',
+    '只有伸手回我自己屋子这一条不行——那会得到一句「这件事我做不到」。',
+  ].join('\n')
+}
+
+/**
+ * 读某个 agent 此刻看得见的工具名。拿不到返回 `null`。
+ *
+ * 「拿不到」必须与「没有工具」分开：`null` 时调用方不说话，而不是告诉她「一样都没有」。
+ * 优先用 `visible`（真正的工具表）；老宿主没有 visible 才退回 `restrictableNames`。
+ */
+export function visibleToolsOf(agent) {
+  try {
+    let view = null
+    try { view = agent?.ctx?.tools?.view?.(agent) ?? null } catch { view = null }
+    // 兜底：老宿主/别的实现只接受无参调用（与 refreshFrom 同一套两条路）。
+    if (!view) {
+      try { view = agent?.ctx?.tools?.view?.() ?? null } catch { view = null }
+    }
+    if (!view) return null
+    const visible = cleanNames(namesOf(view.visible))
+    const names = visible.length ? visible : cleanNames(namesOf(view.restrictableNames))
+    return names.length ? names : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * 某条会话该看到的那段「手边有什么」。
+ *
+ * - 在家里（cwd 就是 herDir）：说家里那份白名单 —— 收窄真的在下，她确实只有那几样。
+ * - 在外面（出门那条会话）：按她此刻真看得见的工具现算，见 `outsideSurfaceText`。
+ *
+ * `herDir` 缺省时退回家里那份（老调用点/单测兼容）。生产上的两个调用点都传了。
+ */
+export function toolSurfaceFor(agent, { herDir = '' } = {}) {
+  if (!herDir || isHerAgent(agent, herDir)) return currentToolSurface()
+  const names = visibleToolsOf(agent)
+  return names ? outsideSurfaceText(names) : ''
 }
 
 /** 归一化目录，用于判断"这条会话是不是她的屋子"。Windows 大小写不敏感。 */

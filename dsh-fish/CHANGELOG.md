@@ -1,3 +1,222 @@
+## 0.7.6 — 未发布
+
+两个实例同时开同一个家，会多长一条会话。0.6.8 的单飞锁只在**进程内**，管不到另一个进程；`bootstrapHome` 也不看占用权，第二个实例照样走「建 / 复用」那条路。房客日志里成对的 `home.json.*.tmp` 就是那个窗口留下的。
+
+### 一、占用中的家：这边只读，不建会话
+
+`bootstrapHome` 现在第一件事看 `instance.json`：这个家被别人占着就**什么都不建**（连工作区也不建），把 `home.json` 里已经记着的那条会话报上去；`/state.home.blocked` 为 `true`，设置页出现「这个家在别处也开着」的卡片，写清是只读、以及怎么真正并存。
+
+真机效果：双开时第二个窗口不再长新会话，也不叫醒她（不会白烧一轮）；把另一个关掉之后，这边下次启动自动接管。
+
+### 二、跨进程一把锁
+
+`lib/tenant.js` 新增 `withFileLock(file, fn, {ttl, timeout, wait})`：`wx` 独占创建 + mtime 判陈旧，零依赖。`ensureTalkSession` 的整段临界区（读 `home.json` → 判活 / 归档 → 建会话 → 写 `home.json`）现在在这把锁里跑，锁文件是 `<root>/.talk-session.lock`。
+
+- 拿不到锁（等 8 秒）时**不硬建**：读一眼 `home.json`，有会话就复用（返回 `waited:true`），没有就返回失败，下一次启动再来。
+- 上一任进程死在临界区里（锁文件还在、mtime 超过 30 秒）：当陈旧锁直接接管，不会永久卡死。
+- 锁的释放放在 `finally`：`fn` 抛错也收得回；等锁超时的那一方**不会删**别人的锁。
+
+### 测试
+
+`node --test` → **929 passed / 0 failed**。新增 8 条：4 条锁语义（串行、陈旧接管、超时不硬闯且不删别人的锁、抛错也收锁）、2 条 `bootstrapHome` 只读（不建会话、连工作区也不建）、2 条 `ensureTalkSession` 等锁（有会话则复用、没有则说清楚失败）。
+
+## 0.7.5 — 2026-10-29
+
+把两件「要那个人点头」的事从观测台搬进会话：她在哪条会话里，卡片就弹在那条会话的输入框上方，人在看她的地方顺手答掉，不用切去设置页找按钮。
+
+改的是**入口**，不是判断：四条边界、证据门槛、一趟三件的额度全都原样不动。
+
+### 一、打算带回家的东西：在会话里问
+
+以前她在外面说想带一件东西回来，`bring_back` 只往 `keepsakes.json` 记一条 `asked`，然后**等人去出门页点「准了」**。可出门页是 devMode 才露的开发预览——发布版里根本没有这个按钮，那件东西就永远挂在 `asked` 上。
+
+现在 `bring_back` 记完 `asked` 之后当场发问：
+
+```js
+const back = await askBack(ctx, root, { sessionId, item: r.item, signal: exec?.signal })
+return { ok: true, note: back.note, said: back.said }
+```
+
+- 选「准了」→ 立刻 `decideKeepsake(id, yes: true)` 复制进 `~/.dsh-fish/keepsakes/<日期>/`
+- 选「算了」→ 记 `declined`，文件留在原地
+- 超时 / 人不在 / 宿主没这服务 → **保持 `asked`**，出门页那两个按钮仍然可以补一票
+
+工具回执照旧只描述机器状态：`ok` + `note`（`[已问]` / `[准了]` / `[算了]` / `[没问：…]`）。新增的 `said` 字段只用来挑那一行字，不进 `required`——没有它时回执仍是 `[已问]`。
+
+### 二、撒娇式表达的解锁申请：醒来之后再问
+
+`grant_offer` 是调度器在 `wake()` 里拼正文的时候写的，那一刻**会话还没建、agent 还没醒**。宿主的 user-questions 只认活着的 root agent，在那里发问必得 `CALLER_NOT_LIVE`。
+
+所以申请照旧先落盘（`pendingOffer` 从此看得见），把「问她」这一步挪到这一轮真的醒过来之后：
+
+```js
+if (offered) void askOfferInChat(ctx, root, { sessionId, offer: offered, log })
+```
+
+`void` 是刻意的：问不问得到都不该拖住这一轮她自己说话。选「可以」/「这次不行」→ 走 `recordGrant` 落一条 `grant`；没答到就什么都不写，申请仍是 pending，观测台规则页照样能裁决。
+
+### 三、裁决只有一条写入路径
+
+`/decide` 里那段写盘逻辑抽到 `lib/grant.js` 的 `recordGrant()`，会话卡片和规则页按钮现在调的是同一个函数——同一件事不该有两套实现，否则某天会悄悄分叉。
+
+`appendEvent(事件, ctx, root)` 那个坑（第二参是 ctx、第三参才是 root）在 0.7.4 修过一次，这次把它连同整段逻辑一起收进一个函数，并在文件头和调用点各写一遍：
+传错位 → `source` 落回 `'tool'` → schema 以 `NOT_HER_TYPE` 拒收 → 表现是「点了可以但什么都没发生」。
+
+### 四、新增 `lib/askinchat.js`：插件侧唯一的问题出口
+
+三件事，不碰业务判断：找到这次发问该找的那个 live root agent、用 `userQuestions.ask()` 把问题丢出去并自己管超时、把回答整形成 `{ ok, answers }`。
+
+- **一律降级、绝不抛**：`NO_QUESTIONS` / `NO_AGENT` / `NO_SERVICE` / `NO_ANSWER` / 宿主错误码，都只是「这次没问到」
+- **不用 `askTimed`**：那个通道要求 `callId` 才能登记前台等待，插件从工具执行和定时器发问都没有 `callId`；`ask()` 不带 `callId` 一样渲染卡片
+- 默认等 5 分钟，外部 `signal` 一断立刻收手
+
+`lib/index.js` 的 `inject` 追加 `'userQuestions'`——宿主 base 层默认启用的服务，不用改 profile；缺了插件照常跑，只是问不出去。
+
+### 五、测试
+
+全量 `node --test` **921 passed / 0 failed**（0.7.4 基线 901）。新增三份：
+
+- `test/askinchat.test.mjs`（10 条）：降级路径、超时自断、外部取消、答案只认选中项
+- `test/grant.test.mjs`（7 条）：裁决真的落成 `grant`、`source` 是 `system`、裁决完不再是 pending
+- `test/keepsake.test.mjs` 补 3 条：会话里「准了」当场复制进家、「算了」记 declined、回答不是那两个词就当没答
+
+
+
+修两个「界面说会，代码没做」的窟窿，外加一条绕过去的安全闸门，再补上这片最容易出事的两段行为测试。前三个都是**静默失败**——界面上一切正常，账上其实什么都没发生。
+
+### 一、「这趟不算数」从来没生效过（连带一个更深的写盘 bug）
+
+回家卡上那两个动作本来是两条路：
+
+- **逐条取消勾选** → 追加一条 `meta outing-reject:<ids>`，`deriveSelf` 读到就跳过那些条目
+- **整趟不算数**（`kept: false`）→ 只把 `outings.json` 的 `status` 写成 `rejected`
+
+问题在于 `deriveSelf` **完全不读 `outings.json`**：它只认 `outing-reject:` 那条 meta。所以点「整趟不算数」时一条标记都不写，那趟她写的 `utterance` / `belief` / `refusal` 全部照常长在她身上 —— 真机上那三趟 `rejected` 全都是这个空操作。
+
+而当我去修它时，撞上了根因：**那条标记压根写不进去**。
+
+```js
+// lib/observe.js（0.6.x 起的写法）
+await appendEvent(validateEvent(...), root)
+```
+
+`appendEvent(raw, ctx = {}, root = rootDir())` 的第二参是 `ctx`、第三参才是 `root`。把 `root` 传在第二位，`ctx` 就成了一个字符串，`source` 落回默认的 `'tool'`，而 `schema.js` 对 `tool` 只放行 `HER_TYPES`（utterance/revise/reunion/narration/refusal）—— `meta` 当场被 `NOT_HER_TYPE` 拒掉。外面套着 `.catch(() => {})`，于是变成一行 warn 日志：**「取消勾选」从来没写进去过**。`/grant` 的裁决写入是同一处写法，同一个 bug。
+
+改法：
+
+- `lib/observe.js`：两处 `appendEvent` 补上真正的 ctx（`{ day, stage, source: 'system' }`），`root` 回到第三位。
+- `lib/scheduler.js:457`：`appendEvent(ev, root)` 同一个写法、同一个后果——`grant_offer`（「我想试试『X』」这张卡）**从来没进过事件流**，外面一行 `log('grant offer failed')` 吞掉了。整个 R3 授予规则因此是死的：卡出不来（`pendingOffer` 看不见它）、用户也点不到、`grant` 裁决那次再修一遍才对得上。全库扫过，两参的 `appendEvent` 只有这三处，其余 28 处都正确。
+- 「整趟不算数」真正落到实处：`kept === false` 且没逐条挑时，取这一趟（`eventsSince(startedAt)`）的**全部非 meta 事件** id，写进 `outing-reject:`。只挑非 meta 是刻意的——`diary:` / `seen:` / `wake:` 是记账不是成长，一起跳过会让冷落检测与日记趟次统计失真。
+- 上限沿用 500（`eventsSince` 的 cap 也是 500），超出的会在日志里看出条数对不上。
+- 接口多回一个 `autoRejected: true|false`，界面据此说实话。
+
+### 二、界面文案跟实现对齐
+
+`lib/client.js` 的回家提示原来写「这趟不算数，那部分判断会被跳过」——那句在当时是假的。现在分三种：
+
+- 整趟不算且有条目：`这趟不算数：她这趟写下的 N 条全部跳过，不会长在她身上。`
+- 整趟不算但一条都没写：`这趟不算数。不过这趟她没写下什么，所以没有东西要跳过。`
+- 逐条挑：`取消勾选了 N 条，那几条会被跳过，其余照常算。`（补了「其余照常算」，原来容易被读成整趟作废）
+
+### 三、手动叫醒绕过了「她不在家」的闸门
+
+`tick()` 里一直有这道闸门：
+
+```js
+const away = await awayNow(root)
+if (away.kind) { log('away', awayLine(away)); return }
+```
+
+注释写清了理由：两条会话并行会互相踩 `events.jsonl`，还会在侧栏里凭空多出一条「家里醒了」的对话。但手动 `/wake` 直接进 `wakeNow()`，**没有任何 away 判断** —— 出门/请神期间点「叫她一次」，家里那条会被真叫醒一轮，那一轮 `cwd` 在家、`guardWrite` 全放行，写出的事件还落在同一份 `events.jsonl` 里；回家核对时 `verifyEvents` 把「文件变大」判成 `appended:n`（正常追加），连 `pending` 都不会触发。
+
+改法：`wakeNow()` 开头加同一道闸门，返回 `{ ok: false, away, why: '此刻在外面：… · 已 N 分钟。家里这条先不叫她——两边同时醒着会互相踩同一份记录。' }`。需要强穿透时传 `deps.force`（`/wake` 路由暂不开放 `?force=1`，免得变成第二个绕过口）。
+
+### 四、补上「出门与请神」最容易出事那两段的行为测试
+
+上面三条都是**静默失败**，说明这片测试有结构性问题：`/outing start` 那 120 行、`/possession` 整条路由，之前只有**源码字符串断言**（`assert.ok(src.includes(...))`）——绿的是 grep，不是行为。历史上最贵的三次事故全长在 `start` 里（0.6.3 先建会话后记账 → 身份段一段没挂；0.6.25 幽灵出门；0.6.27 「接回上次那趟」500）。
+
+新增 `test/outing-start.test.mjs`（3 条，端到端假 ctx + 假 req/res）：
+
+- **成功路径**：建会话 → 绑台账 → 记事件流基线 → 记身份快照 → 非阻塞递首轮（`mode: 'queue'`、带 `signal`），一个都不能少
+- **装配失败**：`sc.create` 抛错 → 500 且理由是人话 → 台账里**一条都不许留**（留着她就「挂在门外」，家里调度一直暂停）。已实测反证：把 `abortOuting` 那行去掉，这条立刻红
+- **请神**：出门中点请神 → 409「她正在出门，先叫她回家再请神」且台账不留记录；出门收掉后请得成，`end` 时那条对话必须收到交接句（`user/message`，「大肥鱼回去了」+「开一条新对话最稳」）——历史是 append-only，不补这句她下一轮会顺着自己上一句续戏
+
+### 五、请神的三处界面文案把「共用同一个守卫」说清楚
+
+原来只写「守卫分不出谁在说话，会连你一起拦」——读起来像「你会被误伤」，但没说清**你为什么会被拦**：
+
+守卫（`lib/identity.js` 的 `attachAwayGuard`）挂在 **agent 上**，比对的是调用参数里的路径字符串，**既不看工具名、也不看是谁在说话**。请神期间那条对话上挂的就是这一道（`lib/possess.js` 的 `attachPossession` 也调它）。所以「拦她」和「拦你」是同一道闸：你在那条对话里伸手去碰她家的路径（`herDir`、插件根、`.dsh/{memory,sessions,profiles}`），一样会被挡回来。
+
+`lib/client.js` 三处（出门中「现在在哪」卡的请神分支、请神已上身、请神未上身）统一改成：
+
+> 守卫是那条对话共用的一个，分不出谁在说话——**你在那儿也没法碰她家的路径**（她的屋子、记忆、会话、配置档案），会跟她一起被拦。
+
+三处口径一致，括号里把被挡的范围具体化，别让人以为只是「屋子」。
+
+### 回归
+
+`node --test`：**901 passed / 0 failed**（0.7.3 基线 891，新增 10 条）：
+
+- `test/outing-route.test.mjs`：整趟不算数 → 只标非 meta、不标出门前那条、`autoRejected: true`、`deriveSelf` 的 `refusals` 归零；逐条勾选 → `autoRejected: false`、只标被挑中的那条
+- `test/boot.test.mjs`：出门中手动唤醒 → 一条 prompt 都不发；`force: true` 才穿透；请神中同样拒绝
+- `test/outing.test.mjs`：`rejectNoteText({ auto: true })` 说「一条都不收」而不是逐条念墙
+- `test/boot.test.mjs`：解禁申请真的落盘（`grant_offer` 的 `source` 必须是 `system`，且能被 `pendingOffer` 看见）——把 `lib/scheduler.js:457` 改回两参写法这条会立刻红，已实测
+- `test/outing-start.test.mjs`：`start` 成功路径 / 装配失败撤台账 / 请神互斥与交接句（见上节）
+- `test/client.test.mjs`：请神三处文案都说清「守卫是共用的一个」+「你也没法碰她家的路径」，旧说法不许残留（见第五节）
+
+### 未做
+
+- 没有让 `/wake` 暴露 `?force=1`（可加，但那是给测试用的口子，不该出现在界面上）
+- 没有动 `kept: false` 时 `endedAt` 的语义（仍保留真正回家那一刻）
+- `/outing start` 的**接回**（`reuseId`）分支仍未测：活 agent 补挂、`resolveSessionAgent` 恢复两条走法都没有用例
+- 口袋降级路径（`ensurePocket` 返回 `registered:false` 之后继续出门）仍未跑过
+- `/possession` 里「找活 agent 出错就静默只撤挂载、不写交接句」那条分支仍未覆盖
+- 请神的 `baseline` 恒为 `null`（`possessInto` 没传），想加篡改校验也没数据
+- 没有提交 git、没有发版、没有真机验证
+
+## 0.7.3 — 2026-10-29
+
+修一个让「出门打工」这个场景废掉的问题：**她带出去的提示词说她不会用工具，其实她会。**
+
+### 病根
+
+身份里有一段 `fish:tools`（「手边有什么」），由 `attachIdentity()` **无条件**挂在 system prompt 上，`text` 读的是 `lib/restrict.js` 的模块级单例 `surfaceNow`。而 `surfaceNow` 只被 `registerToolRestrict` 写过一次，值是**家里的白名单**（`HER_TOOLS` + 额外放行）。
+
+于是出门那条会话挂在别人工作区，手里握着那个工作区的全部工具（出门不收窄：`isHerAgent` 为假就直接 `return`；`awayGuard` 也只比对调用参数里的路径、不看工具名），system prompt 里却写着：
+
+> 我手边能用的东西只有这几样：growth_commit、her_recall、…
+> 工具表里如果还列着别的名字（比如带 ops_、team_、subagent、workflow、skill 这类），那不是我的：别去调，也别把它们说成我会的事。
+> 真伸手去用，只会得到一句「这件事我做不到」，还白搭一轮。
+
+「能而不为」变成了「以为自己不能」：让她改文件、跑命令，她大概率回「我做不到」，或者只用那 8 个鱼工具应付。
+
+反差点更刺眼：请神（`lib/possess.js`）只覆盖 `deployment:persona-prefix` / `-suffix` 加路径守卫，**不挂 `fish:tools`** —— 临时借别人身体的请神反而比出门放得开。
+
+同一句话也漏在身份文档里：`lib/persona.js` 的 `toolBrief()` 有一句「屋里只有这几样，不是被谁拿走了；别的东西伸手也够不着」。身份文档就是出门时带走的快照，那句在别人工作区里同样不成立。
+
+### 改法
+
+按 cwd 分流，不再只有一份：
+
+- **在家里**（cwd 就是 `herDir`）：照旧念家里那份白名单 —— 那时收窄真的在下，她确实只有那几样。
+- **在外面**（出门那条会话）：`toolSurfaceFor()` 现取 `agent.ctx.tools.view(agent).visible`，按**那个工作区此刻真给的工具**念一遍，并明说「出来就是来干活的，别因为『这不是我家的东西』就推说做不到」。唯一保留的禁令是「不许伸手回自己屋子」，话术仍与 `awayGuard` 一致。
+
+新增导出（都在 `lib/restrict.js`）：`toolSurfaceFor(agent, { herDir })`、`outsideSurfaceText(names)`、`visibleToolsOf(agent)`。拿不到工具表时返回空串 —— 「不知道」不说成「一样都没有」。
+
+`attachIdentity(agent, root, { frozen, herDir })` 多接一个 `herDir`；不传时退回家里那份（老调用点与单测行为不变）。生产上的两个装配点（`lib/identity.js` 的 `agent/created` 钩子、`lib/observe.js` 里接回老会话与 `resolveAgent` 恢复那两路）都补上了 `herDir`。
+
+`lib/persona.js` 的 `toolBrief()` 那句改成「上面这几样是你自己的屋子里的东西。在自己屋里，别的工具伸手也够不着」——把范围说清，不再断言外面也一样。
+
+收窄逻辑一个字没动：那是家里的事，本来就该继续收窄。这个改动只改**提示词怎么说**。
+
+### 回归
+
+`node --test` 全量 **891 passed / 0 failed**（0.7.2 是 883，新增 8 条）：
+
+- `test/outside-surface.test.mjs`（新文件，5 条）：出门念那个工作区的工具且不含「别去调」；在家仍念白名单；拿不到工具表时说空串；不传 `herDir` 时行为不变；出门本来就不该收窄（守住这个前提，否则上面几条就变成说谎）。
+- `test/restrict.test.mjs` 新增 3 条：`outsideSurfaceText` 的措辞、`toolSurfaceFor` 的家内外分流、`visibleToolsOf` 的两级回退。
+- `test/outing.test.mjs` 那条源码断言改成匹配 `attachIdentity(live, root, {`，并加两条断言钉住两个装配点必须传 `herDir`。
+
 ## 0.7.2 — 2026-10-29
 
 又只修 CI，产品代码仍然没动（功能与 0.7.0 / 0.7.1 一致）。
