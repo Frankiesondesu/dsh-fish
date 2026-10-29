@@ -81,7 +81,10 @@ export function fileDepDir(profileDir, pkg) {
     if (typeof spec !== 'string' || !spec.startsWith('file:')) continue
     const raw = spec.slice('file:'.length).trim()
     if (!raw) return ''
-    // `file:D:/x`、`file:/x`、`file:../../x` 三种都要认
+    // `file:D:/x`、`file:/x`、`file:../../x` 三种都要认。
+    // `D:/x` 在 POSIX 上不算绝对路径（CI 跑 Linux 会把它拼到 profile 后面），所以盘符单独判：
+    // 这个值是用户写在 profile 里的，跨平台读出来也得认。
+    if (/^[A-Za-z]:[\\/]/.test(raw)) return process.platform === 'win32' ? resolve(raw) : raw.replace(/\\/g, '/')
     return isAbsolute(raw) ? resolve(raw) : resolve(profileDir, raw)
   }
   return ''
