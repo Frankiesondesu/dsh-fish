@@ -206,9 +206,6 @@ export async function grabFrames(o = {}) {
 
   if (!/^BV[0-9A-Za-z]{10}$/.test(bvid)) return fail('不是 BV 号')
 
-  const ff = o.ffmpeg ?? detectFfmpeg()
-  if (!ff.ok) return fail(`本机没有可用的 ffmpeg（${ff.why}）。装好后重试，或先只看文字。`)
-
   // 能找到二进制、但跑起来就失败，是另一类问题；这两种以前混在一起，只能靠猜。
   const caFile = String(o.caFile ?? process.env.DSH_FISH_CA_FILE ?? '').trim()
 
@@ -236,6 +233,13 @@ export async function grabFrames(o = {}) {
     return fail(String(e?.message ?? e))
   }
   if (!pu?.ok || !pu.data?.url) return fail(pu?.message ?? '拿不到播放地址（可能要登录或这条视频有地区限制）')
+
+  // ffmpeg 探测放在网络检查**之后**：以前它在最前面，机器上没装 ffmpeg 时
+  // 任何上游错误（412、要登录、视频没了）都会被「本机没有可用的 ffmpeg」盖掉，
+  // 用户拿到的理由是错的（2026-10-30 CI 上 4 个 job 同时红，就是这么发现的：
+  // runner 没有 ffmpeg，两条「上游怎么说就怎么说」的用例看到的是 ffmpeg 文案）。
+  const ff = o.ffmpeg ?? detectFfmpeg()
+  if (!ff.ok) return fail(`本机没有可用的 ffmpeg（${ff.why}）。装好后重试，或先只看文字。`)
 
   const url = pu.data.url
   const duration = Number(info.data?.duration ?? pu.data?.duration ?? 0) || 0

@@ -69,6 +69,14 @@ test('detectFfmpeg：指到不存在的路径时如实报红，并说明那个�
   assert.match(r.why, /DSH_FISH_FFMPEG/)
 })
 
+test('detectFfmpeg：环境变量是空串时当作没设，不能抛异常', () => {
+  // 空串会被 spawn 当成「文件名为空」直接抛 TypeError，连「没找到 ffmpeg」这条路都走不到。
+  // 2026-10-30 把 ffmpeg 从 PATH 拿掉复现 CI 时踩到。
+  const r = detectFfmpeg({ DSH_FISH_FFMPEG: '' })
+  assert.equal(typeof r.ok, 'boolean')
+  assert.equal(typeof r.why, 'string')
+})
+
 test('saveImage：真的写进 media/，名字带前缀，坏数据与空数据被拒', async () => {
   const root = await tmpRoot()
   try {

@@ -13,10 +13,23 @@
 
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { join, posix, resolve } from 'node:path'
 
 export const PKG_NAME = 'dsh-fish'
 const DEP_FIELDS = ['dependencies', 'devDependencies', 'optionalDependencies']
+
+/** 形如 `D:/x`、`D:\x`、`\\server\share` 的 Windows 绝对路径 */
+function isWinAbs(p) {
+  return /^[A-Za-z]:[\\/]/.test(p) || /^\\\\/.test(p)
+}
+
+/** 按 Windows 语义拼相对路径——POSIX 上的 path.resolve 认不得盘符 */
+function winResolve(base, rel) {
+  const b = base.replace(/\\/g, '/')
+  const drive = /^([A-Za-z]:)/.exec(b)?.[1] ?? ''
+  const rest = b.slice(drive.length) || '/'
+  return drive + posix.resolve(rest, rel.replace(/\\/g, '/'))
+}
 
 /** `file:D:/x` / `file:/d/x` / `file:../../x` → 绝对路径；`link:` 和其它协议返回 ''。 */
 export function parseFileDep(spec, profileDir) {
@@ -25,6 +38,13 @@ export function parseFileDep(spec, profileDir) {
   if (!m) return ''
   const raw = m[1].trim()
   if (!raw) return ''
+  // Windows 绝对路径（`D:/x`、`D:\x`、`\\server\share`）在 POSIX 上也必须原样保留：
+  // `path.resolve('/home/runner', 'D:/x')` 会把它当成相对路径，拼成
+  // `/home/runner/D:/x`（CI 上 3 个 ubuntu job 就是这么红的，2026-10-30）。
+  if (isWinAbs(raw)) return raw.replace(/\\/g, '/')
+  // profile 目录本身是 Windows 路径（Windows 上跑、或在 Linux 上核对 Windows 的配置）：
+  // 按 Windows 语义拼，否则 POSIX 的 resolve 会把 `C:/p/desktop` 也当相对路径。
+  if (isWinAbs(String(profileDir ?? ''))) return winResolve(String(profileDir), raw)
   return resolve(profileDir, raw)
 }
 
