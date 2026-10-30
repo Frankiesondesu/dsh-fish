@@ -15,9 +15,29 @@ import { join } from 'node:path'
 import { currentOffer, recordGrant } from '../lib/grant.js'
 import { readEvents } from '../lib/store.js'
 
+/**
+ * 建一个临时的「家」，跑完就删。
+ *
+ * ⚠️ 必须能等异步：老写法 `try { return fn(root) } finally { rmSync(root) }` 在
+ * `fn` 是 async 的时候，`finally` 会在第一个 await 处**立刻**删目录——那时
+ * 函数体还没跑完。读事件的 `fs.readFile` 若还没来得及 open，就撞 ENOENT，
+ * 于是 `currentOffer` 返回 null，测试报 `null == true`。
+ * 这是**时序**问题：本机快、open 抢在 unlink 前面就过；CI 的 ubuntu-20 慢，
+ * 0.8.2 那次就红了（2026-10-30，run 41083997221 的 job 124160216212）。
+ */
 function withRoot(fn) {
   const root = mkdtempSync(join(tmpdir(), 'fish-grant-'))
-  try { return fn(root) } finally { rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) }
+  const clean = () => rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
+  let out
+  try {
+    out = fn(root)
+  } catch (err) {
+    clean()
+    throw err
+  }
+  if (out && typeof out.then === 'function') return out.finally(clean)
+  clean()
+  return out
 }
 
 /** 写一条等人裁决的申请进去（模拟调度器 wake() 里那一步）。 */
