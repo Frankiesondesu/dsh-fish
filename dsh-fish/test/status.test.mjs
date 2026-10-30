@@ -57,6 +57,13 @@ test('醒来很久没动 → 醒着但没做什么，detail 报分钟数', () =>
   assert.ok(st.detail.includes('12 分钟前'), st.detail)
 })
 
+test('醒着、上次动作在 5–10 分钟之间：也得算醒着，不能掉成「睡着」（m04933）', () => {
+  const st = deriveStatus({ events: [meta(7 * MIN, `wake:${DK} nightly`)], config: cfg, now: NOW })
+  assert.equal(st.phase, 'awake-idle')
+  assert.equal(st.label, '在吃大白饭')
+  assert.ok(st.detail.includes('7 分钟前'), st.detail)
+})
+
 test('刚刷完视频 → 在上网刷视频，并带上刷到了什么', () => {
   const items = [{ bvid: 'BV1aa', title: '第一个' }, { bvid: 'BV1bb', title: '第二个' }]
   const st = deriveStatus({
