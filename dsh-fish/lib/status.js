@@ -18,6 +18,8 @@ import { dateKey, inWindow } from './settings.js'
 /** 最近多久内有动作，算"正在做事" */
 export const ACTIVE_MS = 5 * 60_000
 /** 醒来后多久没有任何动作，算"醒着发呆" */
+// 2026-10-30（m04933）：这个阈值不再参与 awake-idle 判定——「醒过、有动作记录」就是醒着，
+// 5–10 分钟那一段原来会掉进「沉在水底」。保留导出只为不破坏已有引用。
 export const IDLE_MS = 10 * 60_000
 
 const DK_RE = /^\d{4}-\d{2}-\d{2}$/
@@ -175,7 +177,10 @@ export function deriveStatus({ events = [], config = {}, now = new Date() } = {}
     // 刚醒，还没来得及做任何事。不能掉进最后的 else 变成「睡着」——
     // 这恰恰是用户最想看见的那一格（m06219）。
     phase = 'awake-idle'; label = '在吃大白饭'; detail = ''
-  } else if (wokeToday && Number.isFinite(lastActMs) && nowMs - lastActMs > IDLE_MS) {
+  } else if (wokeToday && Number.isFinite(lastActMs)) {
+    // 醒过、也没在动作里：从 5 分钟前到天荒地老都算「醒着但没做什么」。
+    // 原来这里写的是 `> IDLE_MS`，5–10 分钟那一段会掉进最后的 else，被显示成「沉在水底」
+    // （2026-10-30 用户 m04933 追问「睡觉时能不能主动说话」时查出来的）。
     phase = 'awake-idle'; label = '在吃大白饭'
     minutesAgo = Math.round((nowMs - lastActMs) / 60_000)
     detail = `上次行动是在 ${minutesAgo} 分钟前`
