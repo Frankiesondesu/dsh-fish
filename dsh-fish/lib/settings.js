@@ -59,6 +59,19 @@ export const DEFAULTS = {
     allow: [],
   },
 
+  // 她主动说话（2026-10-30，用户 m04610；本机实验，只在 .dev 下生效）
+  // 频率是上限不是行为要求：到上限就闭嘴，没到也不保证一定开口。
+  // 概率随「多久没人说话」缓慢上升（baseChance + 超出 minIdleHours 的每小时 * gainPerHour，封顶 maxChance）。
+  proactive: {
+    enabled: false,       // 默认关；公开版没有这个功能
+    maxPerDay: 2,         // 一天最多开几次空手回合
+    minIdleHours: 6,      // 距上一次记录不足这么久就不打扰
+    baseChance: 0.15,     // 每次掷骰子的基础概率
+    gainPerHour: 0.05,    // 超过 minIdleHours 之后，每多一小时加多少
+    maxChance: 0.6,       // 概率上限
+    cooldownHours: 4,     // 两次之间至少隔多久
+  },
+
   // 她"不想看"的东西（可追加，用户说以后还会加）
   avoid: {
     keywords: ['恐怖', '血腥', '鬼畜', '政治'],
@@ -319,6 +332,10 @@ export function normalizeConfig(raw = {}) {
   // 出门：只存一个布尔（老配置里没有这一组）
   cfg.outing = { ...DEFAULTS.outing, ...cfg.outing }
   cfg.outing.ack = Boolean(cfg.outing.ack)
+
+  // 主动说话（0.8.1 本机实验）：布尔严格化 + 数值夹紧（夹紧规则真身在 proactive.js）
+  cfg.proactive = { ...DEFAULTS.proactive, ...cfg.proactive }
+  cfg.proactive.enabled = Boolean(cfg.proactive.enabled)
 
   // 她的工具面：preset 名 trim（空 = 用宿主默认组合），allow 去重去空
   // 不改 allow 的语义——它只是"额外放行"，真正的收窄由 preset 完成。

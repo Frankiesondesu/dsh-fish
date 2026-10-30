@@ -11,7 +11,7 @@
 import { parseRefusal } from './refuse.js'
 
 /** 允许她提交的类型（工具白名单）。系统侧另有两个 meta/answer 不开放给她。 */
-export const HER_TYPES = Object.freeze(['utterance', 'revise', 'reunion', 'narration', 'refusal'])
+export const HER_TYPES = Object.freeze(['utterance', 'revise', 'reunion', 'narration', 'refusal', 'dream'])
 
 /** 全量类型表（含系统侧） */
 export const ALL_TYPES = Object.freeze([
@@ -32,6 +32,11 @@ export const ALL_TYPES = Object.freeze([
   // 不解释、不加工——她翻到时看到的是「他说：…」，不是"他当时的意思是…"。
   // 系统侧写（不在 HER_TYPES 里）：她不能凭空造一句"他说过"。
   'heard',
+  // 梦（2026-10-30，本机实验 A 案，用户 m02196 的念头 + m02837 的委托）：
+  // 醒来后由她自己记一句，材料只能来自真实发生过的事（refs 指回事件 id）。
+  // **不是新信息来源**：梦不进 beliefs、不进成长计数、不能改任何东西。
+  // 由工具 her_dream 写（source 'tool'），所以放进 HER_TYPES。
+  'dream',
 ])
 
 /**
@@ -199,7 +204,7 @@ export function validateEvent(raw, { day, stage, now = Date.now(), source = 'too
   // 时才做存在性校验；不传的老调用（含测试里的直接构造）行为不变，保持向后兼容。
   // 只查 revise 与 narration：这两类才是「我改口 / 我对自己有个说法」的声明，
   // 别的事件带 refs 只是引用材料，不承担可核验的义务。
-  if (knownIds && (type === 'revise' || type === 'narration')) {
+  if (knownIds && (type === 'revise' || type === 'narration' || type === 'dream')) {
     for (const id of refs) {
       if (!knownIds.has(id)) {
         throw new Reject('REF_NOT_FOUND', `refs 里的 ${id} 在事件流里不存在。要指向具体的某一条，别写自己没查过的 id。`)
@@ -223,6 +228,21 @@ export function validateEvent(raw, { day, stage, now = Date.now(), source = 'too
       'narration 要说清是从哪件事来的：用 refs 指向 her_recall 翻到的某一条 id。' +
         '如果你这次真的没想清楚，就直接写「我没想清楚」——那句也算数。',
     )
+  }
+
+  // 梦（2026-10-30，本机实验）：**必须**带 refs，而且指的是真实事件。
+  //
+  // 为什么这次不留「我没想清楚」的口子：narration 是自我总结，空话本身还算一种诚实；
+  // 梦不是。它的全部价值在于「把发生过的事重新拼一遍」——不指认材料，它就退化成了
+  // 编故事，而编出来的东西会留在账上、被她自己读到。宁可这条不写。
+  //
+  // 另外两条硬约束写在 lib/dream.js（一天一条）和派生层（不进成长计数）：
+  // 梦不能变成新的信息来源，也不能被当成"她成长了"的证据。
+  if (type === 'dream') {
+    if (refs.length === 0) {
+      throw new Reject('DREAM_NEEDS_REF', '梦不能凭空编：用 refs 指向你翻到的真实事件的 id（1–6 条）。')
+    }
+    if (refs.length > 6) throw new Reject('DREAM_TOO_MANY_REFS', '一条梦最多引用 6 件事，多了就成复盘了。')
   }
 
   let confidence = typeof raw.confidence === 'number' && Number.isFinite(raw.confidence) ? raw.confidence : 0.5

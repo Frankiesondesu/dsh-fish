@@ -66,13 +66,18 @@ function fakeAgent(cwd, { withRestrict = true, withGuard = true } = {}) {
 }
 
 test('清单里她该有的工具都在，且不含危险口子', () => {
-  // 八个是她自己的（0.7.6 加了 ask_owner），外加 read_image（看图片/看视频画面都靠它）
+  // 八个是她自己的（0.7.6 加了 ask_owner），外加 read_image。
+  // 定时工具默认不放（m04504），要放由用户自己加白名单——这里不许出现。
   for (const name of ['growth_commit', 'her_recall', 'her_diary', 'her_leave', 'bili_look', 'bili_watch', 'bili_speak', 'ask_owner', 'read_image']) {
     assert.ok(HER_TOOLS.includes(name), `清单里少了 ${name}`)
   }
   // 这几个一旦放进去，收窄就白做了
   for (const name of ['pwsh', 'bash', 'write', 'edit', 'web_search', 'web_fetch', 'skill', 'subagent', 'workflow']) {
     assert.ok(!HER_TOOLS.includes(name), `清单里不该有 ${name}`)
+    assert.ok(!HER_TOOLS.includes(name), `清单里不该有 ${name}`)
+  }
+  for (const name of ['schedule_create', 'schedule_list', 'schedule_update', 'schedule_delete']) {
+    assert.ok(!HER_TOOLS.includes(name), `${name} 默认不放：谁想用，自己加白名单`)
   }
 })
 
@@ -103,7 +108,7 @@ test('只有她的 agent 被收窄，别人的会话一个都不碰', () => {
 
   ctx.emit('agent/created', { agent: hers.agent })
   assert.equal(hers.calls.length, 1, '她这条应该被限制一次')
-  assert.deepEqual(hers.calls[0].allow, [...HER_TOOLS], '只写 allow，不在清单里的一律挡掉')
+  assert.deepEqual(hers.calls[0].allow, HER_TOOLS.filter((n) => n !== 'her_dream'), '只写 allow，不在清单里的一律挡掉；her_dream 是 .dev 下才加的工具')
   assert.equal(hers.calls[0].deny, undefined, '不用 deny：宿主将来新增工具时 allow 会自动挡住它')
 })
 
@@ -273,7 +278,7 @@ test('restrict 因「名字还没登记」抛错时：先不收窄，等登记�
   names = new Set([...HER_TOOLS])
   await new Promise((r) => setTimeout(r, 40))
   assert.equal(calls.length, 2, '登记齐之后应该再收一次')
-  assert.deepEqual(calls[1].allow, [...HER_TOOLS], '收窄用的是完整清单，不是交集')
+  assert.deepEqual(calls[1].allow, HER_TOOLS.filter((n) => n !== 'her_dream'), '收窄用的是完整清单（减去 .dev 专属的 her_dream），不是交集')
 })
 
 test('工具名一直登记不齐：不收窄，但兜底守卫仍然在（挡住 subagent）', async () => {

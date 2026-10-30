@@ -44,7 +44,7 @@
 
 import { resolve } from 'node:path'
 
-/** 插件自己注册的八个工具。顺序无意义，但**必须全部真实存在**（名字错会抛错）。 */
+/** 插件自己注册的九个工具。顺序无意义，但**必须全部真实存在**（名字错会抛错）。 */
 export const FISH_TOOLS = Object.freeze([
   'growth_commit', // 记下自己的想法（唯一的写入口）
   'her_recall', // 翻自己的旧事
@@ -54,12 +54,32 @@ export const FISH_TOOLS = Object.freeze([
   'bili_watch', // 看一条视频的画面
   'bili_speak', // 在评论区说话
   'ask_owner', // 有事想征得同意（请求事件，2026-10-30 m01274）
+  'her_dream', // 醒来记一句梦（本机实验 A 案，2026-10-30 m02837）
+])
+
+/**
+ * 宿主定时任务工具（2026-10-30，用户 m04335 / m04504）。
+ *
+ * 她可以自己给自己定提醒：主人说「明天中午 12:10 去看邮箱」这种话，
+ * 剩下的由她自己 `schedule_create` 建任务；宿主到点把提醒投回她这条会话。
+ *
+ * **默认不放**：用户 m04504 明确要求默认工具数不变，谁想用定时任务，
+ * 自己在设置页白名单里加名字。这里只留一份清单，供界面文案与测试引用；
+ * 加进 `config.tools.allow` 之后才会进工具面、提示词段也会跟着挂。
+ *
+ * 不写进 `FISH_TOOLS`：这四个不是插件注册的，是宿主给的；自检按 registry 查。
+ */
+export const SCHEDULE_TOOLS = Object.freeze([
+  'schedule_create',
+  'schedule_list',
+  'schedule_update',
+  'schedule_delete',
 ])
 
 /**
  * 她允许看见的工具。
- * 最后一个是宿主给的 `read_image`——它由宿主某个插件提供，别人的机器上不一定装；
- * 缺了不影响她说话写字，只是看不了图，所以自检里只当提示、不当失败。
+ * `read_image` 由宿主某个插件提供，别人的机器上不一定装；缺了不影响她说话写字。
+ * 定时任务默认不在里面——要就由用户加进 `config.tools.allow`（`SCHEDULE_TOOLS`）。
  */
 export const HER_TOOLS = Object.freeze([...FISH_TOOLS, 'read_image'])
 
@@ -253,7 +273,7 @@ export function isHerAnywhere(agent, herDir, extraDirs = []) {
  * @param {(msg: string, err?: unknown) => void} [opts.log]
  * @param {(info: object) => void} [opts.onResult] 记录"这次真的挂上没有"（给自检用）
  */
-export function registerToolRestrict(ctx, { herDir, extra = [], enabled = true, log, onResult, retryMs = 200, retryMax = 15 } = {}) {
+export function registerToolRestrict(ctx, { herDir, extra = [], enabled = true, log, onResult, retryMs = 200, retryMax = 15, dream = false, proactive = false } = {}) {
   // 无论调用方传不传 onResult，模块级单例都要更新——自检读的是它。
   const __raw = onResult
   onResult = (r) => { report(r); try { __raw?.(r) } catch { /* ignore */ } }
@@ -266,7 +286,11 @@ export function registerToolRestrict(ctx, { herDir, extra = [], enabled = true, 
     return () => {}
   }
 
-  const allow = [...new Set([...HER_TOOLS, ...extra.map((s) => String(s).trim()).filter(Boolean)])]
+  // 本机实验工具（2026-10-30 m02837 / m04610）：只有 .dev 存在时才进白名单。
+  // 与 index.js 的注册、selfdoc 的提示词段共用同一个判据，三处不能各判各的。
+  const herNow = HER_TOOLS.filter((n) => n !== 'her_dream' || dream)
+  if (proactive) herNow.push('her_say')
+  const allow = [...new Set([...herNow, ...extra.map((s) => String(s).trim()).filter(Boolean)])]
   // 先让提示词跟上这一次的白名单，再谈 restrict 挂没挂上：
   // 就算 restrict 因名字没登记而延后，这一段也已经说清了「多出来的不是你的」。
   surfaceNow = toolSurfaceText(allow)

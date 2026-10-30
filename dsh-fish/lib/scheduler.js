@@ -24,7 +24,8 @@ import { offerDueDay, pendingOffer, grantableRules } from './unlock.js'
 import { withWake } from './wakewin.js'
 import { detectAbsence } from './absence.js'
 import { createClient } from './bili.js'
-import { gather, browseCountToday, recordBrowse, itemsFromEvents } from './browse.js'
+import { gather, browseCountToday, recordBrowse } from './browse.js'
+import { seenOn } from './whatseen.js'
 import { renderWatchList } from './history.js'
 import { fetchCover, coverLines } from './cover.js'
 import { riskState, browsePlan, noteRisk, isRiskCode } from './risk.js'
@@ -37,6 +38,8 @@ import { setWakeSection, clearWakeSection } from './identity.js'
 import { awayNow, awayLine } from './outing.js'
 import { askInChat, picked } from './askinchat.js'
 import { restedToday, settleStaleAsks } from './ask.js'
+import { devModeSync } from './devmode.js'
+import { proactiveState, proactiveSection, recentMaterial, looseEnds, PROACTIVE_TRIGGER } from './proactive.js'
 import { logLine } from './log.js'
 import { recordGrant } from './grant.js'
 
@@ -142,6 +145,74 @@ export function startScheduler(ctx, deps = {}) {
     while (!disposed && isBusy(id) && Date.now() < until) await new Promise((r) => setTimeout(r, 2000))
   }
 
+  // 主动说话：每小时最多掷一次骰子；skip 原因同一句只记一次，别把日志刷满。
+  let lastProbe = 0
+  let proactiveSkip = ''
+
+  /**
+   * 开一次空手回合（她自己的回合，不是叫醒）。
+   *
+   * 判断全在 `lib/proactive.js` 的纯函数里，这里只负责「真的把回合开起来」：
+   * 处境走 system prompt 段，对话里只留一句「现在没有人跟你说话」。
+   * 她可以选择开口，也可以什么都不做——不写任何「你应该」。
+   */
+  async function maybeProactive({ events, config, dk, now }) {
+    if (!devModeSync(root)) return false
+    const st = proactiveState({ config, events, now })
+    if (!st.ok) {
+      if (st.why && st.why !== proactiveSkip) {
+        proactiveSkip = st.why
+        log('proactive skip', st.why)
+      }
+      return false
+    }
+    // 每 30 分钟最多掷一次：tick 每分钟跑一次，逐 tick 掷等于必然触发。
+    if (now - lastProbe < 30 * 60_000) return false
+    lastProbe = now
+    if (Math.random() > st.chance) {
+      log('proactive roll', `${st.chance.toFixed(2)} 没摇上`)
+      return false
+    }
+    const sc = ctx.sessionController
+    if (!sc?.prompt) return false
+    const sessionId = await talkSessionId(ctx, { root, log })
+    if (!sessionId) return false
+
+    const material = recentMaterial(events, { now })
+    const loose = looseEnds(events, { now })
+    const text = proactiveSection({ now, state: st, material, loose })
+    const model = deriveSelf(events, { growthDays: config.growthDays })
+
+    const ac = new AbortController()
+    const kill = setTimeout(() => ac.abort(), WAKE_TIMEOUT_MS)
+    // 回合结束就把处境抽走，跟唤醒共用同一条清理路径。
+    watchTurnEnd(ctx, sessionId, () => clearWakeSection())
+    try {
+      await sc.create({ sessionId, cwd: await ensureHer(root) }).catch(() => {})
+      setWakeSection(text)
+      await withWake(async () => {
+        await sc.prompt(
+          {
+            requestId: `proactive-${now}`,
+            sessionId,
+            mode: 'queue',
+            content: [{ type: 'text', text: PROACTIVE_TRIGGER }],
+          },
+          ac.signal,
+        )
+      })
+      await appendEvent(
+        { type: 'meta', text: `proactive-turn:${dk}:${now}` },
+        { day: model.day, stage: model.stage, source: 'timer' },
+        root,
+      ).catch(() => {})
+      log('proactive', `开了一次空手回合（概率 ${st.chance.toFixed(2)}）`)
+      return true
+    } finally {
+      clearTimeout(kill)
+    }
+  }
+
   async function tick() {
     if (disposed || running) return
     const now = Date.now()
@@ -198,6 +269,15 @@ export function startScheduler(ctx, deps = {}) {
           log('rest', '她今天请了假，家里不叫她。')
         }
         return
+      }
+
+      // ---- 主动说话（0.8.1 本机实验，2026-10-30 用户 m04610）----
+      // 它不是唤醒：不占 wakesPerDay，也不推成长事件。只在 .dev 下生效。
+      // 开了就 return——这一趟由她自己决定说还是不说，不再叠一次醒一醒。
+      try {
+        if (await maybeProactive({ events, config, dk, now })) return
+      } catch (err) {
+        log('proactive failed', err?.message ?? String(err))
       }
 
       // 日程：每天在时间窗内抽一个点。抽到的点已存在（今天已经安排过）就不再改。
@@ -626,7 +706,8 @@ async function wake(ctx, root, model, config, decision, dk, log, deps = {}) {
 
     return flushReport(root, {
       dateKey: dk,
-      items: itemsFromEvents(fresh, dk),
+      // 三档口径一次取齐（看过画面 / 翻到过 / 递了没看），别在报告里另算一遍。
+      seen: seenOn(fresh, dk),
       notes: [],
       diaryVisible: config.diary?.visible === true,
     }).catch(() => null)

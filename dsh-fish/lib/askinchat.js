@@ -53,7 +53,10 @@ export async function askInChat(ctx, opts = {}) {
   const agent = await waitAgent(ctx, sessionId, { totalMs: waitAgentMs, signal })
   if (!agent) return { ok: false, code: 'NO_AGENT' }
 
-  const service = ctx?.userQuestions
+  // 2026-10-30（m02961）：`userQuestions` 不再进 inject（那是 0.2.1-rc.3 才有的服务，
+  // 写进 inject 会让 rc.2 上的插件整个装不进来）。这里运行时取；没有就走 NO_SERVICE，
+  // 调用方按「这次没问到」处理，不影响别的功能。
+  const service = ctx?.get?.('userQuestions') ?? ctx?.userQuestions
   if (!service || typeof service.ask !== 'function') return { ok: false, code: 'NO_SERVICE' }
 
   // 自己管超时：宿主的 ask() 没有超时参数，signal 一断它就 reject。

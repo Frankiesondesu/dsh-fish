@@ -71,6 +71,7 @@ function lineOf(item, i) {
     item.up ? `UP ${item.up}` : '',
     item.duration ? fmtDur(item.duration) : '',
     item.view ? `${Number(item.view).toLocaleString('zh-CN')} 播放` : '',
+    item.handed ? '你递过来的' : '',
   ].filter(Boolean)
   if (meta.length) bits.push(`   - ${meta.join(' · ')}`)
   if (item.reason) bits.push(`   - 停在这条的理由：${item.reason}`)
@@ -79,25 +80,56 @@ function lineOf(item, i) {
 
 /**
  * 生成一天的报告。
- * @param {{dateKey:string, items?:object[], notes?:string[], events?:object[], diary?:string|null, diaryVisible?:boolean}} o
+ *
+ * 2026-10-30 改（客户反馈）：原来只有一节 `## 看了什么`，内容来自 `browse:` 记账——
+ * 那是「她翻列表时读过的标题与评论」，跟「有没有真的看见画面」没关系。
+ * 于是她只扫了眼标题，日志也写「看了」，本人当场否认。现在拆成三节：
+ *   看过画面（`watched:`，唯一凭证） / 翻到过什么（`browse:`、`look:`） / 你递过来的（`hand:`）。
+ * 三节口径都由 `whatseen.js` 一个模块给，不在报告里另算一遍。
+ *
+ * 兼容：老调用方只传 `items`（旧口径，等于"翻到过什么"）时仍按翻到过处理。
+ *
+ * @param {{dateKey:string, items?:object[], seen?:{watched:object[],glanced:object[],handed:object[]}, notes?:string[], events?:object[], diary?:string|null, diaryVisible?:boolean}} o
  */
 export function buildReport(o = {}) {
   const dk = o.dateKey ?? dateKey()
-  const items = Array.isArray(o.items) ? o.items : []
+  const seen = o.seen ?? { watched: [], glanced: Array.isArray(o.items) ? o.items : [], handed: [] }
+  const watched = Array.isArray(seen.watched) ? seen.watched : []
+  const glanced = Array.isArray(seen.glanced) ? seen.glanced : []
+  const handed = Array.isArray(seen.handed) ? seen.handed : []
   const quotes = quotesOf(o.events ?? [], dk)
   const L = []
 
   L.push(`# ${dk}`)
   L.push('')
 
-  if (items.length) {
-    L.push('## 看了什么')
+  L.push('## 看了什么')
+  L.push('')
+  if (watched.length) {
+    L.push('真取了画面看过的：')
     L.push('')
-    items.forEach((it, i) => { L.push(lineOf(it, i)); L.push('') })
+    watched.forEach((it, i) => { L.push(lineOf(it, i)); L.push('') })
   } else {
-    L.push('## 看了什么')
+    L.push('今天没看画面。')
     L.push('')
-    L.push('今天没看。')
+  }
+
+  if (glanced.length) {
+    L.push('## 翻到过什么')
+    L.push('')
+    L.push('_只有标题、简介、评论和弹幕——没有画面。翻到过不等于看过。_')
+    L.push('')
+    glanced.forEach((it, i) => { L.push(lineOf(it, i)); L.push('') })
+  }
+
+  if (handed.length) {
+    L.push('## 你递过来的')
+    L.push('')
+    L.push('_递到她手上了，她还没看。_')
+    L.push('')
+    for (const it of handed) {
+      L.push(`- **[${it.bvid}](https://www.bilibili.com/video/${it.bvid})**`)
+    }
     L.push('')
   }
 
@@ -163,6 +195,8 @@ export async function flushReport(root, o = {}) {
     const md = buildReport({
       dateKey: dk,
       items: o.items ?? [],
+      // 不传 seen 时按旧口径（items = 翻到过）走，老调用方不炸。
+      seen: o.seen ?? { watched: [], glanced: o.items ?? [], handed: [] },
       notes: o.notes ?? [],
       events,
       diary,

@@ -66,13 +66,15 @@ function notesPath(root) {
  * 那条会话不在线时先排队，等她/他下次打开这条会话再补。
  * @returns {{ok:boolean, queued:number, why?:string}}
  */
-export async function queueNote(root, text) {
+export async function queueNote(root, text, { sessionId = '' } = {}) {
   const body = String(text ?? '').trim()
   if (!body) return { ok: false, queued: 0, why: '空白的，没写。' }
   try {
     const saved = await readJson(notesPath(root), null)
     const list = Array.isArray(saved?.notes) ? saved.notes : []
-    list.push({ at: new Date().toISOString(), text: body.slice(0, 800) })
+    // 带上目标会话（2026-10-30）：出门结束的交接句属于外面那条会话，
+    // 不带 sessionId 的话会被投到家里那条会话里，成了莫名其妙的噪音。
+    list.push({ at: new Date().toISOString(), text: body.slice(0, 800), ...(sessionId ? { sessionId: String(sessionId) } : {}) })
     const notes = list.slice(-NOTES_MAX)
     await writeAtomic(notesPath(root), JSON.stringify({ version: 1, notes }, null, 2))
     return { ok: true, queued: notes.length }
@@ -94,11 +96,24 @@ export async function takeNotes(root) {
  * 会话打开时把排队的句子补进去。
  * @returns {Promise<{ok:boolean, delivered:number}>}
  */
-export async function deliverQueued(agent, root) {
+export async function deliverQueued(agent, root, { home = false } = {}) {
   const list = await takeNotes(root)
   if (!list.length) return { ok: true, delivered: 0 }
-  let delivered = 0
+  const sid = String(agent?.session?.header?.id ?? agent?.session?.id ?? '').replace(/^session-/, '')
+  const same = (a) => Boolean(sid) && String(a ?? '').replace(/^session-/, '') === sid
+  const mine = []
+  const rest = []
   for (const n of list) {
+    // 带 sessionId 的只投给它自己那条（出门交接待说明）；不带的老条目（0.6.16 的驳回话术）
+    // 只投给家里的会话——它讲的是家里的事，投到外面那条会话里就成了错位的噪音。
+    const hit = n?.sessionId ? same(n.sessionId) : home
+    ;(hit ? mine : rest).push(n)
+  }
+  if (rest.length) {
+    await writeAtomic(notesPath(root), JSON.stringify({ version: 1, notes: rest }, null, 2)).catch(() => null)
+  }
+  let delivered = 0
+  for (const n of mine) {
     const r = appendNote(agent, n.text)
     if (r.ok) delivered += 1
   }

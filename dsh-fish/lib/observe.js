@@ -24,6 +24,7 @@ import { sayToHer } from './say.js'
 import { readInbox, markRead, writeInboxFile } from './inbox.js'
 import { listReports, buildReport } from './report.js'
 import { itemsFromEvents, browseCountToday, parseBrowseLine } from './browse.js'
+import { seenOn } from './whatseen.js'
 import { readAway } from './away.js'
 import { coverPath, fetchCover } from './cover.js'
 import { memoryCooldown } from './bili.js'
@@ -34,19 +35,21 @@ import { describeState, resetAll } from './reset.js'
 // 迁移工作区（2026-10-28，用户 m06510）：把整个数据目录搬到别的盘。
 import { moveRoot, moveStatus } from './move.js'
 import { identityText, detachOutside, liveAgentOf, attachIdentity, attachAwayGuard, mountedCount } from './identity.js'
-import { awayNow, awayLine, startOuting, endOuting, bindOutingSession, abortOuting, readOutings, readPossessions, activePossessionOf, pendingPossessionOf, settlePendingPossession, snapshotEvents, verifyEvents, eventsSince, lastOutingForCwd, rejectNoteText, tripDays, tripNoOf, pendingOf, settlePending } from './outing.js'
+import { awayNow, awayLine, startOuting, endOuting, bindOutingSession, abortOuting, readOutings, readPossessions, activePossessionOf, pendingPossessionOf, settlePendingPossession, snapshotEvents, verifyEvents, eventsSince, lastOutingForCwd, rejectNoteText, outingClosedText, tripDays, tripNoOf, pendingOf, settlePending } from './outing.js'
 // 出门口袋（0.6.16 从本文件搬出去，为了能用假 registry 直接测「登记失败仍能出门」）。
 import { POCKET_TITLE, ensurePocket, pocketDirPath } from './pocket.js'
 // 往会话里补一句人话（请神交接句 / 回家驳回话术共用这一条路）。
-import { appendNote, queueNote } from './sessionnote.js'
+import { appendNote, queueNote, deliverQueued } from './sessionnote.js'
 import { lettersSince } from './letter.js'
 // 纪念品（0.6.17，用户 m02041）：她只能问，带不带回去由人点头。
 import { keepsakesOfTrip, pendingKeepsakes, readKeepsakes, recentKeepsakes, decideKeepsake, tripKey } from './keepsake.js'
 // 请神（2026-10-28）：段名已在 asar 里确认（deployment:persona-prefix / -suffix），
 // 同名段在目标 agent 的 scoped ctx 上覆盖宿主那一段。
-import { possessInto, releasePossession } from './possess.js'
+import { possessInto, releasePossession, releaseNoteText } from './possess.js'
 // 请求事件（0.7.6，2026-10-30 m01274）：观测台「住所」页要能看到她问过什么、答过什么。
 import { askView, quotaOf, pendingAsks, settleAsk, ASK_KINDS } from './ask.js'
+// 梦（2026-10-30 m02837，本机实验 A 案）：只在 .dev 下存在这个页面。
+import { dreamView } from './dream.js'
 // 对话的名字在 `session/title` 事件里，header 里没有（2026-10-29 用户 m00761）。
 import { titleOfAgent, clipTitle } from './sessiontitle.js'
 import { isHerHome, cwdOf } from './restrict.js'
@@ -264,7 +267,7 @@ export function registerObserve(ctx, deps = {}) {
           return { id: p.id, rule: p.grant?.rule, title: r?.title ?? '', text: p.text ?? '', day: p.day ?? null }
         })(),
         grants: activeGrants(events, Date.now()),
-        config: { window: config.window, daily: config.daily, diary: { enabled: config.diary.enabled, visible: config.diary.visible }, absenceAfterDays: config.absenceAfterDays },
+        config: { window: config.window, daily: config.daily, diary: { enabled: config.diary.enabled, visible: config.diary.visible }, absenceAfterDays: config.absenceAfterDays, proactive: config.proactive },
         meta: { root, skippedLines: skipped, configFresh: fresh, configBroken: broken, dateKey: dateKey(), version: normalizeVersion(deps.version) || String(deps.version ?? '') },
         // 这个家是谁的（2026-10-28 m01319）：两个工作区指向同一个 root 时，
         // 设置页要能直接看见「已有一个实例占着」，而不是等她写丢了才发现。
@@ -292,6 +295,25 @@ export function registerObserve(ctx, deps = {}) {
           blocked: deps.tenancy?.home?.blocked === true,
           blockedWhy: deps.tenancy?.home?.blocked === true ? String(deps.tenancy?.home?.why ?? '') : '',
         },
+        // 宿主兼容（2026-10-30 m02961）：缺 userQuestions 不算错误，
+        // 只是「她在会话里问你」这条路关着——但要在界面上说明白，别让人以为是插件坏了。
+        compat: {
+          checked: deps.compat?.checked === true,
+          userQuestions: deps.compat?.userQuestions !== false,
+        },
+        // 宿主版本（2026-10-30 m03193）：package.json 声明了 engines.dsh，这里把运行时
+        // 读到的版本一起交出去。读不到（桌面版装在 app.asar 里）就是 unknown，不算不兼容。
+        host: (() => {
+          const h = deps.install?.host
+          if (!h) return null
+          return {
+            ok: h.ok === true,
+            status: String(h.status ?? 'unknown'),
+            version: String(h.version ?? ''),
+            range: String(h.range ?? ''),
+            why: String(h.why ?? ''),
+          }
+        })(),
         // 升级自检（2026-10-29）：跑的这一份跟源目录里那一份版本不一样时，
         // 设置页要直接说「你改的是源目录」，而不是让人以为升级没生效（当时就是这样卡了一圈）。
         upgrade: (() => {
@@ -375,7 +397,8 @@ export function registerObserve(ctx, deps = {}) {
         // test/p5.test.mjs 里有一条防漂移用例，直接从 client.js 的 buildConfig() 反查这张表。
         // persona 不在这里：它是导入动作的副产物（见 lib/import.js），
         // 不给「从设置页直接改」的入口——否则就等于给了一个「关掉那两条禁令」的开关。
-        const allowed = ['growthDays', 'wakesPerDay', 'window', 'daily', 'diary', 'absenceAfterDays', 'avoid', 'browse', 'bili', 'video', 'comment', 'notify', 'chat', 'memory', 'tools', 'observe', 'ui']
+        // proactive 是 2026-10-30 加的（本机实验，.dev 专属）：她主动开口的频率与概率。
+        const allowed = ['growthDays', 'wakesPerDay', 'window', 'daily', 'diary', 'absenceAfterDays', 'avoid', 'browse', 'bili', 'video', 'comment', 'notify', 'chat', 'memory', 'tools', 'observe', 'ui', 'proactive']
         const bad = Object.keys(patch).filter((k) => !allowed.includes(k))
         // 这句话会原样冒到界面上，所以写成人话（界面会把它放在「技术信息」那一行）：
         // 原来那句「不允许修改：bili」既不说人话，也让人以为自己填错了。
@@ -543,6 +566,9 @@ export function registerObserve(ctx, deps = {}) {
       const dk = dateKey()
       const items = itemsFromEvents(events, dk)
       const used = browseCountToday(events, dk)
+      // 2026-10-30 客户反馈：状态窗以前只有 browse: 那一档（"翻到过"），
+      // 于是"看过画面"和"只扫了眼标题"在这里长得一模一样。现在三档分开给。
+      const seen = seenOn(events, dk)
       // 「看过的全部」这个列表只给 BV 号，不给标题——标题可以去报告里看。
       // 理由：这里是状态窗，报告才是"她今天看了什么"的正式记录，两处别分叉。
       const lookedAll = []
@@ -558,6 +584,13 @@ export function registerObserve(ctx, deps = {}) {
         topN: Number(config?.browse?.topN ?? 0),
         keywords: config?.browse?.keywords ?? [],
         items,
+        // 真的抽帧看过画面的（今天）
+        watched: seen.watched,
+        watchedCount: seen.watched.length,
+        // 翻到过但没看画面
+        glancedCount: seen.glanced.length,
+        // 他递过来、她还没看的
+        handed: seen.handed,
         lookedCount: lookedAll.length,
         lookedRecent: lookedAll.slice(-20).reverse(),
         avoidKeywords: config?.avoid?.keywords ?? [],
@@ -786,7 +819,8 @@ export function registerObserve(ctx, deps = {}) {
       const diary = await readDaily('diaryDir', want, root).catch(() => null)
       const md = buildReport({
         dateKey: want,
-        items: itemsFromEvents(events, want),
+        // 和落盘的报告同一份口径（看过画面 / 翻到过 / 递了没看）
+        seen: seenOn(events, want),
         events,
         diary,
         diaryVisible: config?.diary?.visible === true,
@@ -1495,6 +1529,18 @@ export function registerObserve(ctx, deps = {}) {
         const outAgent = liveAgentOf(ctx, outSid)
         const detached = outAgent ? detachOutside(outAgent) : { ok: false, removed: 0 }
         if (detached.ok) logLine('info', ['回家：拆掉外面的装备', `${detached.removed} 段`], root)
+        // 拆掉装备 ≠ 让它忘掉刚才那一段（2026-10-30 用户 m03179 真机发现）：
+        // 那条会话的历史是 append-only，回家后它还会顺着自己上一句「我是大肥鱼」演。
+        // 补一条可见的交接句；会话当时没开着就排队，下次打开由 deliverQueued 补投。
+        const closeText = outingClosedText({ workspaceName: r.outing?.workspaceName })
+        let outNote = { ok: false, why: '那条对话现在没开着' }
+        if (outAgent) {
+          outNote = appendNote(outAgent, closeText)
+          if (!outNote.ok) logLine('warn', ['回家：交接句没写进去', outNote.why], root)
+        } else if (outSid) {
+          outNote = await queueNote(root, closeText, { sessionId: outSid })
+          if (!outNote.ok) logLine('warn', ['回家：交接句没排上队', outNote.why], root)
+        }
         // 驳回要讲给她听（设计 §3.7，用户 m01613 第①条）：
         // 不是「你没去过」，而是「那几条我不认，它不算你」。写进**家里**那条会话。
         // 出门与请神共用同一个落点（2026-10-29 m02241 第②条）。
@@ -1503,7 +1549,7 @@ export function registerObserve(ctx, deps = {}) {
           note = await rejectNoteToHome(ctx, root, { since: away.outing?.startedAt, rejectedIds, auto: autoRejected })
           if (!note.ok) logLine('warn', ['回家：驳回话术没写进去', note.why], root)
         }
-        return send(res, 200, { ok: true, outing: r.outing, verify: v, tampered, rejected: rejectedIds.length, autoRejected, detached, note })
+        return send(res, 200, { ok: true, outing: r.outing, verify: v, tampered, rejected: rejectedIds.length, autoRejected, detached, note, outNote })
       }
 
       if (action === 'start') {
@@ -1591,6 +1637,10 @@ export function registerObserve(ctx, deps = {}) {
                 attachAwayGuard(back, { root, herDir: paths(root).herDir, log: (m) => logLine('info', [m], root) })
               }
             }
+            // 上一趟回家时这条会话要是没开着，交接句排在队列里——接回它的这一刻补投，
+            // 否则她会带着上一次「我是大肥鱼」的余味继续（2026-10-30 用户 m03179）。
+            const resumed = liveAgentOf(ctx, sessionId)
+            if (resumed) void deliverQueued(resumed, root).catch(() => {})
           } else {
             // 口袋没登记成工作区时退到 `cwd`——照样能开门，只是记忆分区可能落在「未知工作区」。
             const created = wsId ? await sc.create({ workspaceId: wsId }) : await sc.create({ cwd: wsPath })
@@ -1665,6 +1715,15 @@ export function registerObserve(ctx, deps = {}) {
       return send(res, 200, { ok: true })
     }],
 
+    // 梦（2026-10-30 m02837）：本机实验，只在 .dev 下存在。
+    // 服务端这一道必须做——界面藏起来但路由能读，等于没藏（0.6.10 的教训）。
+    ['/dream', async (req, res) => {
+      if (!(await devMode(root))) return send(res, 404, { ok: false, why: '没有这个页面' })
+      if (req.method !== 'GET') return send(res, 405, { error: 'method not allowed' })
+      const { events } = await readEvents(root)
+      return send(res, 200, { ok: true, ...dreamView(events) })
+    }],
+
     ['/possession', async (req, res) => {
       const herDir = paths(root).herDir
       if (req.method === 'GET') {
@@ -1737,6 +1796,9 @@ export function registerObserve(ctx, deps = {}) {
         if (away.kind === 'outing') {
           return send(res, 409, { ok: false, why: '她正在出门，先叫她回家再请神' })
         }
+        // 上一次请神结束时这条会话没开着 → 交接句排队在这里补投，别让她接着上一轮的余味演。
+        const prior = liveAgentOf(ctx, String(b.sessionId ?? ''))
+        if (prior) void deliverQueued(prior, root).catch(() => {})
         const r = await possessInto(ctx, {
           root,
           herDir,
@@ -1811,6 +1873,13 @@ export function registerObserve(ctx, deps = {}) {
         })
         if (!r.ok) return send(res, r.code ?? 409, { ok: false, why: r.why })
         logLine('info', [`请神结束：${status}`, r.possession?.title || r.possession?.sessionId || '', v.why ?? '', autoRejected ? `整趟不算（${rejectedIds.length} 条）` : ''], root)
+        // 那条对话当时没开着 → 交接句排队，下次打开补投（2026-10-30，与出门同一条路）。
+        let closeNote = r.note ?? { ok: false, why: '那条对话现在没开着' }
+        if (!closeNote.ok && cur?.sessionId) {
+          const q = await queueNote(root, releaseNoteText(), { sessionId: cur.sessionId })
+          if (q.ok) closeNote = { ok: true, queued: true }
+          else logLine('warn', ['请神结束：交接句没排上队', q.why], root)
+        }
         // 驳回要讲给她听（设计 §3.7）：落点是**家里**那条会话——
         // 请神那条是别人的对话，不该在那儿吵她认不认。
         let rejectNote = { ok: false, why: '这趟没有要驳回的' }
@@ -1821,7 +1890,7 @@ export function registerObserve(ctx, deps = {}) {
         return send(res, 200, {
           ok: true,
           possession: r.possession,
-          note: r.note,
+          note: closeNote,
           verify: v,
           tampered,
           rejected: rejectedIds.length,

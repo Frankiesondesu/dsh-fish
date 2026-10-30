@@ -88,7 +88,20 @@ export function registerWatch(ctx, deps = {}) {
         }
 
         await appendEvent(
-          { type: 'meta', text: `watched:${dk} ${bvid}` },
+          {
+            type: 'meta',
+            // 2026-10-30：原来这行只有 BV 号，于是「她真的看过画面的那几条」
+            // 在报告里没法显示标题——只能退回去用 browse: 记账凑，
+            // 结果又跟「只扫了眼标题」混成一片（客户反馈的那个 bug）。
+            // 把展示信息跟着凭证一起落下来，报告就不必二次取数、也不必猜。
+            // 老事件没有这段 JSON，读的一方必须两种形状都认（whatseen.js）。
+            text: `watched:${dk} ${bvid} ${JSON.stringify({
+              title: String(r.title ?? '').slice(0, 120),
+              up: String(r.up ?? '').slice(0, 60),
+              duration: Number(r.duration) || 0,
+              view: Number(r.view) || 0,
+            })}`,
+          },
           { source: 'system' },
           root,
         ).catch(() => {})
