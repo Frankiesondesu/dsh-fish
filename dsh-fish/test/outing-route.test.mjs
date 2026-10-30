@@ -15,18 +15,24 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync, writeFileSync, readFileSync, statSync, truncateSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { tmpdir, EOL } from 'node:os'
 import { join } from 'node:path'
 import { Readable } from 'node:stream'
 
 import { registerObserve } from '../lib/observe.js'
 import { snapshotEvents, startOuting, readOutings } from '../lib/outing.js'
 
-function harness(root) {
+function harness(root, { agents = {} } = {}) {
   const routes = new Map()
   const ctx = {
     get(name) {
       if (name === 'connection') return { requestRejection: () => null }
+      if (name === 'agents') {
+        return {
+          get: (id) => agents[id] ?? null,
+          list: () => Object.values(agents),
+        }
+      }
       if (name === 'webServer') {
         return {
           register(ex) {
@@ -261,6 +267,74 @@ test('/outing 确认门：ack 默认 false，点一次才写进配置', async ()
     const { loadConfig } = await import('../lib/settings.js')
     const { config } = await loadConfig(root)
     assert.equal(config.outing.ack, true, '确认要落盘，重启之后不再问')
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+// 2026-10-30（用户 m03179 真机）：回家后工作园区那条会话还以「大肥鱼」的身份说话。
+// 根因：回家只拆挂载（detachOutside），没往那条会话补交接句——请神路径补过，出门漏了。
+test('/outing 回家：把「这一段结束了」写回那条会话（2026-10-30 用户 m03179）', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'fish-outing-route-'))
+  try {
+    const eventsFile = join(root, 'events.jsonl')
+    writeFileSync(eventsFile, JSON.stringify({ type: 'utterance', seq: 1, ts: '2026-10-29T00:00:00.000Z', data: { text: '在家' } }) + EOL)
+    const baseline = snapshotEvents(eventsFile)
+    const startedAt = Date.parse('2026-10-29T00:10:00.000Z')
+    await startOuting(root, {
+      sessionId: 'session-out',
+      workspaceId: 'w9',
+      workspaceName: '工作园区',
+      cwd: join(root, 'ws'),
+      baseline,
+      identity: '',
+      now: startedAt,
+    })
+    const appended = []
+    const agent = {
+      session: {
+        header: { id: 'session-out' },
+        append: (type, payload) => { appended.push({ type, payload }) },
+      },
+    }
+    const h = harness(root, { agents: { 'session-out': agent } })
+    const ended = await h.call('POST', { action: 'end', kept: true })
+    assert.equal(ended.status, 200, JSON.stringify(ended.json))
+    assert.equal(appended.length, 1, '只能补一条交接句，不能多插')
+    assert.equal(appended[0].type, 'user/message', '这条要进模型看得见的上下文')
+    assert.equal(appended[0].payload.role, 'user')
+    const said = String(appended[0].payload.content[0].text)
+    assert.match(said, /出门结束/, '先说明这一段结束了')
+    assert.match(said, /工作园区/, '要指出是哪条会话交回给谁')
+    assert.match(said, /临时顶班/, '要说清刚才那些话不是它自己说的')
+    assert.equal(ended.json.outNote?.ok, true)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('/outing 回家：那条会话没开着时，交接句排队等下次打开（2026-10-30 用户 m03179）', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'fish-outing-route-'))
+  try {
+    const eventsFile = join(root, 'events.jsonl')
+    writeFileSync(eventsFile, JSON.stringify({ type: 'utterance', seq: 1, ts: '2026-10-29T00:00:00.000Z', data: { text: '在家' } }) + EOL)
+    const baseline = snapshotEvents(eventsFile)
+    await startOuting(root, {
+      sessionId: 'session-late',
+      workspaceId: 'w9',
+      workspaceName: '工作园区',
+      cwd: join(root, 'ws'),
+      baseline,
+      identity: '',
+      now: Date.parse('2026-10-29T00:10:00.000Z'),
+    })
+    const h = harness(root)
+    const ended = await h.call('POST', { action: 'end', kept: true })
+    assert.equal(ended.status, 200, JSON.stringify(ended.json))
+    assert.equal(ended.json.outNote?.ok, true, '写不进对话也要排上队，不能静默丢')
+    const saved = JSON.parse(readFileSync(join(root, 'session-notes.json'), 'utf8'))
+    assert.equal(saved.notes.length, 1)
+    assert.match(String(saved.notes[0].text), /交回给/)
   } finally {
     rmSync(root, { recursive: true, force: true })
   }

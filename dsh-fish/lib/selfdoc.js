@@ -26,8 +26,9 @@ import { promises as fs } from 'node:fs'
 import { join } from 'node:path'
 import { rootDir, paths, readEvents, readJson, writeAtomic } from './store.js'
 import { loadConfig } from './settings.js'
+import { devModeSync } from './devmode.js'
 import { deriveSelf } from './derive.js'
-import { personaLine, toolBrief, RECALL_BRIEF, SPEAK_BRIEF, LETTER_BRIEF, ASK_BRIEF, DIARY_BRIEF, SLEEP_BRIEF } from './persona.js'
+import { personaLine, toolBrief, RECALL_BRIEF, SPEAK_BRIEF, LETTER_BRIEF, ASK_BRIEF, DREAM_BRIEF, PROACTIVE_BRIEF, SCHEDULE_BRIEF, DIARY_BRIEF, SLEEP_BRIEF } from './persona.js'
 import { LOOK_BRIEF, WATCH_RULE } from './browse.js'
 import { activeCarry } from './home.js'
 import { activeGrants } from './unlock.js'
@@ -48,7 +49,7 @@ export function legacySelfDocPath(root = rootDir()) {
  * @param {object} model deriveSelf 的结果
  * @returns {string}
  */
-export function renderSelfDoc(model, { budget, carry, browse = true, speak = false, grants = [], shown, diary = true, sleepEveryDays = 0, bansMuted = false, extraTools = [] } = {}) {
+export function renderSelfDoc(model, { budget, carry, browse = true, speak = false, grants = [], shown, diary = true, sleepEveryDays = 0, bansMuted = false, extraTools = [], dream = false, schedule = false, proactive = false } = {}) {
   const head = [
     // 这里**故意不写**「由 dsh-fish 自动生成」这类话。
     // 这个文件会被宿主原样渲染进她的会话——她能看见每一行。
@@ -84,6 +85,16 @@ export function renderSelfDoc(model, { budget, carry, browse = true, speak = fal
     // 和留话一样不需要配置开关——工具注册了就该知道怎么用；上限写死在代码里。
     ASK_BRIEF,
     '',
+    // 梦（2026-10-30，本机实验 A 案，用户 m02837）：只有 `.dev` 存在时才挂这一段。
+    // 挂不挂跟工具装没装必须是同一个判据——否则公开版里她会被告诉「你有这个工具」，
+    // 伸手却只能得到「做不到」。（0.6.10 的教训：判据分裂一次就藏不住。）
+    ...(dream ? [DREAM_BRIEF, ''] : []),
+    // 主动说话（2026-10-30，用户 m04610）：her_say 只在 .dev 下注册，
+    // 说明书也只在同一个判据下挂——公开版不能让「她」以为有这个工具。
+    ...(proactive ? [PROACTIVE_BRIEF, ''] : []),
+    // 定时提醒（2026-10-30，用户 m04335 / m04504）：默认不放，只有用户把
+    // schedule_create 加进白名单才挂——不然就是告诉她「你有这个工具」，伸手却没有。
+    ...(schedule ? [SCHEDULE_BRIEF, ''] : []),
   ]
   // 能力说明写在这里、而不是塞进唤醒消息：
   // 唤醒消息会作为一条 user message 留在她的会话里，用户点开就能看见。
@@ -169,6 +180,13 @@ export async function writeSelfDoc(root = rootDir(), { log, exec, tenant } = {})
       // 2026-10-27（用户 m01371）：白名单里额外放行的工具要念给她听，
       // 否则「能不能在 QQ 上说话」她只能回一句不知道。
       extraTools: config?.tools?.allow ?? [],
+      // 梦（2026-10-30 m02837）：与工具注册同一个判据（.dev 文件 / DSH_FISH_DEV）。
+      // 公开版既没有 her_dream，也不该在身份里读到它。
+      dream: devModeSync(root),
+      // 主动说话（2026-10-30 m04610）：同样只在 .dev 下挂。
+      proactive: devModeSync(root),
+      // 定时工具默认不放；用户在白名单里加了 schedule_create 才告诉他这条路通。
+      schedule: (config?.tools?.allow ?? []).some((n) => String(n).trim() === 'schedule_create'),
     })
 
     let prev = null

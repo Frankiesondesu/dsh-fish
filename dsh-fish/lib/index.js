@@ -22,6 +22,9 @@ import { registerWatch } from './watch.js'
 import { registerLetter } from './letter.js'
 import { registerBringBack } from './keep.js'
 import { registerAsk } from './ask.js'
+import { registerDream } from './dream.js'
+import { registerProactive } from './proactive.js'
+import { devModeSync } from './devmode.js'
 import { registerObserve } from './observe.js'
 import { startScheduler } from './scheduler.js'
 import { registerTurns } from './turns.js'
@@ -37,17 +40,20 @@ import { clearWakeSection, registerIdentity } from './identity.js'
 import { registerPossession } from './possess.js'
 
 import { checkUpgrade } from './upgrade.js'
+import { checkHost, readHostVersion } from './hostver.js'
 import { logBoot, makeLogger } from './log.js'
 
 export const name = 'dsh-fish'
 
 /** 版本号：只用于日志导出（排查时第一件事是确认跑的是哪一版）。 */
-export const VERSION = '0.8.0'
+export const VERSION = '0.8.1'
 
 // ⚠️ 一个数组写全，不要拆成对象
-// `userQuestions`（0.7.5）：让她能在会话里直接问那个人（带东西回家、解锁申请）。
-// 这是宿主 base 层默认启用的服务，不用改 profile；缺了它插件照常跑，只是问不出去。
-export const inject = ['sessionController', 'tools', 'webServer', 'connection', 'userQuestions']
+// 2026-10-30（m02961）：`userQuestions` **不再写进 inject**。写进 inject 的东西缺一个，
+// 整个插件在 import 阶段就被静默跳过——连 boot 都没进，一行日志都不留。
+// 而 `userQuestions` 只关掉「她在会话里问你」这一条路，不值得拿整个插件去赌；
+// 现在改成运行时探测（见 boot 里的 compat），缺了就降级。
+export const inject = ['sessionController', 'tools', 'webServer', 'connection']
 
 const SEED_KEY = 'seed:'
 
@@ -66,11 +72,39 @@ export function apply(ctx, baseConfig = {}) {
   const tenancy = { root, herDir: '', tenant: { ok: true, instanceId: '', why: '' } }
   // 升级自检（2026-10-29）：`file:` 装的人常常只换了源目录，跑的还是 node_modules 里的旧副本。
   // 这里只读不写；查不到就写 skipped，不影响启动。
-  const install = { upgrade: { ok: false, skipped: true, why: '还没查', running: VERSION, source: '', sourcePath: '', profile: '', stale: false } }
+  const install = {
+    upgrade: { ok: false, skipped: true, why: '还没查', running: VERSION, source: '', sourcePath: '', profile: '', stale: false },
+    // 宿主版本（2026-10-30 m03193）：package.json 的 engines.dsh 声明范围，这里运行时对一次账。
+    host: { ok: false, status: 'unknown', version: '', range: '', why: '还没查' },
+  }
+  // 宿主兼容（2026-10-30 m02961）：只在运行时探测，不写进 inject。
+  // 写进 inject 的代价是「缺了就整个插件不装」——而缺的那个服务只关掉一条功能。
+  const compat = { checked: false, userQuestions: false }
   let heartbeat = null
 
   async function boot() {
     logBoot(root, `${VERSION} · ${process.version} · ${process.platform}`)
+    // 宿主兼容探测：`userQuestions` 缺席时不是错误，只是关一条路——但必须留话，
+    // 否则用户只会看到「有个功能没反应」，又回到这次那种查不下去的局面。
+    try {
+      compat.userQuestions = typeof ctx?.get?.('userQuestions')?.ask === 'function'
+    } catch { compat.userQuestions = false }
+    compat.checked = true
+    if (!compat.userQuestions) {
+      logger.warn('[dsh-fish] 这个宿主没有提供 userQuestions 服务（可能是旧版本没装 dsh-user-questions，或服务没起来）：插件照常跑，但「她在会话里问你」这条路暂时关掉。')
+    }
+    // 宿主版本对账（2026-10-30 m03193）：只读、只留话。
+    // 桌面版把宿主装在 app.asar 里，从插件位置向上找不到 package.json——那就记 unknown，
+    // 不把「读不到」当成「不兼容」。
+    try {
+      const found = readHostVersion()
+      install.host = found ? checkHost({ version: found.version }) : checkHost({ version: '' })
+      if (!install.host.ok) {
+        logger.warn(`[dsh-fish] ${install.host.why}（插件声明的范围：${install.host.range}）。插件照常跑，但这个组合没测过。`)
+      }
+    } catch (err) {
+      install.host = { ...install.host, status: 'unknown', why: String(err?.message ?? err).slice(0, 120) }
+    }
     // 先查一次「跑的是不是源目录里那份」：这类问题没有任何报错，只有版本对不上。
     try {
       install.upgrade = await checkUpgrade({ version: VERSION })
@@ -188,6 +222,10 @@ export function apply(ctx, baseConfig = {}) {
         herDir,
         extra: config?.tools?.allow ?? [],
         enabled: config?.tools?.restrict !== false,
+        // 本机实验工具（m02837）：与注册、提示词共用 devModeSync 一个判据。
+        dream: devModeSync(root),
+        // 主动说话（m04610）：her_say 同样只在 .dev 下进白名单。
+        proactive: devModeSync(root),
         log: (...a) => logger.info(...a),
         onResult: (r) => { restrictState = r },
       })
@@ -309,6 +347,12 @@ export function apply(ctx, baseConfig = {}) {
         // 0.7.6（2026-10-30 m01274）：请求事件。她有事想征得同意时弹一张卡，
         // 每天 1 次、每周 3 次；只有 time / rest 真会改东西（见 lib/ask.js）。
         () => registerAsk(ctx, { root, tenant: tenancy }),
+        // 0.8.1 本机实验（2026-10-30 m02837）：梦 A 案——醒来记一句。
+        // **只在 .dev 存在时注册**：公开版里她既没有这个工具，也不该在身份里读到它。
+        ...(devModeSync(root) ? [() => registerDream(ctx, { root, tenant: tenancy })] : []),
+        // 0.8.1 本机实验（2026-10-30 m04610）：主动说话——她自己判断有没有话想说。
+        // 同样只在 .dev 下注册；公开版没有 her_say，也没有空手回合。
+        ...(devModeSync(root) ? [() => registerProactive(ctx, { root, log: (...a) => logger.info(...a) })] : []),
       ]) {
         try {
           const d = reg()
@@ -321,7 +365,7 @@ export function apply(ctx, baseConfig = {}) {
     }
 
     // 观测台路由
-    const obs = registerObserve(ctx, { root, version: VERSION, tenancy, install })
+    const obs = registerObserve(ctx, { root, version: VERSION, tenancy, install, compat })
     if (obs?.dispose) disposers.push(() => obs.dispose())
 
     // 生物钟：把屋子信息一起传下去。她每晚醒来说话要落进**同一个**会话，

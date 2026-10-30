@@ -136,7 +136,9 @@ function sessionLockFile(root) {
  *   1. home.json 记着 `status:'archived'` → **不自动重建**，返回 archived:true。
  *      这是用户自己收起来的那一局，插件替他重开等于把「我收起来了」这句话当没听见。
  *      要重开只有一条路：带 `force:true`（观测台「重新搭一间」/ 重置流程）。
- *   2. sessionId 在 `archivedSessionIds` 里 → 记成 archived，同上。
+ *      例外（2026-10-30，用户 m02853）：同一间屋子里还有**别的没归档的会话**时，
+ *      认那一条继续用——归档的是那一条，不是整个家。
+ *   2. sessionId 在 `archivedSessionIds` 里 → 记成 archived，同上（同样先看同屋有没有别的活会话）。
  *   3. 在 ws.sessionIds 里，或者 `createdAt` 距今不到 HOME_GRACE_MS → 复用。
  *   4. 其余才重建。
  */
@@ -167,6 +169,53 @@ export async function ensureTalkSession(ctx, opts = {}) {
   })().finally(() => inflight.delete(key))
   inflight.set(key, p)
   return p
+}
+
+/**
+ * 同一间屋子里，除了 `avoid` 之外**还活着**的那条会话（没有就返回空串）。
+ *
+ * 为什么要这一条（2026-10-30，用户 m02853）：home.json 只记得一条会话。用户把那条
+ * 归档之后，同一个工作区里可能还有另一条开着——以前插件只认 home.json 那一条，
+ * 一看见它归档就宣布「这个家的会话被收起来了」，把明明还在的那条当成不存在。
+ * 现在先把「归档的那条」和「这个工作区里另外的活会话」分开判断：只要还有一条
+ * 没归档的，就认它，而不是让整个家停摆。
+ *
+ * 取最后一条（宿主按创建顺序往 sessionIds 里追加，末尾即最近那条），但不做别的假设：
+ * 拿不到 registry、sessionIds 不是数组、全是归档的，都退回空串，由调用方按原样拒绝。
+ */
+function pickLiveSession(reg, wsId, avoid = '') {
+  try {
+    const ws = reg?.get?.(wsId)
+    const ids = Array.isArray(ws?.sessionIds) ? ws.sessionIds : []
+    const archived = Array.isArray(reg?.archivedSessionIds) ? reg.archivedSessionIds : []
+    const live = ids
+      .map((id) => String(id ?? ''))
+      .filter((id) => id && id !== avoid && !archived.includes(id))
+    return live.length ? live[live.length - 1] : ''
+  } catch { return '' }
+}
+
+/**
+ * 把 home.json 从「已归档的那条」改指到同屋另一条活会话上。
+ * 失败不抛：改不动就这次不认，下次启动再判一次。
+ */
+async function adoptLiveSession(root, saved, { wsId, sessionId, title }) {
+  const next = {
+    ...saved,
+    wsId,
+    sessionId,
+    title: saved?.title || title,
+    // 不复用旧会话的 createdAt：宽限期是「刚建出来的那条」用的，
+    // 认来的这条按 sessionIds 判活就够了，不能因为借了别人的时间戳而享受宽限。
+    createdAt: '',
+    adoptedAt: new Date().toISOString(),
+  }
+  delete next.status
+  delete next.archivedAt
+  try {
+    await writeAtomic(homeFile(root), JSON.stringify(next, null, 2))
+    return { ...next, ok: true }
+  } catch { return null }
 }
 
 async function ensureTalkSessionOnce(ctx, { root = rootDir(), wsId, title = TITLE_SESSION, preset = '', log, force = false } = {}) {
@@ -204,6 +253,15 @@ async function ensureTalkSessionOnce(ctx, { root = rootDir(), wsId, title = TITL
         saved.archivedAt = null
       } catch { /* 写不下来就只这一次认回来，下次再判一次 */ }
     } else {
+      // 同屋还有别的活会话就认它（见 pickLiveSession 的注释）；一条都没有才算收起来。
+      const other = pickLiveSession(reg, wsId, String(saved.sessionId))
+      if (other) {
+        const adopted = await adoptLiveSession(root, saved, { wsId, sessionId: other, title })
+        if (adopted) {
+          log?.(`同一间屋子里另有一条活会话（${other}），这次认它，不再报「被收起来了」`)
+          return { ok: true, sessionId: other, reused: true, adopted: true }
+        }
+      }
       return {
         ok: false,
         archived: true,
@@ -232,6 +290,15 @@ async function ensureTalkSessionOnce(ctx, { root = rootDir(), wsId, title = TITL
           ...saved, status: 'archived', archivedAt: new Date().toISOString(),
         }, null, 2))
       } catch { /* 记不下来就下次再判一次，不抛 */ }
+      // 但「这条归档了」不等于「这个家没人了」：同屋还有活的就认它。
+      const other = pickLiveSession(reg, wsId, String(saved.sessionId))
+      if (other) {
+        const adopted = await adoptLiveSession(root, saved, { wsId, sessionId: other, title })
+        if (adopted) {
+          log?.(`${saved.sessionId} 已归档，同屋另有一条活会话（${other}），这次认它`)
+          return { ok: true, sessionId: other, reused: true, adopted: true }
+        }
+      }
       return {
         ok: false,
         archived: true,

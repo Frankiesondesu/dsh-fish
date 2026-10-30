@@ -441,8 +441,8 @@ test('规则卡：没有待裁决的申请时不渲染空态行，有申请才�
   }
 
   // 1) 有 pending 通道但没有申请：整行不渲染，也不该出现裁决按钮
-  //    rules 是组件里第 12 个 useState（0 基下标 11；0.7.6 请求事件在它前面插了 asks/askMsg），数据来自 /rules，不在 /state 里。
-  let react = fakeReact({ 0: stateWith(), 11: idle })
+  //    rules 是组件里第 13 个 useState（0 基下标 12；0.7.6 请求事件插了 asks/askMsg，0.8.x 梦境实验又插了 dreams），数据来自 /rules，不在 /state 里。
+  let react = fakeReact({ 0: stateWith(), 12: idle })
   let loaded = await loadClient({ react })
   react.resetCursor()
   let txt = textOf(loaded.exports.FishSection()).join(' ')
@@ -451,7 +451,7 @@ test('规则卡：没有待裁决的申请时不渲染空态行，有申请才�
   assert.ok(!txt.includes('这次不行'), '没有申请就不该有裁决按钮')
 
   // 2) 有申请：卡片 + 两个按钮都要出来
-  react = fakeReact({ 0: stateWith(), 11: { ...idle, pending: { why: '想自己决定要不要出门。' } } })
+  react = fakeReact({ 0: stateWith(), 12: { ...idle, pending: { why: '想自己决定要不要出门。' } } })
   loaded = await loadClient({ react })
   react.resetCursor()
   txt = textOf(loaded.exports.FishSection()).join(' ')
@@ -459,7 +459,7 @@ test('规则卡：没有待裁决的申请时不渲染空态行，有申请才�
   assert.ok(txt.includes('可以') && txt.includes('这次不行'), '两个裁决按钮都要在')
 
   // 3) 通道关着：并进卡片说明行，不单独占一行
-  react = fakeReact({ 0: stateWith(), 11: { ...idle, offersOn: false } })
+  react = fakeReact({ 0: stateWith(), 12: { ...idle, offersOn: false } })
   loaded = await loadClient({ react })
   react.resetCursor()
   txt = textOf(loaded.exports.FishSection()).join(' ')
@@ -626,6 +626,41 @@ test('请神文案要说清护栏是共用的：用户自己在那条对话里�
 // 2026-10-29：房客 upgrade 0.7.2 失败。`file:` 装法只覆盖源目录，跑的还是
 // node_modules 里的旧副本——没有任何报错。设置页要把这件事直接说出来。
 // ---------------------------------------------------------------------------
+
+test('宿主旧卡片：缺 userQuestions 时说明白是关了一条路，不是坏了（0.8.1）', async () => {
+  const src = await readFile(CLIENT, 'utf8')
+
+  assert.ok(src.includes("const compatCard = state?.compat?.userQuestions === false"), '只在宿主缺服务时出现')
+  assert.ok(src.includes('这个宿主没提供「会话里问你」'), '标题要说的是服务缺席，不是「版本旧」')
+  assert.ok(src.includes('她在会话里问你'), '要说清关的是哪条路')
+  assert.ok(src.includes('把 DSH 升到最新版再试'), '要给出恢复条件')
+  // 2026-10-30 m03193：以前写死「0.2.1-rc.3 起才有」是错的——dsh-user-questions 从 0.1.x 就有包了。
+  assert.ok(!src.includes('0.2.1-rc.3 起才有'), '不许再写死服务上线版本')
+  // 比升级自检更基础：先说「为什么有个功能没反应」，再说「升级有没有装进去」
+  const atCard = src.indexOf('const compatCard =')
+  const atTree = src.indexOf('        compatCard,')
+  const atUpgrade = src.indexOf('        upgradeCard,', atTree)
+  assert.ok(atCard > 0 && atTree > atCard, '卡片要定义再放进树里')
+  assert.ok(atUpgrade > atTree, '要排在升级自检前面')
+})
+
+test('宿主版本卡：超范围只提醒，不拦人（0.8.1 m03193）', async () => {
+  const src = await readFile(CLIENT, 'utf8')
+
+  // 触发条件：有 host 信息，且既不是 supported 也不是 unknown——unknown 不许弹卡，
+  // 否则桌面版（宿主在 app.asar 里读不到版本）每个用户都会看到一张假警告。
+  assert.ok(src.includes("const hostCard = state?.host && state.host.status !== 'supported' && state.host.status !== 'unknown'"),
+    'unknown 不弹卡')
+  assert.ok(src.includes('这个 DSH 版本比插件要求的还旧'), 'older 的标题')
+  assert.ok(src.includes('这个 DSH 版本比插件认识的还新'), 'newer 的标题')
+  assert.ok(src.includes('插件不会因此拒绝启动'), '要说清只提醒')
+
+  const atHost = src.indexOf('const hostCard =')
+  const atTree = src.indexOf('        hostCard,')
+  const atCompat = src.indexOf('        compatCard,')
+  assert.ok(atHost > 0 && atTree > atHost, '定义再放进树里')
+  assert.ok(atTree > atCompat, '排在宿主兼容卡之后')
+})
 
 test('升级自检卡：版本对不上时要说清「改的是源目录」（0.7.6）', async () => {
   const src = await readFile(CLIENT, 'utf8')

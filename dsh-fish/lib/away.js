@@ -12,6 +12,7 @@
  */
 import { readEvents } from './store.js'
 import { parseBrowseLine } from './browse.js'
+import { parseWatchedLine } from './whatseen.js'
 
 function tsOf(e) {
   const raw = e?.ts
@@ -46,11 +47,11 @@ export function awaySince(events) {
 }
 
 /**
- * @returns {{since:number,days:number,wakes:number,videos:number,said:number,diaries:number,quiet:boolean}}
+ * @returns {{since:number,days:number,wakes:number,videos:number,watched:number,said:number,diaries:number,quiet:boolean}}
  */
 export function summarizeAway(events, { now = Date.now(), maxDays = 60 } = {}) {
   const since = awaySince(events)
-  const zero = { since, days: 0, wakes: 0, videos: 0, said: 0, diaries: 0, quiet: true }
+  const zero = { since, days: 0, wakes: 0, videos: 0, watched: 0, said: 0, diaries: 0, quiet: true }
   if (!since) return zero
 
   const floor = Math.max(since, now - maxDays * 86400_000)
@@ -59,6 +60,9 @@ export function summarizeAway(events, { now = Date.now(), maxDays = 60 } = {}) {
   let said = 0
   let diaries = 0
   const bvids = new Set()
+  // 2026-10-30：videos 数的是 `browse:` 记账（翻到过，没有画面）；
+  // 真要回答"她不在的时候看了几条片子"，得数 `watched:`。两个都留着，界面各说各的。
+  const watchedBvids = new Set()
 
   for (const e of events ?? []) {
     const t = tsOf(e)
@@ -70,6 +74,8 @@ export function summarizeAway(events, { now = Date.now(), maxDays = 60 } = {}) {
       const txt = String(e.text ?? '')
       if (txt.startsWith('wake:')) { wakes++; continue }
       if (txt.startsWith('diary:')) { diaries++; continue }
+      const seenLine = parseWatchedLine(txt)
+      if (seenLine) { if (seenLine.bvid) watchedBvids.add(seenLine.bvid); continue }
       // 记账分片：browse: 是第一片，browse-more: 是后续，两片都要算
       const got = parseBrowseLine(txt)
       if (got) {
@@ -86,9 +92,10 @@ export function summarizeAway(events, { now = Date.now(), maxDays = 60 } = {}) {
     days,
     wakes,
     videos: bvids.size,
+    watched: watchedBvids.size,
     said,
     diaries,
-    quiet: wakes === 0 && said === 0 && bvids.size === 0 && diaries === 0,
+    quiet: wakes === 0 && said === 0 && bvids.size === 0 && watchedBvids.size === 0 && diaries === 0,
   }
 }
 

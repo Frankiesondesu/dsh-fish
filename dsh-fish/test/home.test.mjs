@@ -516,3 +516,76 @@ test('ensureTalkSession：锁被握着且家里还没有会话 → 失败并说�
     assert.equal(created.length, 0)
   } finally { await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) }
 })
+
+// ---- 2026-10-30（用户 m02853）：归档的是那一条，不是整个家 ----
+
+test('记着的那条归档了，同屋还有另一条活的：认那一条，不报「被收起来了」', async () => {
+  const root = await tmpRoot()
+  try {
+    const { ctx, sessions, created, reg } = fakeCtx()
+    const a = await bootstrapHome(ctx, { root })
+    assert.equal(a.ok, true, a.why)
+    const ws = sessions.get(a.wsId)
+    const oldId = ws.sessionIds[0]
+
+    // 用户归档了 home.json 指的那条；同一个工作区里另有一条（比如之前「重新搭一间」留下的）
+    reg.archivedSessionIds = [oldId]
+    ws.sessionIds = [oldId, 'ses-other']
+
+    const r = await ensureTalkSession(ctx, { root, wsId: a.wsId })
+    assert.equal(r.ok, true, r.why)
+    assert.equal(r.sessionId, 'ses-other', '要认同屋活着的那条')
+    assert.equal(r.adopted, true)
+    assert.equal(created.length, 1, '不该再建一条会话')
+
+    const h = await homeStatus(root)
+    assert.equal(h.sessionId, 'ses-other', 'home.json 要改指过去，重启后才不会又判一次')
+    assert.equal(String(h.status), '', '认了新的之后不能还挂着 archived 标记')
+  } finally { await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) }
+})
+
+test('home.json 已经落盘成 archived，之后屋里出现另一条活会话：重启也认得回来', async () => {
+  const root = await tmpRoot()
+  try {
+    const { ctx, sessions, created, reg } = fakeCtx()
+    const a = await bootstrapHome(ctx, { root })
+    assert.equal(a.ok, true, a.why)
+    const ws = sessions.get(a.wsId)
+    const oldId = ws.sessionIds[0]
+
+    // 先真的走到「归档」这一步：home.json 落成 status:archived
+    ws.sessionIds = []
+    reg.archivedSessionIds = [oldId]
+    const gone = await ensureTalkSession(ctx, { root, wsId: a.wsId })
+    assert.equal(gone.archived, true)
+    assert.equal(String((await homeStatus(root)).status), 'archived')
+
+    // 屋里后来又有一条没归档的（用户自己开的 / 早先留下的都算）
+    ws.sessionIds = ['ses-live']
+    const back = await ensureTalkSession(ctx, { root, wsId: a.wsId })
+    assert.equal(back.ok, true, back.why)
+    assert.equal(back.sessionId, 'ses-live')
+    assert.equal(back.adopted, true)
+    assert.equal(created.length, 1, '不该为了「有活的」再建一条')
+    assert.equal(String((await homeStatus(root)).status), '', '归档标记要清掉')
+  } finally { await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) }
+})
+
+test('同屋的会话全归档了：仍然报「被收起来了」，不硬造一条', async () => {
+  const root = await tmpRoot()
+  try {
+    const { ctx, sessions, created, reg } = fakeCtx()
+    const a = await bootstrapHome(ctx, { root })
+    assert.equal(a.ok, true, a.why)
+    const ws = sessions.get(a.wsId)
+    const oldId = ws.sessionIds[0]
+
+    ws.sessionIds = ['ses-x']
+    reg.archivedSessionIds = [oldId, 'ses-x']
+
+    const r = await ensureTalkSession(ctx, { root, wsId: a.wsId })
+    assert.equal(r.ok, false)
+    assert.equal(r.archived, true)
+    assert.equal(created.length, 1, '一条都不该建')
+  } finally { await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) }
+})

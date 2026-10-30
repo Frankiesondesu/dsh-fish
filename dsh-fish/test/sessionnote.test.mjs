@@ -98,7 +98,8 @@ test('deliverQueued：把排队的话补进会话，补完清空', async () => {
     await queueNote(root, '第一句')
     await queueNote(root, '第二句')
     const agent = fakeAgent()
-    const r = await deliverQueued(agent, root)
+    // 没有 sessionId 的老条目是给家里的（0.6.16 驳回话术），所以这里按「家里」投。
+    const r = await deliverQueued(agent, root, { home: true })
     assert.equal(r.delivered, 2)
     assert.equal(agent.written.length, 2)
     assert.match(agent.written[0].data.content[0].text, /第一句/)
@@ -145,5 +146,24 @@ test('registerIdentity：她家那条会话一起来，就把排队的话补进�
 test('identity.js 里真的调了 deliverQueued（防止它再变回死代码）', () => {
   const src = readFileSync(new URL('../lib/identity.js', import.meta.url), 'utf8')
   assert.match(src, /import \{ deliverQueued \} from '\.\/sessionnote\.js'/)
-  assert.match(src, /deliverQueued\(agent, root\)/)
+  assert.match(src, /deliverQueued\(agent, root/)
+})
+
+// 2026-10-30（用户 m03179）：出门结束的交接句必须回到它自己那条会话，
+// 不能被顺手投进家里那条——那会变成一句没头没尾的噪音。
+test('deliverQueued：带 sessionId 的只投给它自己那条，投不到就留着', async () => {
+  const root = tmp()
+  try {
+    await queueNote(root, '给外面那条的交接句', { sessionId: 'session-out' })
+    const home = fakeAgent({ id: 'session-home' })
+    const r1 = await deliverQueued(home, root, { home: true })
+    assert.equal(r1.delivered, 0, '家里那条不该收到别人的交接句')
+
+    const out = fakeAgent({ id: 'session-out' })
+    const r2 = await deliverQueued(out, root)
+    assert.equal(r2.delivered, 1)
+    assert.match(String(out.written[0].data.content[0].text), /交接句/)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
 })

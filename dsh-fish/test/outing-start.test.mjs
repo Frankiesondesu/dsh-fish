@@ -13,7 +13,7 @@
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Readable } from 'node:stream'
@@ -301,4 +301,29 @@ test('工具手册不许把工具说成「屋子里的东西」（m01581）', as
   assert.match(txt, /跟着我走|不是屋子里的东西/, '要把「工具跟着她走」说清楚')
   assert.match(txt, /growth_commit/, '工具名照旧要念给她听')
   assert.match(txt, /ops_bash/, '额外放行的工具名照旧要念')
+})
+
+// 2026-10-30（用户 m03179）：请神结束那条对话没开着时，交接句要排队补投，不能丢。
+test('/possession 结束：那条对话没开着时，交接句排进队列', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'fish-possess-'))
+  try {
+    mkdirSync(join(root, 'home'), { recursive: true })
+    writeFileSync(join(root, 'events.jsonl'), line('ev_before', '2026-10-29T00:00:00.000Z'))
+    await startPossession(root, {
+      sessionId: 'session-away',
+      title: '一个对话',
+      cwd: join(root, 'other'),
+      identity: '',
+      now: Date.parse('2026-10-29T00:10:00.000Z'),
+    })
+    const h = harness(root, { agents: [] })
+    const ended = await h.call('POST', { action: 'end', sessionId: 'session-away' }, '/dsh-fish/possession')
+    assert.equal(ended.status, 200, JSON.stringify(ended.json))
+    assert.equal(ended.json.note?.queued, true)
+    const saved = JSON.parse(readFileSync(join(root, 'session-notes.json'), 'utf8'))
+    assert.equal(saved.notes.length, 1)
+    assert.match(String(saved.notes[0].text), /还给你/)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
 })

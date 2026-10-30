@@ -21,9 +21,10 @@ test('她不能用工具写系统侧类型', () => {
     assert.throws(() => validateEvent({ type: t, text: 'x' }, { day: 1, stage: 1, source: 'tool' }), (e) => e.code === 'NOT_HER_TYPE')
   }
   for (const t of HER_TYPES) {
-    // revise 要 refs；narration 从 0.5.8 起也要（或写成「我没想清楚」）。
+    // revise 要 refs；narration 从 0.5.8 起也要（或写成「我没想清楚」）；
+    // dream（2026-10-30 m02837）必须指认材料，否则等于凭空编。
     const extra = t === 'revise' ? { refs: ['ev_01J9ZK0000000000000000000'] } : {}
-    if (t === 'narration') extra.refs = ['ev_01J9ZK0000000000000000000']
+    if (t === 'narration' || t === 'dream') extra.refs = ['ev_01J9ZK0000000000000000000']
     assert.doesNotThrow(
       () => validateEvent({ type: t, text: '我有点在意那个视频里的人。', ...extra }, { day: 1, stage: 1, source: 'tool' }),
       `${t} 应当允许她写`,

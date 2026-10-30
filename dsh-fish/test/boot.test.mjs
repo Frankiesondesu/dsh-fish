@@ -75,6 +75,9 @@ test('插件元信息：名字与 inject', () => {
   assert.equal(name, 'dsh-fish')
   assert.ok(Array.isArray(inject), 'inject 必须是数组（写成对象会让 sessionController 静默丢失）')
   for (const k of ['sessionController', 'tools', 'webServer', 'connection']) assert.ok(inject.includes(k), `缺 ${k}`)
+  // 2026-10-30（m02961）：可选服务不能写进 inject。cordis 的规则是「少一个就整个插件不启动」，
+  // 而且不报错——一个只影响一条功能的服务，不该有让插件整个消失的权力。
+  assert.ok(!inject.includes('userQuestions'), 'userQuestions 必须运行时探测，不能进 inject')
 })
 
 test('首次启动会播种，且只播一次', async () => {

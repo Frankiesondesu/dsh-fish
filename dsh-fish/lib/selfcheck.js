@@ -18,6 +18,7 @@ import { readConfig, readEvents, readOwner } from './store.js'
 import { inWindow, dateKey } from './settings.js'
 import { detectFfmpeg } from './media.js'
 import { FISH_TOOLS, HER_TOOLS } from './restrict.js'
+import { devModeSync } from './devmode.js'
 
 const MIN_NODE_MAJOR = 18
 
@@ -218,7 +219,15 @@ export async function runChecks(o = {}) {
   // 用全新 profile 装 tarball 时正是这样：日志里 6 个工具注册失败，自检还说没问题。
   // 现在只要有真宿主，就按 registry 里**真的在不在**判断。
   const T = o.tools ?? null
-  const notRegistered = T && typeof T.get === 'function' ? FISH_TOOLS.filter((n) => !T.get(n)) : []
+  // 2026-10-30（0.8.1 发版前自查）：这里必须按「公开版真的注册了哪些」来查。
+  // `her_dream` 只在 `.dev` 存在时才由 `lib/index.js` 注册（梦是本机实验功能，
+  // 对外公开版不带）。可 `FISH_TOOLS` 是**白名单来源**，9 个名字里一直含它，
+  // 于是公开版装完自检必然报红：「有 1 个工具没注册上：her_dream」——
+  // 和 2026-10-28 那次 read_image 误报同一类错误（拿「名单」当「真装上」的反面，
+  // 这次是拿「本机清单」当「公开版清单」）。判据与注册处同一份：`devModeSync`。
+  const dev = devModeSync(root)
+  const expected = dev ? FISH_TOOLS : FISH_TOOLS.filter((n) => n !== 'her_dream')
+  const notRegistered = T && typeof T.get === 'function' ? expected.filter((n) => !T.get(n)) : []
   // read_image 是宿主的工具，别人的机器上可能没有。
   // 2026-10-28：以前它只是跟在「手上的工具」后面一句附注，而且那一项还是绿的。
   // 结果用户那边「ffmpeg 装了、额度也没用完，就是看不到画面」只能靠人肉翻日志——
@@ -238,7 +247,7 @@ export async function runChecks(o = {}) {
   const globalHasImage = !!(T && typeof T.get === 'function' && T.get('read_image'))
   const R = o.restrict ?? null
   const allowNames = Array.isArray(R?.allow) ? R.allow : []
-  const want = allowNames.length > 0 ? allowNames.length : 7
+  const want = allowNames.length > 0 ? allowNames.length : expected.length
   if (notRegistered.length > 0) {
     push('tools', '手上的工具', {
       ok: false,
@@ -248,7 +257,7 @@ export async function runChecks(o = {}) {
   } else if (o.restrictEnabled === false) {
     push('tools', '手上的工具', {
       ok: true,
-      detail: '收窄是关掉的：她能看到宿主给的全部标准工具，加上我们给的 7 个。',
+      detail: `收窄是关掉的：她能看到宿主给的全部标准工具，加上我们给的 ${expected.length} 个。`,
       fix: '想要她干净一点，把「工具面收窄」打开。',
     })
   } else if (R?.failed) {

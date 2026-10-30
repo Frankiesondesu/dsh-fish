@@ -14,6 +14,7 @@
  * 手动唤醒，谁点都是「多叫醒一次」，没有比定时器更大的权力。
  */
 import fs from 'node:fs/promises'
+import fsSync from 'node:fs'
 import { join } from 'node:path'
 import { rootDir } from './store.js'
 
@@ -23,6 +24,24 @@ export async function devMode(root = rootDir()) {
   try {
     await fs.access(join(root, '.dev'))
     return true
+  } catch {
+    return false
+  }
+}
+
+/**
+ * 同一判据的同步版本——**只给注册工具与拼提示词用**（2026-10-30，用户 m02837）。
+ *
+ * 为什么需要它：`registerToolRestrict` 与身份段都是同步拼的，而 `her_dream`
+ * 这类本机实验工具必须在「装不装」这一层就分叉——注册了再在提示词里说
+ * 「你没有」，等于让她去撞一次「做不到」。
+ * 判据与上面的 `devMode()` 完全同一份，不允许出现第二套（0.6.10 就是两套判据打架）。
+ * @returns {boolean}
+ */
+export function devModeSync(root = rootDir()) {
+  if (process.env.DSH_FISH_DEV === '1') return true
+  try {
+    return fsSync.existsSync(join(root, '.dev'))
   } catch {
     return false
   }

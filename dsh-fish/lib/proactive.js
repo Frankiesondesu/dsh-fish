@@ -1,0 +1,298 @@
+/**
+ * proactive.js —— 她主动开口（本机实验，2026-10-30，用户 m04610，只在 .dev 下启用）
+ *
+ * 用户要的：不等他来找她，她自己判断"现在有没有话想说"，说一句就投进
+ * 他和她平时说话的那条会话里；允许她什么都不说。
+ *
+ * 三条设计约束（和 dream.js 同源的思路）：
+ *   1. **触发不是指令**。这里只给她事实（几点、多久没人说话、这几天发生了什么、
+ *      哪些话还悬着），并明确写「可以说，也可以什么都不做」。
+ *      不写「你应该找他」——那会变成系统在演她。
+ *   2. **她说的必须是真的**：`her_say` 要求 refs 指向事件流里真实存在的事件
+ *      （1–6 条）。理由同梦：不指认材料，就等于编一句好听的话。
+ *   3. **频率是上限，不是行为要求**。每天最多 maxPerDay 次、两次之间至少隔
+ *      cooldownHours；概率随"多久没人说话"缓慢上升，但不保证一定触发。
+ *
+ * 可见性：工具注册、提示词段、设置页卡片三处共用 devModeSync 的判据，
+ * 公开版既没有这个工具，也不会有这个回合。这是 0.6.10 的教训——不要用
+ * 「安装路径里有没有 node_modules」去猜。
+ */
+
+import { toJsonSchema } from './toolschema.js'
+import { rootDir, readEvents, appendEvent } from './store.js'
+import { dateKey, loadConfig, inWindow } from './settings.js'
+import { defineTool } from './tool.js'
+import { guardWrite } from './tenant.js'
+import { logLine } from './log.js'
+import { tsMs } from './schema.js'
+
+/** 一天的默认上限。 */
+export const PROACTIVE_DEFAULTS = Object.freeze({
+  enabled: false,
+  maxPerDay: 2,
+  minIdleHours: 6,
+  baseChance: 0.15,
+  gainPerHour: 0.05,
+  maxChance: 0.6,
+  cooldownHours: 4,
+})
+
+/** 一句主动的话最长多少字。 */
+export const PROACTIVE_MAX = 600
+/** 一条话最多引几件事。 */
+export const PROACTIVE_REFS_MAX = 6
+/** 可以当材料的事件类型（她自己的话与听见的东西；不含 meta/系统记账）。 */
+export const PROACTIVE_MATERIAL = Object.freeze([
+  'utterance', 'revise', 'reunion', 'narration', 'refusal', 'heard',
+])
+/** 空手回合落进对话里的那一句。只说明"没人跟你说话"，不布置任务。 */
+export const PROACTIVE_TRIGGER = '（现在没有人跟你说话。）'
+
+/**
+ * 读配置并夹紧。老配置没有 proactive 这一组，用默认值。
+ * @param {object} config
+ * @returns {{enabled:boolean,maxPerDay:number,minIdleHours:number,baseChance:number,gainPerHour:number,maxChance:number,cooldownHours:number}}
+ */
+export function proactiveConfig(config = {}) {
+  const raw = config?.proactive ?? {}
+  const num = (v, d, lo, hi) => {
+    const n = Number(v)
+    if (!Number.isFinite(n)) return d
+    return Math.min(hi, Math.max(lo, n))
+  }
+  return {
+    enabled: raw.enabled === true,
+    maxPerDay: Math.round(num(raw.maxPerDay, PROACTIVE_DEFAULTS.maxPerDay, 0, 12)),
+    minIdleHours: num(raw.minIdleHours, PROACTIVE_DEFAULTS.minIdleHours, 0, 240),
+    baseChance: num(raw.baseChance, PROACTIVE_DEFAULTS.baseChance, 0, 1),
+    gainPerHour: num(raw.gainPerHour, PROACTIVE_DEFAULTS.gainPerHour, 0, 1),
+    maxChance: num(raw.maxChance, PROACTIVE_DEFAULTS.maxChance, 0, 1),
+    cooldownHours: num(raw.cooldownHours, PROACTIVE_DEFAULTS.cooldownHours, 0, 240),
+  }
+}
+
+/** 今天已经开过几次空手回合（meta `proactive-turn:<dk>:<ts>`）。 */
+export function turnsToday(events = [], dk = '') {
+  if (!dk) return 0
+  let n = 0
+  for (const e of events) {
+    if (e?.type !== 'meta') continue
+    if (String(e.text ?? '').startsWith(`proactive-turn:${dk}:`)) n += 1
+  }
+  return n
+}
+
+/** 上一次空手回合是什么时候（毫秒）。 */
+export function lastTurnAt(events = []) {
+  let at = 0
+  for (const e of events) {
+    if (e?.type !== 'meta') continue
+    if (!String(e.text ?? '').startsWith('proactive-turn:')) continue
+    const ts = tsMs(e)
+    if (Number.isFinite(ts) && ts > at) at = ts
+  }
+  return at
+}
+
+/** 距离上一次有记录的事，过了多少小时。没有记录时返回 Infinity。 */
+export function idleHoursOf(events = [], now = Date.now()) {
+  let last = 0
+  for (const e of events) {
+    const ts = tsMs(e)
+    if (Number.isFinite(ts) && ts > last) last = ts
+  }
+  if (!last) return Infinity
+  return Math.max(0, (now - last) / 3_600_000)
+}
+
+/**
+ * 这一次该不该开门。纯函数：不读文件、不掷骰子。
+ * @returns {{ok:boolean, why:string, chance:number, idleHours:number, dk:string}}
+ */
+export function proactiveState({ config = {}, events = [], now = Date.now(), away = null, rested = false } = {}) {
+  const cfg = proactiveConfig(config)
+  const dk = dateKey(new Date(now))
+  const idleHours = idleHoursOf(events, now)
+  const base = { chance: 0, idleHours, dk }
+  if (!cfg.enabled) return { ...base, ok: false, why: '主动说话是关着的' }
+  // 只在醒着的时间窗里：凌晨三点收到一句「我想你了」不是她自主，是她打乱了作息。
+  // 配置里没有 window 时（测试/老数据）不拦，保持纯函数可测。
+  const win = Array.isArray(config?.window) && config.window.length === 2 ? config.window : null
+  if (win && !inWindow({ window: win }, new Date(now))) return { ...base, ok: false, why: '这个点不在她醒着的时段里' }
+  if (away?.kind) return { ...base, ok: false, why: '她不在家' }
+  if (rested) return { ...base, ok: false, why: '她今天请了假' }
+  if (turnsToday(events, dk) >= cfg.maxPerDay) return { ...base, ok: false, why: '今天已经到上限' }
+  const last = lastTurnAt(events)
+  if (last && (now - last) / 3_600_000 < cfg.cooldownHours) return { ...base, ok: false, why: '还在冷却里' }
+  if (idleHours < cfg.minIdleHours) return { ...base, ok: false, why: '刚说过话，还不到时候' }
+  const chance = Math.min(cfg.maxChance, cfg.baseChance + Math.max(0, idleHours - cfg.minIdleHours) * cfg.gainPerHour)
+  return { ...base, ok: true, why: '', chance }
+}
+
+/** 最近几天可以用作材料的条目（她自己的话、听见的话）。 */
+export function recentMaterial(events = [], { now = Date.now(), days = 3, limit = 8 } = {}) {
+  const since = now - days * 86_400_000
+  const out = []
+  for (const e of events) {
+    if (!PROACTIVE_MATERIAL.includes(e?.type)) continue
+    const ts = tsMs(e)
+    if (!Number.isFinite(ts) || ts < since) continue
+    const text = String(e.text ?? '').trim()
+    if (!text) continue
+    out.push({ id: e.id, type: e.type, ts, text })
+  }
+  out.sort((a, b) => b.ts - a.ts)
+  return out.slice(0, limit)
+}
+
+/** 还悬着的事：她问过但没人答、出门那趟还等核对、她说了但没有人接。 */
+export function looseEnds(events = [], { now = Date.now() } = {}) {
+  const out = []
+  const answered = new Set()
+  for (const e of events) {
+    if (e?.type === 'answer') {
+      const id = String(e.ask?.askId ?? '')
+      if (id) answered.add(id)
+    }
+  }
+  for (const e of events) {
+    if (e?.type !== 'ask') continue
+    if (answered.has(String(e.id ?? ''))) continue
+    const ts = tsMs(e)
+    if (!Number.isFinite(ts) || now - ts > 3 * 86_400_000) continue
+    out.push({ id: e.id, kind: 'ask', text: `你问过「${String(e.text ?? '').trim()}」，还没有得到答复。` })
+  }
+  return out.slice(0, 3)
+}
+
+/**
+ * 空手回合的处境正文（走 system prompt 段，不进对话）。
+ * 只写事实与许可，不写"你应该"。
+ */
+export function proactiveSection({ now = Date.now(), state = {}, material = [], loose = [] } = {}) {
+  const at = new Date(now)
+  const hh = String(at.getHours()).padStart(2, '0')
+  const mm = String(at.getMinutes()).padStart(2, '0')
+  const idle = Number.isFinite(state.idleHours) ? `${state.idleHours.toFixed(1)} 小时` : '很久'
+  const lines = [
+    '（现在没有人跟你说话。这一轮不是谁找你，也不是日程安排的醒；是你自己醒着，想不想开口由你。）',
+    `现在是 ${at.getFullYear()}-${String(at.getMonth() + 1).padStart(2, '0')}-${String(at.getDate()).padStart(2, '0')} ${hh}:${mm}；距离上一次留下记录已经 ${idle}。`,
+  ]
+  if (material.length) {
+    lines.push('最近这几天你写下/听见的（要引用就指回 id，别改写事实）：')
+    for (const m of material) {
+      const t = m.text.length > 60 ? `${m.text.slice(0, 59)}…` : m.text
+      lines.push(`- [${m.id}] ${m.type}：${t}`)
+    }
+  }
+  if (loose.length) {
+    lines.push('还有几件事悬着：')
+    for (const l of loose) lines.push(`- [${l.id}] ${l.text}`)
+  }
+  lines.push('你可以说一句，也可以什么都不做。想说的时候，用 her_say 把它记下来——refs 指回上面真实发生的事（1–6 条 id）；不想说就这一轮什么都别做，不算失败。')
+  return lines.join('\n')
+}
+
+/** 事件流里有没有这个 id，且能不能当材料。 */
+function refProblem(events, refs) {
+  const byId = new Map(events.map((e) => [String(e.id ?? ''), e]))
+  for (const id of refs) {
+    const ev = byId.get(String(id))
+    if (!ev) return `refs 里的 ${id} 在事件流里不存在；只填你翻得到的事。`
+    if (!PROACTIVE_MATERIAL.includes(ev.type)) return `refs 里的 ${id} 不是你说过/听见过的话，不能当材料。`
+  }
+  return ''
+}
+
+/**
+ * 记一句她主动说的话。
+ * @returns {Promise<{ok:boolean, id?:string, note:string}>}
+ */
+export async function writeSay(root, { text = '', refs = [], sessionId = '', why = '', now = Date.now() } = {}) {
+  const body = String(text ?? '').trim()
+  if (!body) return { ok: false, note: '把想说的话写出来再记。' }
+  if (body.length > PROACTIVE_MAX) return { ok: false, note: `一句最多 ${PROACTIVE_MAX} 字，说短一点。` }
+  const list = (Array.isArray(refs) ? refs : []).map((x) => String(x ?? '').trim()).filter(Boolean)
+  if (!list.length) return { ok: false, note: '得指回真实发生过的事：refs 填 1–6 条事件 id。' }
+  if (list.length > PROACTIVE_REFS_MAX) return { ok: false, note: `一条最多引 ${PROACTIVE_REFS_MAX} 件事。` }
+
+  const { events } = await readEvents(root)
+  const problem = refProblem(events, list)
+  if (problem) return { ok: false, note: problem }
+
+  const { config } = await loadConfig(root)
+  const dk = dateKey(new Date(now))
+  // appendEvent 返回的就是写进去的那条事件（不是 {ok, event}，0.7.4 那次参数错位就是栽在这），
+  // 所以判空只能判返回值本身。
+  const stored = await appendEvent(
+    { type: 'utterance', text: `（她主动说）${body}`, refs: list, ...(sessionId ? { sessionId } : {}) },
+    { day: 1, stage: 1, source: 'tool' },
+    root,
+  ).catch(() => null)
+  if (!stored?.id) return { ok: false, note: '这条没记下。' }
+  await appendEvent(
+    { type: 'meta', text: `proactive-say:${dk}:${why || 'free'}` },
+    { day: 1, stage: 1, source: 'system' },
+    root,
+  ).catch(() => {})
+  return { ok: true, id: stored.id, note: '记下了。' }
+}
+
+/**
+ * 注册 `her_say`。只在 devModeSync 为真时由 index.js 调用。
+ */
+export function registerProactive(ctx, deps = {}) {
+  const root = deps.root ?? rootDir()
+  const log = deps.log ?? (() => {})
+
+  ctx.tools.register(
+    defineTool({
+      name: 'her_say',
+      description: [
+        '你自己想开口的时候用这个：不是回复谁，是你主动说一句。',
+        '必须指回真实发生过的事（refs 填 1–6 条你那几天写下/听见的事件 id）；',
+        '不指认材料就等于编，写不进去。一天最多几次，说不说都可以。',
+      ].join(''),
+      parameters: toJsonSchema({
+        type: 'object',
+        properties: {
+          text: { type: 'string', minLength: 1, maxLength: PROACTIVE_MAX, description: '你要说的那句话。' },
+          refs: {
+            type: 'array',
+            minItems: 1,
+            maxItems: PROACTIVE_REFS_MAX,
+            items: { type: 'string' },
+            description: '指回真实事件 id（1–6 条），用 her_recall 或最近记录里查到的。',
+          },
+          why: { type: 'string', maxLength: 80, description: '为什么现在想说（可选，只写进记录）。' },
+        },
+        required: ['text', 'refs'],
+      }),
+      output: {
+        schema: toJsonSchema({
+          type: 'object',
+          properties: {
+            ok: { type: 'boolean' },
+            id: { type: 'string' },
+            note: { type: 'string' },
+          },
+          required: ['ok', 'note'],
+        }),
+        render: (out) => `[${out.ok ? '说出去了' : '没记下'}]${out.ok ? '' : ` ${out.note}`}`,
+      },
+      async execute(args = {}, exec) {
+        const who = guardWrite(deps.tenant, exec, 'her_say')
+        const sid = who?.sessionId ?? ''
+        try {
+          const r = await writeSay(root, { text: args.text, refs: args.refs, why: args.why, sessionId: sid })
+          if (!r.ok) logLine('info', ['her_say：没记下', r.note], root)
+          return { ok: r.ok, id: r.id ?? '', note: r.note }
+        } catch (e) {
+          logLine('warn', ['her_say：', e?.message ?? String(e)], root)
+          return { ok: false, id: '', note: '这条没记下。' }
+        }
+      },
+    }),
+  )
+  log('proactive: her_say registered')
+}

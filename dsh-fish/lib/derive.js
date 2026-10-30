@@ -277,7 +277,12 @@ export function deriveSelf(events = [], opts = {}) {
     if (!prefix) continue
     for (const id of t.slice(prefix.length).split(/[\s,]+/)) if (id) rejectedIds.add(id)
   }
-  const evs = rejectedIds.size ? ordered.filter((e) => !rejectedIds.has(e.id)) : ordered
+  // 梦（2026-10-30，本机实验）：**不参与任何派生**。
+  // 它只是把真实发生过的事重新拼一遍，不是新信息——不该变成信念、不推进成长日、
+  // 不算她"写过多少条"，也不进记忆体检的计数。原文留在事件流里，只在 .dev 下的
+  // 「梦」卡里给人看；她自己翻 her_recall 时才看得到。
+  const evs = (rejectedIds.size ? ordered.filter((e) => !rejectedIds.has(e.id)) : ordered)
+    .filter((e) => e.type !== 'dream')
   const seedEv = evs.find((e) => e.type === 'seed')
   const seed = seedEv?.text ?? ''
 

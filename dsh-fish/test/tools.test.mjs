@@ -19,7 +19,7 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync, readdirSync } from 'node:fs'
+import { readFileSync, readdirSync, mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { tmpdir } from 'node:os'
@@ -160,4 +160,45 @@ test('自检按 registry 里真的在不在判断，而不是配置名单', asyn
   assert.equal(badItem.ok, false)
   assert.match(badItem.detail, /growth_commit/)
   assert.match(badItem.fix, /日志/)
+})
+
+// 2026-10-30（0.8.1 发版前自查）：公开版装完自检必然报红的一条误报。
+//
+// `her_dream` 是「梦」那个本机实验功能的工具，只有 `.dev` 存在时 `lib/index.js`
+// 才注册它。可 `FISH_TOOLS` 是白名单来源、一直含这 9 个名字，自检早先拿它当
+// 「应该装上」的清单直接跟 registry 比 → 公开版没有 `.dev`、也就没注册 her_dream，
+// 于是人人装完都看到一句红字「有 1 个工具没注册上：her_dream。她现在说不出话、
+// 也记不下东西。」，把人吓得以为装坏了。
+//
+// 2026-10-28 的 read_image 也是同一类错误（拿名单当「真装上」）；这次是拿了
+// 「本机清单」当「公开版清单」。判据必须与注册处同一份：`devModeSync`。
+test('自检不把只在 .dev 下才注册的 her_dream 算成「没装上」', async () => {
+  const cfg = { growthDays: 30, window: { start: '20:00', end: '23:00' }, tools: {} }
+  // 公开版真机：注册表里没有 her_dream，别的都在。
+  const pub = { get: (n) => (n === 'her_dream' ? undefined : { name: n }) }
+
+  // ① 公开版（没有 .dev）：不许报红，也不许在措辞里出现 her_dream。
+  const pubRoot = join(tmpdir(), `dsh-fish-sc-pub-${process.pid}`)
+  const pubRes = await runChecks({ root: pubRoot, config: cfg, host: {}, tools: pub, net: false })
+  const pubItem = pubRes.items.find((i) => i.id === 'tools')
+  assert.equal(pubItem.ok, true, `公开版不该因 her_dream 报红：${pubItem.detail}`)
+  assert.doesNotMatch(pubItem.detail, /her_dream/)
+
+  // ② 开发副本（有 .dev）：这次 her_dream 真应该在，缺了就得报出来——
+  //    别为了让公开版变绿，把开发副本的漏注册也一起瞒过去。
+  const devRoot = join(tmpdir(), `dsh-fish-sc-dev-${process.pid}`)
+  mkdirSync(devRoot, { recursive: true })
+  writeFileSync(join(devRoot, '.dev'), 'dev')
+  const devRes = await runChecks({ root: devRoot, config: cfg, host: {}, tools: pub, net: false })
+  const devItem = devRes.items.find((i) => i.id === 'tools')
+  assert.equal(devItem.ok, false, '开发副本里 her_dream 缺了必须报')
+  assert.match(devItem.detail, /her_dream/)
+
+  // ③ 公开版里别的工具真缺了，照样报红（不是把整项都放过）。
+  const missing = { get: (n) => (n === 'her_dream' || n === 'bili_watch' ? undefined : { name: n }) }
+  const missRes = await runChecks({ root: pubRoot, config: cfg, host: {}, tools: missing, net: false })
+  const missItem = missRes.items.find((i) => i.id === 'tools')
+  assert.equal(missItem.ok, false)
+  assert.match(missItem.detail, /bili_watch/)
+  assert.doesNotMatch(missItem.detail, /her_dream/)
 })

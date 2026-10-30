@@ -17,6 +17,7 @@ import { videoUrl, historyFromEvents, renderWatchList } from '../lib/history.js'
 import { riskState, noteRisk, clearRisk, browsePlan, STRIKES_MIN } from '../lib/risk.js'
 import { runChecks, peersOnMachine } from '../lib/selfcheck.js'
 import { lookBeforeWake } from '../lib/scheduler.js'
+import { FISH_TOOLS } from '../lib/restrict.js'
 
 const M = (text) => ({ type: 'meta', text })
 
@@ -186,7 +187,13 @@ test('自检：手上的工具——以 tools.restrict 的真实结果为准，�
     const toff = off.items.find((x) => x.id === 'tools')
     assert.equal(toff.ok, true)
     assert.match(toff.detail, /收窄是关掉的/)
-    assert.match(toff.detail, /7 个/)
+    // 2026-10-30：原来这里硬断言 `/7 个/`。FISH_TOOLS 早就不是 7 个了，
+    // 而且公开版与 `.dev` 开发副本的个数还不一样——硬写一个数字等于把
+    // 「清单是活的」这件事钉死，改一次清单就要回来改测试。
+    // 现在按实际清单算：临时 root 没有 .dev，所以是 FISH_TOOLS 去掉
+    // 那个只在开发副本注册的工具（her_dream）。
+    const pubCount = FISH_TOOLS.filter((n) => n !== 'her_dream').length
+    assert.match(toff.detail, new RegExp(`加上我们给的 ${pubCount} 个`))
 
     // 已注册但还没轮到她的下一条会话：说"等下次启动"，不谎报已生效。
     const reg = await runChecks({

@@ -245,6 +245,8 @@ window.__ModuleLoader__.load({
       const [asks, setAsks] = useState(null)
       // 请求事件：在这里补答之后的提示（弹卡答过的就不写了）。
       const [askMsg, setAskMsg] = useState('')
+      // 梦（2026-10-30 m02837，本机实验 A 案）：只在 .dev 下才取得到，公开版 404。
+      const [dreams, setDreams] = useState(null)
       const [mem, setMem] = useState(null)
       // 规则与解禁（R3，2026-10-24）：四层规则 + 她提上来的那一张申请
       const [rules, setRules] = useState(null)
@@ -307,6 +309,10 @@ window.__ModuleLoader__.load({
       const [wakes, setWakes] = useState(1)
       const [eventsPerDay, setEventsPerDay] = useState(1)
       const [questionsPerDay, setQuestionsPerDay] = useState(1)
+      // 主动说话（0.8.1 本机实验，.dev 专属）：她自己决定要不要开口。频率是上限，不是要求。
+      const [proactiveOn, setProactiveOn] = useState(false)
+      const [proactiveMax, setProactiveMax] = useState(2)
+      const [proactiveIdle, setProactiveIdle] = useState(6)
       const [avoidText, setAvoidText] = useState('')
       // 刷站（全是环境参数：她今天能不能出门、一次看见几条，不是她爱看什么）
       const [browseOn, setBrowseOn] = useState(true)
@@ -460,6 +466,13 @@ window.__ModuleLoader__.load({
           setWakes(Number(s.config?.wakesPerDay ?? 1))
           setEventsPerDay(Number(s.config?.daily?.events ?? 1))
           setQuestionsPerDay(Number(s.config?.daily?.questions ?? 1))
+          // 主动说话（.dev 专属）：没这个字段就是没开过，保持默认关闭。
+          const pr = s.config?.proactive
+          if (pr && typeof pr === 'object') {
+            setProactiveOn(pr.enabled === true)
+            setProactiveMax(Number(pr.maxPerDay ?? 2))
+            setProactiveIdle(Number(pr.minIdleHours ?? 6))
+          }
 
           const [b, e, d, c, br, ib, hm, pth] = await Promise.all([
             jget('/beliefs'),
@@ -493,6 +506,8 @@ window.__ModuleLoader__.load({
           jget('/possession').then(setPossess).catch(() => {})
           // 请求事件：她问过什么、哪些还没答（失败就只显示空卡）
           jget('/ask').then(setAsks).catch(() => {})
+          // 梦（本机实验）：公开版这条路由直接 404，失败就当没有这张卡
+          jget('/dream').then(setDreams).catch(() => {})
           // 上下文与记忆：单独取，失败不影响其它卡片
           jget('/memory').then(setMem).catch(() => {})
           // 她以前看过什么 / 风控状态：都是只读，失败不影响其它卡片
@@ -730,6 +745,14 @@ window.__ModuleLoader__.load({
           await jpost('/config', { diary: patch })
           flashSaved()
         } catch (e) { setSaveFail(e.message) } finally { diaryPending.current -= 1 }
+      }
+
+      // 主动说话（0.8.1 本机实验）：同样只提交改了的那一项，别把别的开关写回旧值。
+      const patchProactive = async (patch) => {
+        try {
+          await jpost('/config', { proactive: patch })
+          flashSaved()
+        } catch (e) { setSaveFail(e.message) }
       }
 
       // 改完就生效：任何一项变了，停手 700ms 就写盘（连点加减号也只写一次）。
@@ -1076,10 +1099,20 @@ window.__ModuleLoader__.load({
       // 工具面：把限制的理由写给用户看，给一个总开关，另留一处额外放行口。
       // 2026-10-24 起这条限制是真的（restrict 37→8，另有一道 guard 兜底），
       // 所以界面上的说法从「还没打通」改成「已经做到」——配置不许撒谎。
+      // 定时工具是宿主给的、默认不放（用户 m04504）：用户自己加进白名单之后，
+      // 这里才改口说「她能自己定提醒」——界面不替配置撒谎。
+      const scheduleOn = (toolsAllowSaved ?? []).some((n) => String(n).trim() === 'schedule_create')
       const toolsCard = h('div', { className: 'card' },
         h('h3', null, '手上能用什么'),
         h('div', { className: 'dim' },
-          '大肥鱼自己可以调用的工具只有八个：记录想法、翻自己的旧事、翻自己的日记、留一句话、刷 B 站、看视频画面、在评论区说话、有事问你同不同意。另外宿主的 read_image 也留着——她看画面要靠它。',
+          // 本机实验（m02837）：.dev 下多一个 her_dream；公开版就只说八个。
+          state?.dev === true
+            ? '大肥鱼自己可以调用的工具只有九个：记录想法、翻自己的旧事、翻自己的日记、留一句话、刷 B 站、看视频画面、在评论区说话、有事问你同不同意、醒来记一句梦。另外宿主给的 read_image 也留着——她看画面要靠它。'
+            : '大肥鱼自己可以调用的工具只有八个：记录想法、翻自己的旧事、翻自己的日记、留一句话、刷 B 站、看视频画面、在评论区说话、有事问你同不同意。另外宿主给的 read_image 也留着——她看画面要靠它。',
+          // 定时工具默认不放（m04504）：放行才说「能」，没放行就说怎么开。
+          scheduleOn
+            ? '你还在白名单里放了 schedule_create，所以她现在能自己定定时提醒——你说一遍时间与要做的事，她自己建任务，到点宿主把提醒投回她这条会话。'
+            : '想让她能自己定定时提醒（比如「每天中午去看邮箱」），在下面的白名单里填 schedule_create；要让她能改、删任务，连 schedule_list、schedule_update、schedule_delete 一起填。默认不放，工具数不变。',
           '别的插件和技能启用，DSH会把它们的工具定义也塞进上下文——大肥鱼会看到一堆能做各种操作的工具，占用上下文的同时有可能真的尝试调用这些工具。',
           '为了保证大肥鱼不会被插件能力污染，保持原生状态健康成长，禁用了其他能力（只影响和大肥鱼对话框的能力调用，不影响其他对话框的正常工具调用）。'),
         h('div', null, Toggle({
@@ -1218,6 +1251,32 @@ window.__ModuleLoader__.load({
             state.upgrade.sourcePath
               ? h('div', { className: 'dim' }, `源目录：${state.upgrade.sourcePath}`)
               : null)
+        : null
+
+      // 宿主兼容（2026-10-30 m02961）：宿主没提供 userQuestions 服务时降级，不报错。
+      // 0.7.5 把它写进 inject 后，缺少该服务的宿主在 import 阶段就把插件整个跳过了（一行日志都不留）。
+      // 0.8.1 改成运行时探测：装得进来，只是「她在会话里问你」这条路关着——必须说明白，不然像坏了。
+      const compatCard = state?.compat?.userQuestions === false
+        ? h('div', { className: 'card full' },
+            h('h3', null, '这个宿主没提供「会话里问你」'),
+            h('div', { className: 'dim' },
+              '当前宿主里没有 userQuestions 这个服务：可能是版本旧，也可能是它没被装上。'
+              + '插件照常跑，其它功能不受影响；只有她想在对话里直接问你（要不要带东西回家、解锁申请）时问不出去，她会改用留言。'),
+            h('div', { className: 'dim' },
+              '想恢复这条路：把 DSH 升到最新版再试。升级 DSH 不会动插件的数据目录，也不会动 cordis.patch.yml 里给插件配的 root。'))
+        : null
+
+      // 宿主版本（2026-10-30 m03193）：package.json 里声明了 engines.dsh，
+      // 运行时读到的版本不在那个范围里就说明一句——只提醒，不挡人。
+      const hostCard = state?.host && state.host.status !== 'supported' && state.host.status !== 'unknown'
+        ? h('div', { className: 'card full' },
+            h('h3', null, state.host.status === 'older' ? '这个 DSH 版本比插件要求的还旧' : '这个 DSH 版本比插件认识的还新'),
+            h('div', { className: 'dim' },
+              `插件声明的范围：${state.host.range || '（未声明）'}；这台机器上是 ${state.host.version || '（读不到）'}。`),
+            h('div', { className: 'dim' },
+              state.host.status === 'older'
+                ? '旧版本里可能缺一些接口，出问题时先升级 DSH 再看。插件不会因此拒绝启动。'
+                : '新版本可能改了接口。插件照常跑，但这一组合没测过；出问题请把日志发我。'))
         : null
 
       const resetCard = h('div', { className: 'card full' },
@@ -1659,7 +1718,10 @@ window.__ModuleLoader__.load({
               '不推送，回来了就在这里告诉你错过了什么。',
               h('div', { className: 'kv' },
                 h('b', null, '醒了'), h('span', null, `${away.wakes} 次`),
-                h('b', null, '看了'), h('span', null, `${away.videos} 条`),
+                // 2026-10-30：原来这里只有「看了 N 条」，数的是刷站记账——
+                // 那是"翻到过"，不是"看过画面"。两件事分开说，别让她被冤枉。
+                h('b', null, '看过画面'), h('span', null, `${away.watched ?? 0} 条`),
+                h('b', null, '翻到过'), h('span', null, `${away.videos} 条`),
                 h('b', null, '说了'), h('span', null, `${away.said} 句`),
                 h('b', null, '日记'), h('span', null, away.diaries ? `${away.diaries} 篇` : '没写')),
               h('p', { className: 'hint' }, '日记只报篇数——内容给不给你看，还是那个开关的事。'))
@@ -1694,6 +1756,23 @@ window.__ModuleLoader__.load({
               hint: '问多了会退化成问答机器。建议不超过成长事件数的一半。' }),
             Num({ label: '你多久不出现算冷落', value: absent, onChange: setAbsent, min: 1, max: 30, unit: '天',
               hint: '超过这么多天没说话，她会记下「你不在」。' }))),
+        // 主动说话（0.8.1 本机实验）：只有 .dev 下才出现。频率是上限，不是任务——
+        // 开关开着也不代表她每天都会说，说不说由她自己判断（见 lib/proactive.js）。
+        state?.dev === true ? group('主动说话（本机实验）',
+          '她想说话的时候可以自己开口，不是被提醒推着说。这里调的是「最多说几次」和「多久没说话才可能开口」，不是命令她每天必须说。',
+          h('div', { className: 'grid2' },
+            Toggle({ label: '允许她主动开口', on: proactiveOn,
+              onChange: (v) => { setProactiveOn(v); patchProactive({ enabled: v }) },
+              hint: '关着就等于没有这个功能。开着也可能好几天不说——那是她的判断，不是故障。' }),
+            Sel({ label: '一天最多几次', value: proactiveMax,
+              onChange: (v) => { setProactiveMax(v); patchProactive({ maxPerDay: Number(v) }) },
+              options: [0, 1, 2, 3, 4, 5, 6],
+              fmt: (v) => (Number(v) === 0 ? '0 次 · 不主动' : `最多 ${v} 次`),
+              hint: '上限，不是配额。到了上限只是不能再开新的空手回合，第二天照常。' }),
+            Num({ label: '多久没说话才可能开口', value: proactiveIdle,
+              onChange: (v) => { setProactiveIdle(v); patchProactive({ minIdleHours: Number(v) }) },
+              min: 1, max: 24, unit: '小时',
+              hint: '越久没说话，开口的概率越高（有上限）。刚聊完不会立刻再开一次。' }))) : null,
         group('日记',
           '她每天会写日记。打开下面那个开关，你就能看。',
           h('div', { className: 'grid2' },
@@ -2056,6 +2135,11 @@ window.__ModuleLoader__.load({
                     background: 'rgba(128,128,128,.15)',
                   },
                 }),
+                // 2026-10-30：真的抽帧看过画面的那几条要能一眼认出来，
+                // 否则它跟"只扫了眼标题"在列表里长得一样（客户反馈的原点）。
+                it.how === 'watch'
+                  ? h('span', { className: 'tag', style: { flex: '0 0 auto' } }, '看过画面')
+                  : h('span', { style: { flex: '0 0 auto', width: '0' } }),
                 h('a', {
                   href: it.url,
                   target: '_blank',
@@ -2067,10 +2151,14 @@ window.__ModuleLoader__.load({
             ? h('div', { className: 'row', style: { marginTop: '10px' } }, histPager)
             : null,
           // 今日概览并进这里，不再单开一张卡（原来「今天看了什么」和「以前看过什么」是两次重复）
+          // 2026-10-30：三个数分开报——看过画面 / 翻到过 / 递过来还没看。
+          // 原来只有一个「累计看过 M 条」，把三件事算成一个数，才有的客户反馈。
           !browse ? null
             : !browse.enabled ? h('p', { className: 'hint' }, '今天没开上网。')
             : h('p', { className: 'hint', style: { marginTop: '8px' } },
-                `今天：用了 ${browse.usedToday} / ${browse.perDay} 次，一次 ${browse.topN} 条，累计看过 ${browse.lookedCount} 条。`)),
+                `今天：用了 ${browse.usedToday} / ${browse.perDay} 次，一次 ${browse.topN} 条；`
+                + `其中真的看了画面 ${browse.watchedCount ?? 0} 条、只翻到过 ${browse.glancedCount ?? 0} 条`
+                + `${(browse.handed ?? []).length ? `、你递过来还没看 ${browse.handed.length} 条` : ''}。`)),
         )
 
       // ---------------------------- 记忆 ----------------------------
@@ -2191,6 +2279,19 @@ window.__ModuleLoader__.load({
                 h('p', { className: 'dim', style: { marginTop: '8px' } },
                   '体检只看账本，不评价对错。两句话对不上不是错误——都可能是她当时真心这么想；快忘掉也不代表不重要，只是还没被反复提起或检验。')),
         ),
+
+        // ---- 梦（2026-10-30 m02837，本机实验 A 案）----
+        // 只在 .dev 下渲染：公开版没有 her_dream 这个工具，`/dream` 也直接 404。
+        state?.dev === true
+          ? group('梦（本机实验）',
+              '只在这台机器的开发副本里显示。她醒来后可以把真实发生过的事重新拼成一句梦；不算成长，也不会被当成新的记忆。',
+              !dreams ? h('p', { className: 'dim' }, '还没读到。')
+                : !(dreams.items ?? []).length ? h('p', { className: 'dim' }, '她还没记过梦。')
+                : h('div', null, ...(dreams.items ?? []).slice(0, 12).map((d) => h('div', { key: d.id, style: { marginBottom: '8px' } },
+                    h('div', { className: 'hint', style: { margin: '0 0 2px' } }, `${d.day} · 引用了 ${(d.refs ?? []).length} 件`),
+                    h('div', null, d.text),
+                  ))))
+          : null,
 
         // ---- 原来这里的「信箱」卡 2026-10-29（用户 m02105）搬到住所页，改名「她写的小纸条」----
       )
@@ -3430,6 +3531,10 @@ window.__ModuleLoader__.load({
           h('p', { className: 'hint' }, '导出的是纯文本：版本、自检结果、脱敏后的配置、日志末尾。没有 cookie，没有她说过的话。')),
 
         importCard,
+
+        // 宿主旧了（0.8.1）：比升级自检更基础——先告诉它为什么有个功能没反应。
+        compatCard,
+        hostCard,
 
         // 升级自检放在最上面：这类问题不报错，只表现为「升了没变」，得先看见它。
         upgradeCard,

@@ -378,7 +378,7 @@ export function registerIdentity(ctx, { root, herDir, log } = {}) {
       // 2026-10-29 修：deliverQueued 早就写好了，却从来没有人调用 ——
       // 排队的句子一直躺在文件里，她永远不会看到。
       if (home) {
-        void deliverQueued(agent, root)
+        void deliverQueued(agent, root, { home: true })
           .then((q) => {
             if (q?.delivered) log?.(`[dsh-fish] 补上了排队的话 ${q.delivered} 句`)
           })
