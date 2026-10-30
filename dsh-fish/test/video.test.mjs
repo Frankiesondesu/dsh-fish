@@ -59,6 +59,20 @@ test('grabFrames：本机没有 ffmpeg 时，理由与「跑起来失败」分�
   assert.match(r.why, /PATH 上没有 ffmpeg/)
 })
 
+test('grabFrames：本机没有 ffmpeg 时，也要先说清上游到底怎么了', async () => {
+  // 2026-10-30 CI 上 4 个 job 同时红就是这条：ffmpeg 探测以前在最前面，
+  // runner 没装 ffmpeg → 412、要登录这些真实原因全被「本机没有可用的 ffmpeg」盖掉。
+  // 装在用户机器上同样害人：视频被删了，她却说「装个 ffmpeg 吧」。
+  const root = await tmpRoot()
+  const r = await grabFrames({
+    bvid: BVID, root,
+    ffmpeg: { ok: false, bin: '', why: 'PATH 上没有 ffmpeg' },
+    client: fakeClient({ async view() { throw new Error('接口 412：请求被拦截') } }),
+  })
+  assert.equal(r.ok, false)
+  assert.equal(r.why, '接口 412：请求被拦截')
+})
+
 test('grabFrames：取不到视频信息时，把上游那句话原样透出来', async () => {
   const root = await tmpRoot()
   const r = await grabFrames({

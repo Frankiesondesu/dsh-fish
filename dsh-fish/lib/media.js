@@ -47,7 +47,10 @@ export function sniffMime(buf) {
  * @returns {{ok:boolean, bin:string, version:string, why:string}}
  */
 export function detectFfmpeg(env = process.env) {
-  const bin = String(env[FFMPEG_ENV] ?? 'ffmpeg')
+  // 环境变量被设成空串时要退回默认值：spawn('') 会直接抛
+  // `TypeError: The argument 'file' cannot be empty`，而不是走「没找到 ffmpeg」这条路
+  // （2026-10-30 在 CI 上把 ffmpeg 从 PATH 拿掉时踩到）。
+  const bin = String(env[FFMPEG_ENV] ?? '').trim() || 'ffmpeg'
   const r = spawnSync(bin, ['-version'], { encoding: 'utf8', windowsHide: true, timeout: 8000 })
   if (r.error) {
     const missing = r.error.code === 'ENOENT'
