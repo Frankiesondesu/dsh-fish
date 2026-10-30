@@ -44,9 +44,23 @@ TypeError [ERR_INVALID_ARG_VALUE]: The argument 'file' cannot be empty. Received
 
 **测试**：`test/installcheck.test.mjs` 原有 8 条（含这条断言）在 Linux CI 上跑通。
 
+### 五、测试辅助函数把临时目录删早了（只影响 CI，不影响插件行为）
+
+`test/grant.test.mjs` 与 `test/keepsake.test.mjs` 的 `withRoot` 原来写的是：
+
+```js
+try { return fn(root) } finally { rmSync(root, { recursive: true, force: true }) }
+```
+
+`fn` 是 async 的时候，`finally` 在**第一个 await 处**就执行了——函数体还没跑完，临时目录已经没了。随后 `fs.readFile` 若没抢在删除前 `open`，就撞 `ENOENT`，`currentOffer` 返回 null，用例报 `null == true`。
+
+这是**时序**问题，不是逻辑问题：本机快，`open` 抢在前面就过；CI 的 `ubuntu-20` 慢一些，0.8.2 第一次推送（run 41083997221 / job 124160216212）就红了。它同时解释了 0.8.1 期间那次被记成「偶发」的 1077/1 fail——当时没找出是哪条，现在知道是这一类。
+
+改成：同步返回值直接清理，返回值是 thenable 就用 `.finally()` 等它跑完。`test/keepsake.test.mjs` 的同款写法暂时没改，它的 7 处调用全是同步的，撞不上；这里记一笔，以后给它加异步用例时会踩。
+
 ### 测试
 
-全量 **1078 条全绿**（本机、前后端各跑三次）。CI 四个 job（ubuntu 20/22/24 + windows）全绿。
+全量 **1078 条全绿**（本机、前后端各跑三次）。CI 四个 job（ubuntu 20/22/24 + windows）全绿（run 41085171602）。
 
 ## 0.8.1 — 2026-10-30
 
