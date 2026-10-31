@@ -365,6 +365,43 @@ test('speakOnce 拒绝时只说状态，不说配额和开关', async () => {
   })
 })
 
+// 2026-10-31（用户转来的现场反馈）：原来只说「先看一眼再说」，她照着做了还是被拒——
+// 因为她翻的是别的视频、搜的是别的关键词，而闸门只认**这一条**。被挡的人得知道往哪使劲。
+test('speakOnce 说「没看过」时，要告诉她怎么才算看过（点名动作，并说清看别的没用）', async () => {
+  await withRoot(async (root) => {
+    const dk = dateKey()
+    await enableComment(root)
+    const r = await speakOnce({ root, client: fakeClient(), kind: 'comment', bvid: 'BV9', text: '路过', dateKey: dk })
+    assert.equal(r.ok, false)
+    // 得点出能走通的那两个动作，而不是含糊的「先看一眼」
+    assert.match(r.note, /bili_look/)
+    assert.match(r.note, /bili_watch/)
+    assert.match(r.note, /what/)
+    assert.match(r.note, /bvid/)
+    // 并且提前堵掉那条她已经踩过的弯路
+    assert.match(r.note, /别的/)
+    // 仍然不泄露配额与开关
+    assert.doesNotMatch(r.note, /\d/)
+    assert.doesNotMatch(r.note, /配额|开关|管理员|权限/)
+  })
+})
+
+test('speakOnce 对「他递来但没打开」的那条，理由与普通没看过分开说', async () => {
+  await withRoot(async (root) => {
+    const dk = dateKey()
+    await enableComment(root)
+    await appendEvent(
+      { type: 'meta', text: `hand:${dk} BV7` },
+      { day: 1, stage: 1, source: 'system' },
+      root,
+    )
+    const r = await speakOnce({ root, client: fakeClient(), kind: 'comment', bvid: 'BV7', text: '路过', dateKey: dk })
+    assert.equal(r.ok, false)
+    assert.match(r.note, /递过来的/)
+    assert.match(r.note, /bili_look/)
+  })
+})
+
 test('speakOnce 关着时听起来像"不方便"，不像"被禁止"', async () => {
   await withRoot(async (root) => {
     const dk = dateKey()

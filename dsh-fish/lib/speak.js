@@ -73,7 +73,14 @@ function softReason(why) {
   if (w.includes('没开') || w.includes('权限')) return '现在不方便说。'
   if (w.includes('今天说够') || w.includes('今天回够')) return '今天说得够多了。'
   if (w.includes('不是说话的时候')) return '现在不是说话的时候。'
-  if (w.includes('没看')) return '这个你还没看过。想看那一条，就先看一眼再说。'
+  // 2026-10-31（用户转来的现场反馈）：原来只说「先看一眼再说」，她照着做了还是被拒——
+  // 因为她翻的是别的视频、搜的是别的关键词，闸门只认**这一条**（`look:<dk> <bvid>`）。
+  // 所以这句要能照着做：点名看哪一条、点名用哪个动作、说清看别的为什么不算。
+  // 仍然不泄露配额与开关——这里说的全是「现在是什么状态、下一步怎么走」。
+  if (w.includes('没看')) {
+    const how = '要打开这一条：bili_look（what 填 video，bvid 填它），或者 bili_watch 直接看画面。翻了别的、搜了别的，都不算这一条。'
+    return w.includes('递过来') ? `这条是他递过来的，你还没打开过。${how}` : `这一条你今天还没打开过。${how}`
+  }
   if (w.includes('登录') || w.includes('cookie')) return '说不出去，缺了点什么。'
   if (w.includes('拦')) return '说了但没送到，等一下再说。'
   return w.slice(0, 40) || '没说出来。'

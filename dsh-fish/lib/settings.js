@@ -416,6 +416,25 @@ export function validateToolNames(input, known) {
   return { ok: unknown.length === 0, names, unknown, checked: Boolean(knownSet) }
 }
 
+/**
+ * 保存前的清洗（0.8.3，2026-10-31 issue #14 @ming-fish）：把「这台机器上确实没有」
+ * 的名字丢掉，其余照常留下。
+ *
+ * 为什么不再整表拒绝：设置页的自动保存是**整表提交**，一个人手改过的 `config.json` 里
+ * 只要留着一个早就没有的工具名，就会让整页所有设置都存不进去，而界面上的提示还指着
+ * 「插件这一版还没接上它」——方向完全错了。他遇到的那个名字是裸的 `delete`。
+ *
+ * 丢弃不等于放过：丢掉的名字会随 `dropped` 原样回给界面，用户看得到自己少了什么，
+ * 拼错的字母也不会悄悄生效。用户自己手输白名单的那条路（`saveTools`）仍然严格拦，
+ * 因为那时候是**他刚敲进去的字**，该当场告诉他打错了。
+ */
+export function sanitizeToolNames(input, known) {
+  const check = validateToolNames(input, known)
+  const drop = new Set(check.unknown)
+  const names = check.names.filter((n) => !drop.has(n))
+  return { names, dropped: check.unknown, checked: check.checked }
+}
+
 /** 读配置（文件不存在时返回默认值，不写盘） */
 export async function loadConfig(root) {
   const raw = await readConfig(root)

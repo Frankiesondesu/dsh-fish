@@ -17,6 +17,7 @@
  */
 
 import { appendEvent } from './store.js'
+import { hearMark, setHearMark } from './home.js'
 
 /** 一句最多多少字（对齐 talkmem 的 TALK_SNIPPET） */
 export const HEAR_SNIPPET = 160
@@ -55,7 +56,12 @@ export async function hearTurn(root, o = {}) {
   const every = Number(o.config?.memory?.hearEvery ?? HEAR_EVERY)
   if (!(every > 0)) return { written: false, why: 'off' }
   const turns = Number(o.turns ?? 0)
-  if (!(turns > 0) || turns % every !== 0) return { written: false, why: 'not-this-turn' }
+  if (!(turns > 0)) return { written: false, why: 'not-this-turn' }
+  // 「离上次记过去了几轮」而不是「turns 能不能被 every 整除」：
+  // 后者从装插件那天开始算，旁听后装上的话要等很久才轮到一次（本机实测 0.8.0
+  // 装上时 turns 已经 4，下一次整除是 6，中间看着像功能没生效）。2026-10-31。
+  const last = await hearMark(root)
+  if (turns - last < every) return { written: false, why: 'not-this-turn' }
 
   const sentence = pickHearSentence(o.text)
   if (!sentence) return { written: false, why: 'nothing-to-keep' }
@@ -66,6 +72,7 @@ export async function hearTurn(root, o = {}) {
       { day: Number(o.day ?? 0), stage: Number(o.stage ?? 1), source: 'system' },
       root,
     )
+    await setHearMark(root, turns)
     return { written: true, id: ev.id, text: sentence }
   } catch (err) {
     log('hear · 没记下他说的那句', err?.message ?? err)

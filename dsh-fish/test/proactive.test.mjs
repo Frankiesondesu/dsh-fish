@@ -25,6 +25,9 @@ import {
   idleHoursOf,
   looseEnds,
   recentMaterial,
+  findTriggerSeq,
+  hideTrigger,
+  sweepTriggers,
   registerProactive,
   writeSay,
 } from '../lib/proactive.js'
@@ -114,7 +117,9 @@ test('概率随「多久没说话」上升，但有上限；配置读进来会�
 test('空手回合的正文只说事实和许可，不写「你应该」', () => {
   const text = proactiveSection({ now: Date.now(), state: { idleHours: 9.5, chance: 0.3 }, material: [{ id: 'ev_a', type: 'utterance', text: '今天有点累' }], loose: [{ id: 'ev_b', text: '你问过一件事，还没答复。' }] })
   assert.match(text, /没有人跟你说话/)
-  assert.match(text, /可以.*什么都不做|也可以什么都不做/)
+  assert.match(text, /想说什么就说/)
+  assert.match(text, /他看得见/, '得说她的话有收件人，不然她以为只是记一笔')
+  assert.match(text, /什么都不做|什么都别做/)
   assert.match(text, /1–6 条/)
   assert.doesNotMatch(text, /你应该/)
   assert.match(text, /\[ev_a\]/)
@@ -184,6 +189,26 @@ test('默认白名单里没有 her_say；只有 .dev 下注册了才看得见', 
   assert.deepEqual(registered[0].parameters.required, ['text', 'refs'])
 })
 
+test('her_say 的显示结果是 ContentBlock 数组，不是字符串（0.8.2 真机栽在这）', () => {
+  const registered = []
+  const ctx = { tools: { register: (t) => registered.push(t) } }
+  registerProactive(ctx, { root: tmpdir(), log: () => {} })
+  const spec = registered[0]
+
+  // 2026-10-30 真机：她连着两次拿到「Error: content.some is not a function」，
+  // 第三轮她写「Don't retry a third time」，然后一个字都没说。
+  for (const out of [{ ok: true, note: '' }, { ok: false, note: '这条没记下。' }]) {
+    const blocks = spec.output.render({}, out)
+    assert.ok(Array.isArray(blocks), 'render 必须返回数组，宿主会对它调 content.some')
+    assert.equal(blocks.length, 1)
+    assert.equal(blocks[0].type, 'text')
+    assert.equal(typeof blocks[0].text, 'string')
+    assert.ok(blocks[0].text.length > 0)
+  }
+  assert.match(spec.output.render({}, { ok: true }).at(0).text, /说出去了/)
+  assert.match(spec.output.render({}, { ok: false, note: '这条没记下。' }).at(0).text, /没记下/)
+})
+
 test('turnsToday / lastTurnAt 只认当日与最近一次，不把别人的 meta 算进来', () => {
   const now = Date.now()
   const dk = dateKey(new Date(now))
@@ -197,4 +222,97 @@ test('turnsToday / lastTurnAt 只认当日与最近一次，不把别人的 meta
   // ev_other 那一秒前刚写过，所以「安静了多久」要按最近的那条算，别被几小时前的空手回合骗了。
   assert.ok(idleHoursOf(events, now) < 1)
   assert.equal(idleHoursOf([], now), Infinity, '一条记录都没有时算「很久」')
+})
+
+test('触发语收尾：回合结束后能把那条 user/message 换成空节点（用户 m05007）', () => {
+  const events = [
+    { seq: 1, type: 'turn/start', data: { turn: 7 } },
+    { seq: 2, type: 'step/start', data: { step: 2 } },
+    {
+      seq: 3,
+      type: 'user/message',
+      data: { role: 'user', content: [{ type: 'text', text: '（现在没有人跟你说话。）' }], source: { kind: 'user', rpcId: 'proactive-1793372588185' } },
+    },
+  ]
+  assert.equal(findTriggerSeq(events, 'proactive-1793372588185'), 3)
+  assert.equal(findTriggerSeq(events, 'proactive-别的'), 0)
+
+  const session = {
+    appended: null,
+    snapshotEvents: () => events,
+    append(type, data, opts) {
+      this.appended = { type, data, opts }
+    },
+  }
+  assert.equal(hideTrigger(session, { rpcId: 'proactive-1793372588185' }), true)
+  assert.equal(session.appended.type, 'system/message')
+  assert.deepEqual(session.appended.data.message, { role: 'system', content: [] }, '空 content 才不投影任何消息')
+  assert.deepEqual(session.appended.opts.surfaceOp, { op: 'replace', startSeq: 3, endSeq: 3 })
+  assert.deepEqual(session.appended.opts.sourceEventSeqs, [3], '要带 sourceEventSeqs，宿主才知道替的是哪条')
+  assert.equal(session.appended.data.turn, 7, 'turn 取触发语所在回合，不伪造')
+  assert.equal(session.appended.data.step, 2)
+
+  // 找不到、没会话、没 rpcId 都不该抛，也不该乱写。
+  assert.equal(hideTrigger(session, { rpcId: 'proactive-别的' }), false)
+  assert.equal(hideTrigger(null, { rpcId: 'proactive-1793372588185' }), false)
+  assert.equal(hideTrigger(session, {}), false)
+})
+
+test('守卫拒绝时必须当场返回，不能「日志说拒了、事件流照样多一条」（用户 m05007 真机）', () => withRoot(async (root) => {
+  line(root, ev({ id: 'ev_mat', text: '一件真实发生过的事' }))
+  const registered = []
+  const ctx = { tools: { register: (t) => registered.push(t) } }
+  registerProactive(ctx, {
+    root,
+    tenant: { root, herDir: '', tenant: { ok: true, instanceId: '', why: '' } },
+    log: () => {},
+  })
+  const tool = registered[0]
+  const before = (await readEvents(root)).events.length
+
+  // 从别的工作区调用：不在这个家 → 守卫拒 → 不许落盘
+  const out = await tool.execute(
+    { text: '这句不该写进去', refs: ['ev_mat'] },
+    { session: { header: { id: 'session-elsewhere', cwd: 'D:/somewhere-else' } } },
+  )
+  assert.equal(out.ok, false)
+  assert.match(out.note, /没有落盘|另一个家/)
+  assert.equal((await readEvents(root)).events.length, before, '拒绝时事件数不能变')
+
+  // 同一份 tenant，换回她自己的会话 → 放行
+  const okOut = await tool.execute(
+    { text: '这句可以写', refs: ['ev_mat'] },
+    { session: { header: { id: 'session-26cbdc5e', cwd: join(root, 'home') } } },
+  )
+  assert.equal(okOut.ok, true)
+  assert.equal((await readEvents(root)).events.length, before + 2, '写一条 utterance + 一条 meta')
+}))
+
+test('补扫：历史里遗留的触发语也要收走，但别误伤她复述这句话（用户 m05031）', () => {
+  const events = [
+    { seq: 1, type: 'turn/start', data: { turn: 3 } },
+    { seq: 2, type: 'user/message', data: { role: 'user', content: [{ type: 'text', text: '（现在没有人跟你说话。）' }] } },
+    { seq: 3, type: 'assistant/message', data: {} },
+    { seq: 4, type: 'user/message', data: { role: 'user', content: [{ type: 'text', text: '（现在没有人跟你说话。）这句不是我写的' }] } },
+    { seq: 5, type: 'turn/start', data: { turn: 4 } },
+    { seq: 6, type: 'user/message', data: { role: 'user', content: [{ type: 'text', text: '（现在没有人跟你说话。）' }] } },
+  ]
+  const appended = []
+  const session = {
+    snapshotEvents: () => events,
+    append(type, data, opts) {
+      appended.push({ type, data, opts })
+    },
+  }
+  assert.equal(sweepTriggers(session), 2, '两条完全相等的收走；她复述的那条留着')
+  assert.deepEqual(appended.map((a) => a.opts.surfaceOp.startSeq), [2, 6])
+  assert.deepEqual(appended.map((a) => a.opts.sourceEventSeqs), [[2], [6]])
+  assert.equal(appended[0].data.turn, 3)
+  assert.equal(appended[1].data.turn, 4)
+
+  // 已收过的再扫不会再叠：把 replace 节点也放进事件流里
+  events.push({ seq: 7, type: 'system/message', data: { surfaceOp: { op: 'replace', startSeq: 2, endSeq: 2 }, message: { role: 'system', content: [] } } })
+  events.push({ seq: 8, type: 'system/message', data: { surfaceOp: { op: 'replace', startSeq: 6, endSeq: 6 }, message: { role: 'system', content: [] } } })
+  appended.length = 0
+  assert.equal(sweepTriggers(session), 0)
 })

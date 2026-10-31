@@ -17,6 +17,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { pickHearSentence, hearTurn, HEAR_SNIPPET, HEAR_MIN_CHARS } from '../lib/hear.js'
+import { hearMark, bumpTurns } from '../lib/home.js'
 import { readEvents } from '../lib/store.js'
 import { validateEvent } from '../lib/schema.js'
 import { searchEvents, renderRecall, RECALL_LIMIT, RECALL_DAYS } from '../lib/recall.js'
@@ -73,6 +74,39 @@ test('旁听：不到轮数不写，到了才写一条 heard', async () => {
     assert.equal(heard[0].source, 'system')
     assert.equal(heard[0].text, '今天我在想一件事，想了很久')
     assert.equal(heard[0].day, 2)
+  })
+})
+
+test('旁听：装上时 turns 已经过去好几轮，下一轮就记（本机 0.8.0 的现场）', async () => {
+  await withRoot(async (root) => {
+    const cfg = { memory: { hearEvery: 3 } }
+    const text = '今天我在想一件事，想了很久'
+    // 真实链路里 bumpTurns 先跑（记轮次），home.json 一定存在；hearAt 只写在已有的 home.json 上。
+    await bumpTurns(root, 1)
+    // 0.8.0 装上旁听时本机 turns 已经 4。旧写法（turns % every === 0）要等到 6 才记，
+    // 中间这段时间 events.jsonl 里一条 heard 都没有，看上去像功能没生效。
+    assert.equal((await hearTurn(root, { text, turns: 4, day: 6, stage: 1, config: cfg })).written, true)
+    // 记过一次之后重新数：4 → 7 之间不再记
+    assert.equal((await hearTurn(root, { text, turns: 5, day: 6, stage: 1, config: cfg })).written, false)
+    assert.equal((await hearTurn(root, { text, turns: 6, day: 6, stage: 1, config: cfg })).written, false)
+    assert.equal((await hearTurn(root, { text, turns: 7, day: 6, stage: 1, config: cfg })).written, true)
+
+    const { events } = await readEvents(root)
+    assert.equal(events.filter((e) => e.type === 'heard').length, 2)
+  })
+})
+
+test('旁听：轮次标记记在 home.json 的 hearAt 上，普通记账不会把它冲掉', async () => {
+  await withRoot(async (root) => {
+    const cfg = { memory: { hearEvery: 3 } }
+    const text = '今天我在想一件事，想了很久'
+    await bumpTurns(root, 1) // 先让 home.json 存在（真实链路同此）
+    await hearTurn(root, { text, turns: 3, day: 2, stage: 1, config: cfg })
+    assert.equal(await hearMark(root), 3)
+    // bumpTurns 写回 home.json 时用的是 `{...saved, turns}`，不能把 hearAt 丢掉
+    await bumpTurns(root, 1)
+    assert.equal(await hearMark(root), 3)
+    assert.equal((await hearTurn(root, { text, turns: 4, day: 2, stage: 1, config: cfg })).written, false)
   })
 })
 

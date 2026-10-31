@@ -557,6 +557,36 @@ export async function talkSessionId(ctx, { root = rootDir(), log } = {}) {
 //   2. 旧会话不能凭空消失 → 改名留档，它还在侧栏里，翻得回去。
 // ---------------------------------------------------------------------------
 
+/**
+ * 上次旁听记在第几轮（0 = 还没记过）。旁听靠这个判断自己歇够了没有。
+ *
+ * 2026-10-31 修：以前 hear.js 用 `turns % every === 0` 判断到没到点，
+ * 而 turns 是**从装插件那天起**的终身计数；旁听 0.8.0 才装上，装上时
+ * turns 已经 4，下一次能整除要到第 6 轮——中间一直看着像「没生效」。
+ * 改成「离上次记过去了几轮」：装上/升级后最多再等 every 轮就记第一句。
+ */
+export async function hearMark(root = rootDir()) {
+  try {
+    const saved = (await readJson(homeFile(root), null)) ?? {}
+    return Math.max(0, Number(saved.hearAt ?? 0))
+  } catch {
+    return 0
+  }
+}
+
+/** 记下旁听落在第几轮。失败不抛，最多让下一轮再记一次。 */
+export async function setHearMark(root = rootDir(), turns = 0) {
+  try {
+    const saved = await readJson(homeFile(root), null)
+    // 屋子还没建起来（home.json 不存在）就先不写：别为了记个轮次抢先建出一份空档子。
+    if (!saved || typeof saved !== 'object') return false
+    await writeAtomic(homeFile(root), JSON.stringify({ ...saved, hearAt: Math.max(0, Number(turns || 0)) }, null, 2))
+    return true
+  } catch {
+    return false
+  }
+}
+
 /** 记一轮对话。任何失败都不影响对话本身，所以永不抛。 */
 export async function bumpTurns(root = rootDir(), delta = 1) {
   try {

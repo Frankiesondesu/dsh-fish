@@ -58,8 +58,14 @@ test('「改完就生效」那句话只出现在真有设置项的页签', async
 test('保存失败不再冒充提示行：一句人话 + 一行技术信息 + 自己点掉', async () => {
   const src = await readFile(CLIENT, 'utf8')
   // 失败文案先说「不是你填错了」，再给原因；技术字段名只出现在「技术信息」那一行。
-  assert.ok(src.includes('这一项没存上。可能是插件这一版还没接上它'), '失败要说人话')
+  //
+  // 2026-10-31（issue #14）：原来那句「可能是插件这一版还没接上它 / 改别的照样会存」
+  // 已经删了——真实失败源是白名单里有这台机器上不存在的工具名，而「改别的照样会存」
+  // 恰恰说反了：自动保存是整表提交，改别的也一起存不进去。
+  assert.ok(src.includes('这一项没存上。不是你填错了'), '失败要说人话')
   assert.ok(src.includes('不是你填错了'), '不能让用户以为是自己填错了')
+  assert.ok(!src.includes('改别的照样会存'), '「改别的照样会存」是假的：自动保存是整表提交')
+  assert.ok(!src.includes('可能是插件这一版还没接上它'), '别再把责任推给「插件还没接上」')
   assert.ok(src.includes('技术信息：${saveFail}'), '技术信息单独一行，别混进人话里')
   assert.ok(src.includes("onClick: () => setSaveFail('')"), '失败框要点得掉，不能一直挂着')
   assert.ok(!src.includes('没保存：${e.message}'), '别再把原始报错直接拼在「没保存：」后面')

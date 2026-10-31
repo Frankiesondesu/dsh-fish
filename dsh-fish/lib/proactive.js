@@ -189,7 +189,7 @@ export function proactiveSection({ now = Date.now(), state = {}, material = [], 
     lines.push('还有几件事悬着：')
     for (const l of loose) lines.push(`- [${l.id}] ${l.text}`)
   }
-  lines.push('你可以说一句，也可以什么都不做。想说的时候，用 her_say 把它记下来——refs 指回上面真实发生的事（1–6 条 id）；不想说就这一轮什么都别做，不算失败。')
+  lines.push('想说什么就说，不用等他先问——这一轮你写下的字会落在你们俩的对话里，他看得见。也可以再用 her_say 把它记进你自己的流水（refs 指回上面真实发生的事，1–6 条 id）。不想说，就这一轮什么都别做，不算失败。')
   return lines.join('\n')
 }
 
@@ -278,10 +278,17 @@ export function registerProactive(ctx, deps = {}) {
           },
           required: ['ok', 'note'],
         }),
-        render: (out) => `[${out.ok ? '说出去了' : '没记下'}]${out.ok ? '' : ` ${out.note}`}`,
+        // 2026-10-31 真机（10-30 那两轮）：这里原来直接返回字符串，宿主按 ContentBlock
+        // 数组处理，`content.some` 当场抛 TypeError。她看到的工具结果是「Error: content.some
+        // is not a function」——写入其实成功了，她却以为工具坏了，重试一次后放弃，一个字没说。
+        // 签名同样是 (args, out)，跟 lib/keep.js:97 那些一样。
+        render: (_args, out) => [{ type: 'text', text: out.ok ? '[说出去了]' : `[没记下：${out.note}]` }],
       },
       async execute(args = {}, exec) {
         const who = guardWrite(deps.tenant, exec, 'her_say')
+        // 2026-10-30 真机：守卫拒绝后这里原来还往下写——日志里是「写入被拒」，
+        // 事件流里却照样多一条「（她主动说）」。拒绝必须当场返回。
+        if (!who.ok) return { ok: false, id: '', note: who.note || '这条没记下。' }
         const sid = who?.sessionId ?? ''
         try {
           const r = await writeSay(root, { text: args.text, refs: args.refs, why: args.why, sessionId: sid })
@@ -295,4 +302,109 @@ export function registerProactive(ctx, deps = {}) {
     }),
   )
   log('proactive: her_say registered')
+}
+
+/**
+ * 找到那一轮空手回合的「触发语」在会话里的 seq。
+ *
+ * 为什么按 rpcId 找：prompt 的 requestId 是 `proactive-<ts>`，宿主会把它原样写进
+ * `source.rpcId`；按文本匹配容易被她把这句话复述一遍骗过去（2026-10-30 m05007）。
+ */
+export function findTriggerSeq(events = [], rpcId = '') {
+  if (!rpcId) return 0
+  for (const ev of Array.isArray(events) ? events : []) {
+    if (ev?.type !== 'user/message') continue
+    const src = ev?.data?.source ?? {}
+    if (String(src.rpcId ?? '') === String(rpcId)) return Number(ev?.seq) || 0
+  }
+  return 0
+}
+
+/**
+ * 把触发语从对话里收走：追加一个空 system 节点，用 surface replace 盖掉那条 user/message。
+ *
+ * 为什么只能事后盖：宿主没有「模型看得见、用户看不见」的 prompt 通道；`surfaceOp`
+ * 只有 append / replace，空 content 的 system 节点不投影任何消息（插件文档原文）。
+ * 回合结束前不动它——turn 正在跑的时候改 surface，等于在别人走路时抽地板。
+ */
+export function hideTrigger(session, { rpcId = '', log } = {}) {
+  if (!session || !rpcId) return false
+  if (typeof session.snapshotEvents !== 'function' || typeof session.append !== 'function') return false
+  try {
+    const events = session.snapshotEvents(0)
+    const seq = findTriggerSeq(events, rpcId)
+    if (!seq) {
+      log?.('proactive hide skipped', `找不到 ${rpcId}`)
+      return false
+    }
+    // 替换节点要落在同一回合里，不然时间线会把它算到下一条消息头上。
+    let turn = 0
+    let step = 0
+    for (const ev of events) {
+      if ((Number(ev?.seq) || 0) >= seq) break
+      if (ev?.type === 'turn/start') turn = Number(ev?.data?.turn) || turn
+      if (ev?.type === 'step/start') step = Number(ev?.data?.step) || step
+    }
+    session.append(
+      'system/message',
+      { turn, step, message: { role: 'system', content: [] } },
+      // sourceEventSeqs 是宿主记账用的：没有它，替换节点不知道自己是替谁的，
+      // 客户端那条消息还会留在 surface 上（2026-10-31 读宿主 RuntimeContextProjection 的写法）。
+      { surfaceOp: { op: 'replace', startSeq: seq, endSeq: seq }, sourceEventSeqs: [seq] },
+    )
+    return true
+  } catch (e) {
+    log?.('proactive hide failed', e?.message ?? String(e))
+    return false
+  }
+}
+
+/**
+ * 补扫：把历史里遗留的触发语一并收走。
+ *
+ * 为什么需要它：`hideTrigger` 只有在那一轮回合正常结束时才跑得到；在修好之前触发的
+ * 那几轮（2026-10-30 23:03、2026-10-31 15:01）已经把「（现在没有人跟你说话。）」写进
+ * 了会话历史，光靠新代码不会自己消失——用户重启后仍然看得见。
+ * 这里按**正文完全相等**认（不是包含），避免误伤她复述这句话的正当发言。
+ */
+export function sweepTriggers(session, { text = PROACTIVE_TRIGGER, log } = {}) {
+  if (!session || typeof session.snapshotEvents !== 'function' || typeof session.append !== 'function') return 0
+  try {
+    const events = session.snapshotEvents(0)
+    // 已经被收走过的别再收一次：否则每次启动都会往历史里多叠一个空节点。
+    const replaced = new Set()
+    for (const ev of Array.isArray(events) ? events : []) {
+      const op = ev?.data?.surfaceOp ?? ev?.surfaceOp
+      if (op?.op === 'replace' && op.startSeq) replaced.add(Number(op.startSeq))
+    }
+    const targets = []
+    for (const ev of Array.isArray(events) ? events : []) {
+      if (ev?.type !== 'user/message') continue
+      if (replaced.has(Number(ev?.seq))) continue
+      const parts = Array.isArray(ev?.data?.content) ? ev.data.content : []
+      const body = parts.map((p) => (p?.type === 'text' ? String(p.text ?? '') : '')).join('').trim()
+      if (body === String(text).trim()) targets.push(Number(ev?.seq) || 0)
+    }
+    let done = 0
+    for (const seq of targets.filter(Boolean).sort((a, b) => a - b)) {
+      let turn = 0
+      let step = 0
+      for (const ev of events) {
+        if ((Number(ev?.seq) || 0) >= seq) break
+        if (ev?.type === 'turn/start') turn = Number(ev?.data?.turn) || turn
+        if (ev?.type === 'step/start') step = Number(ev?.data?.step) || step
+      }
+      session.append(
+        'system/message',
+        { turn, step, message: { role: 'system', content: [] } },
+        { surfaceOp: { op: 'replace', startSeq: seq, endSeq: seq }, sourceEventSeqs: [seq] },
+      )
+      done += 1
+    }
+    if (done) log?.('proactive sweep', `收走了 ${done} 条遗留触发语`)
+    return done
+  } catch (e) {
+    log?.('proactive sweep failed', e?.message ?? String(e))
+    return 0
+  }
 }

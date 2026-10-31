@@ -445,6 +445,60 @@ test('回归：手动唤醒的 dateKey 是纯日期，不污染 browse/日记/�
   })
 })
 
+// 2026-10-31（用户 m02943 / m03076）：手动点叫醒，卡池空了也得醒。
+// 原来手动这条路只把当天 counts 清零，模板冷却和 cond 一样要过；stage 1 五张卡
+// 一旦都出不来，点多少次都回「没有满足条件的事件模板（今天不打扰）」——
+// 人按了铃，里面说「今天没什么事」。
+test('手动唤醒：卡池空也照醒，给一句「今天没有待办」而不是拒绝', async () => {
+  await withRoot(async (root) => {
+    await writeConfig(normalizeConfig({ browse: { enabled: false } }), root)
+    // 把 stage 1 五张卡全部按「出过 / 冷却中」处理，absence_probe 的 cond 在空历史下不成立，
+    // 于是 pick() 的候选池确实为空（这就是线上遇到的「今天不打扰」）。
+    await appendEvent(
+      { type: 'meta', text: 'fired:why_here,first_bet,name_offer,test_first,absence_probe' },
+      { day: 1, stage: 1, source: 'system' },
+      root,
+    )
+    const { ctx, prompts } = fakeCtx()
+    const r = await wakeNow(ctx, { root })
+    assert.equal(r.ok, true, `卡池空时手动唤醒不该再被挡：${JSON.stringify(r)}`)
+    assert.equal(r.template, 'manual-idle')
+    assert.equal(prompts.length, 1, '照醒就得真的叫一次')
+    // 不派活：她拿到的处境里要说清「今天没有待办」，不是一张要做事的卡
+    const wake = getWakeSection()
+    assert.match(wake, /现在没有待办/, '卡池空时要明说今天没有待办')
+    assert.match(wake, /想做什么就做什么/, '要说清这一轮归她自己，不派活')
+
+    // 记账：wake: 记的是 manual-idle，绝不能顶着某张真卡的 id 去占它的冷却
+    const { events } = await readEvents(root)
+    const dk = dateKey()
+    const wakeMeta = events.filter((e) => e.type === 'meta' && String(e.text).startsWith('wake:'))
+    assert.equal(wakeMeta.length, 1)
+    assert.equal(String(wakeMeta[0].text), `wake:${dk} manual-idle`)
+    const firedAfter = events
+      .filter((e) => e.type === 'meta' && String(e.text).startsWith('fired:'))
+      .flatMap((e) => String(e.text).slice(6).split(',').map((s) => s.trim()))
+      .filter(Boolean)
+    assert.ok(firedAfter.includes('manual-idle'))
+    for (const id of ['why_here', 'first_bet', 'name_offer', 'test_first', 'absence_probe']) {
+      assert.equal(firedAfter.filter((x) => x === id).length, 1, `${id} 只该有原来那一次，不能被手动唤醒再记一遍`)
+    }
+    assert.ok(!wakeMeta.some((e) => /^wake:\S+ (why_here|first_bet|name_offer|test_first|absence_probe)$/.test(String(e.text))), '不能冒充某张真卡')
+  })
+})
+
+// 配额是「今天该不该自己醒」，手动不该突破——卡池空照醒，但当天次数用满仍然拦。
+test('手动唤醒：当天次数已经用满，仍然拒绝（配额不因手动而放开）', async () => {
+  await withRoot(async (root) => {
+    await writeConfig(normalizeConfig({ browse: { enabled: false }, daily: { events: 0 } }), root)
+    const { ctx, prompts } = fakeCtx()
+    const r = await wakeNow(ctx, { root })
+    assert.equal(r.ok, false, JSON.stringify(r))
+    assert.match(String(r.why), /今日事件已满/, `拒绝理由要说配额，不是说没卡：${r.why}`)
+    assert.equal(prompts.length, 0)
+  })
+})
+
 test('她的会话 cwd 是她自己的空房间，不是状态库根目录', async () => {
   await withRoot(async (root) => {
     await writeConfig(normalizeConfig({}), root)
@@ -587,9 +641,11 @@ test('工具面白名单：拼错的名字不许保存，合法名字按全角�
 
     const route = await waitFor(() => routes.find((r) => r.path === '/dsh-fish/config'))
 
-    // 拼错一个字母：形状合法、名单里没有 —— 存进去就会让整条收窄失效，必须 400
+    // 拼错一个字母：形状合法、名单里没有 —— 存进去就会让整条收窄失效，必须 400。
+    // 带 strictTools：这条路是「用户刚敲完字点的保存」，坏名字要当场拦。
+    // 不带它的（页面自动保存整表回传旧名单）走另一条：丢掉坏名字照存，见 p5.test.mjs。
     const typo = fakeRes()
-    await route.handler(reqWithBody('POST', JSON.stringify({ tools: { restrict: true, allow: ['web_serch'] } })), typo)
+    await route.handler(reqWithBody('POST', JSON.stringify({ tools: { restrict: true, allow: ['web_serch'] }, strictTools: true })), typo)
     assert.equal(typo.code, 400, '拼错的名字必须被拒')
     assert.ok(typo.body.includes('web_serch'), '要说出是哪个名字不对')
 

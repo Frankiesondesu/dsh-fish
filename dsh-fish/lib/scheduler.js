@@ -34,12 +34,12 @@ import { flushReport } from './report.js'
 import { talkSessionId } from './home.js'
 import { WAKE_TRIGGER } from './wakeconst.js'
 import { refreshSelfDoc } from './selfdoc.js'
-import { setWakeSection, clearWakeSection } from './identity.js'
+import { setWakeSection, clearWakeSection, liveAgentOf } from './identity.js'
 import { awayNow, awayLine } from './outing.js'
 import { askInChat, picked } from './askinchat.js'
 import { restedToday, settleStaleAsks } from './ask.js'
 import { devModeSync } from './devmode.js'
-import { proactiveState, proactiveSection, recentMaterial, looseEnds, PROACTIVE_TRIGGER } from './proactive.js'
+import { proactiveState, proactiveSection, recentMaterial, looseEnds, hideTrigger, sweepTriggers, PROACTIVE_TRIGGER } from './proactive.js'
 import { logLine } from './log.js'
 import { recordGrant } from './grant.js'
 
@@ -156,8 +156,21 @@ export function startScheduler(ctx, deps = {}) {
    * 处境走 system prompt 段，对话里只留一句「现在没有人跟你说话」。
    * 她可以选择开口，也可以什么都不做——不写任何「你应该」。
    */
+  // 每次启动补扫一遍历史里的遗留触发语（修好之前触发的那几轮还留在对话里）。
+  let sweptSession = ''
+
   async function maybeProactive({ events, config, dk, now }) {
     if (!devModeSync(root)) return false
+    if (!sweptSession) {
+      try {
+        const sid = await talkSessionId(ctx, { root, log })
+        const live = sid ? liveAgentOf(ctx, sid) : null
+        if (live) {
+          sweepTriggers(live.session, { log: (a, b) => log(a, b) })
+          sweptSession = sid
+        }
+      } catch {}
+    }
     const st = proactiveState({ config, events, now })
     if (!st.ok) {
       if (st.why && st.why !== proactiveSkip) {
@@ -185,15 +198,27 @@ export function startScheduler(ctx, deps = {}) {
 
     const ac = new AbortController()
     const kill = setTimeout(() => ac.abort(), WAKE_TIMEOUT_MS)
-    // 回合结束就把处境抽走，跟唤醒共用同一条清理路径。
-    watchTurnEnd(ctx, sessionId, () => clearWakeSection())
+    const requestId = `proactive-${now}`
+    // 回合结束：先把处境抽走（跟唤醒同一条清理路径），再把那条触发语从对话里收走。
+    // 2026-10-30 真机（m05007）：不收走的话，用户对话框里会多出一条「自己发的」
+    // 「（现在没有人跟你说话。）」——那只是 prompt 正文，不是谁真的说了话。
+    watchTurnEnd(ctx, sessionId, () => {
+      clearWakeSection()
+      try {
+        const live = liveAgentOf(ctx, sessionId)
+        const hidden = hideTrigger(live?.session, { rpcId: requestId, log: (a, b) => log(a, b) })
+        log('proactive', hidden ? '触发语已从对话里收走' : '触发语没能收走（会话不在线或找不到那条消息）')
+      } catch (err) {
+        log('proactive hide failed', err?.message ?? String(err))
+      }
+    })
     try {
       await sc.create({ sessionId, cwd: await ensureHer(root) }).catch(() => {})
       setWakeSection(text)
       await withWake(async () => {
         await sc.prompt(
           {
-            requestId: `proactive-${now}`,
+            requestId,
             sessionId,
             mode: 'queue',
             content: [{ type: 'text', text: PROACTIVE_TRIGGER }],
@@ -893,11 +918,33 @@ export async function wakeNow(ctx, deps = {}) {
   // 语气也别写成"任务"，她看到"去看一眼"会自己决定看不看。
   const forcedBrowse = deps.focus === 'browse'
   if (forcedBrowse) deps = { ...deps, forceBrowse: true }
-  const decision = forcedBrowse
+  let decision = forcedBrowse
     ? { action: 'wake', prompt: '（现在，去看一眼 B 站首页在推什么。）', template: { id: 'manual-browse' } }
     : plan(model, config, counts, events, { squeeze: gapSqueeze(gapSinceLastWake(events)) })
-  if (decision.action !== 'wake') return { ok: false, why: decision.why ?? 'no candidate' }
   const log = deps.log ?? (() => {})
+  // 2026-10-31（用户 m02943 / m03076）：手动点叫醒，卡池空了也照醒。
+  //
+  // 原来的行为是「手动也叫不动」：plan() 里除了当天配额，还有模板冷却和 cond，
+  // 手动这条路只把 counts 清零，冷却和 cond 一样要过。于是 stage 1 那五张卡
+  // 一旦都出不来（once 用过、cond 不满足、冷却没到），点多少次都返回
+  // 「没有满足条件的事件模板（今天不打扰）」——人明明站在门口按了铃，
+  // 里面却回一句「今天没什么事」，这是**明确的人工请求被机器挡回去**。
+  //
+  // 所以：配额照旧（那是「今天该不该自己醒」，手动不该突破），但卡池空不再是拒绝理由。
+  // 给她的不是一张卡，是一句「今天没有待办」——不派活，也不假装有事发生
+  // （2026-10-29 m01296 B「叫醒仅仅只是叫醒」的延续）。
+  if (decision.action === 'quiet') {
+    const why = decision.why || '卡池空'
+    // 用一个不在 CATALOG 里的 id：`fired:manual-idle` 落盘也无害，
+    // isSpent 只按卡片的 id 查，这张卡不存在，于是谁也占不到冷却。
+    decision = {
+      action: 'wake',
+      prompt: '（现在没有待办。这一轮是你自己的——想做什么就做什么，也可以什么都不做。）',
+      template: { id: 'manual-idle' },
+    }
+    log(`手动叫醒：${why}，照醒，不派活`)
+  }
+  if (decision.action !== 'wake') return { ok: false, why: decision.why ?? 'no candidate' }
   let sessionId = deps.sessionId
   if (!sessionId) {
     sessionId = await talkSessionId(ctx, { root, log }).catch(() => '')
