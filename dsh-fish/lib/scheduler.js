@@ -206,7 +206,7 @@ export function startScheduler(ctx, deps = {}) {
     // turn/end 一直不来就最迟 WAKE_TIMEOUT_MS 关上。
     const releaseWake = holdWake()
     setTimeout(releaseWake, WAKE_TIMEOUT_MS).unref?.()
-    watchTurnEnd(ctx, sessionId, () => {
+    const watcher = watchTurnEnd(ctx, sessionId, () => {
       releaseWake()
       clearWakeSection()
       try {
@@ -237,8 +237,11 @@ export function startScheduler(ctx, deps = {}) {
       log('proactive', `开了一次空手回合（概率 ${st.chance.toFixed(2)}）`)
       return true
     } catch (err) {
-      // 没送进去就没有这一轮，窗口当场关上
+      // 没送进去就没有这一轮：处境和窗口当场收掉，监听也摘掉，
+      // 不然要等到别的哪一轮结束才清，那一轮开头还挂着这次的处境（跟 wake() 失败时一样）
+      clearWakeSection()
       releaseWake()
+      try { watcher.off?.() } catch { /* ignore */ }
       throw err
     } finally {
       clearTimeout(kill)
