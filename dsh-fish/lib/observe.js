@@ -11,7 +11,7 @@
  */
 
 import { readEvents, rootDir, paths, readDaily, listDiary, readOwner } from './store.js'
-import { loadConfig, updateConfig, configFileInfo, dateKey, validateToolNames } from './settings.js'
+import { loadConfig, updateConfig, configFileInfo, dateKey, validateToolNames, sanitizeToolNames } from './settings.js'
 import { deriveSelf, consistency, novelty } from './derive.js'
 // 记忆体检（0.7.6，2026-10-30 用户 m00342）：只读诊断，不算分、不写盘。
 import { examine } from './health.js'
@@ -387,6 +387,11 @@ export function registerObserve(ctx, deps = {}) {
         const body = await readBody(req)
         let patch
         try { patch = JSON.parse(body || '{}') } catch { return send(res, 400, { error: 'body 不是合法 JSON' }) }
+        // strictTools 是客户端「手动点保存白名单」这一条路带的标记，不是设置项：
+        // 它在顶层白名单校验之前摘掉，免得被当成「这一版还不支持保存」的键拒掉。
+        // 语义：带它 = 用户刚敲完字、坏名字必须当场拦；不带 = 页面自动保存，丢掉坏名字照存。
+        const strictTools = patch.strictTools === true
+        delete patch.strictTools
         // 白名单：只允许改"环境"，不允许任何指向她本人的键
         // chat/memory 是 2026-10-23 加的：一个是会话轮换阈值，一个是她能背多少字。
         // 两个都不是性格，但必须在这里登记，否则观测台「保存」会被 400 挡回来。
@@ -414,18 +419,43 @@ export function registerObserve(ctx, deps = {}) {
           return send(res, 400, { error: `这一版还不支持保存：${bad.join('、')}` })
         }
         // 白名单必须真的存在（2026-10-24）：宿主 restrict 遇到不认识的名字会抛错，
-        // 整条收窄当场失效、她退回全量工具面。宁可不存，也不留一个拼错的字母。
+        // 整条收窄当场失效、她退回全量工具面。所以坏名字绝不能写进 config。
+        //
+        // 但「不许写坏名字」不等于「整张表都不许存」（2026-10-31，issue #14 @ming-fish）：
+        // 设置页的自动保存是**整表提交**，用户 config.json 里留着一个早就没有的工具名
+        // （他那边是裸的 `delete`），于是改任何一个开关都 400，而界面上那句提示还指着
+        // 「插件这一版还没接上它」——方向完全错了。
+        //
+        // 现在分两条路：
+        //   · 用户在输入框里敲完点「保存」→ 带 strictTools，坏名字当场 400，得说清打错了；
+        //   · 页面自动保存（整表回传盘上的旧名单）→ 丢掉坏名字、其余照常存，把丢掉的回给界面。
+        // 「不许把坏名字写进 config」这条底线两条路都守住了：写进去的永远只有干净那份。
+        let droppedTools = []
         if (patch.tools && patch.tools.allow !== undefined) {
-          const check = validateToolNames(patch.tools.allow, knownToolNames(ctx))
-          if (!check.ok) {
-            // 同上：这条也是「整张表都没存进去」的静默失败源。
-            logLine('warn', ['/config 保存被工具名校验挡回：', `不存在的名字 ${check.unknown.join('、')}`], root)
-            return send(res, 400, {
-              error: `这些工具名不存在：${check.unknown.join('、')}`,
-              unknown: check.unknown,
-            })
+          if (strictTools) {
+            const check = validateToolNames(patch.tools.allow, knownToolNames(ctx))
+            if (!check.ok) {
+              logLine('warn', ['/config 保存被工具名校验挡回：', `不存在的名字 ${check.unknown.join('、')}`], root)
+              return send(res, 400, {
+                error: `这些工具名不存在：${check.unknown.join('、')}`,
+                unknown: check.unknown,
+              })
+            }
+            patch.tools.allow = check.names
+          } else {
+            const clean = sanitizeToolNames(patch.tools.allow, knownToolNames(ctx))
+            patch.tools.allow = clean.names
+            droppedTools = clean.dropped
+            if (droppedTools.length) {
+              // 留痕：这条以前是静默失败源（一句「没存上」，整表都没进去），现在改成
+              // 「丢了名字但其余存下去了」，事后得能查是谁拖累的。
+              logLine('warn', [
+                '/config 里的工具名在这台机器上不存在，已跳过：',
+                droppedTools.join('、'),
+                `保留 ${clean.names.length} 个`,
+              ], root)
+            }
           }
-          patch.tools.allow = check.names
         }
         const before = await loadConfig(root).catch(() => null)
         const next = await updateConfig(patch, root)
@@ -443,7 +473,7 @@ export function registerObserve(ctx, deps = {}) {
             `by=${Object.keys(patch).join(',')}`,
           ], root)
         }
-        return send(res, 200, { ok: true, config: next })
+        return send(res, 200, { ok: true, config: next, droppedTools })
       }
       send(res, 405, { error: 'method not allowed' })
     }],

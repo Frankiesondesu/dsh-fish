@@ -284,3 +284,84 @@ test('own 层的 ops_* 能存进白名单，且 /tools 会说明「收窄挡不�
     await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
   }
 })
+
+test('config 里留着一个早就不存在的工具名，不该让整页设置都存不进去（2026-10-31 issue #14）', async () => {
+  // 用户那台机器：config.json 的 tools.allow 里有个裸的 `delete`（0.8.1）。
+  // 设置页的自动保存是**整表提交**，于是改任何一个开关都会 400，横幅还说是
+  // 「插件这一版还没接上它」——方向完全错了，而且他得手动翻进白名单框删名字才能解锁。
+  const root = await mkdtemp(join(tmpdir(), 'fish-p5f-'))
+  try {
+    rememberFromView({
+      restrictableNames: new Set([...HER_TOOLS]),
+      visible: new Map([...HER_TOOLS.map((n) => [n, {}])]),
+    })
+    const ctx = fakeCtx(root)
+    ctx.cfg.connection = { requestRejection: () => null }
+    registerObserve(ctx, { root })
+    const config = ctx.routes.find((r) => String(r.path || '').endsWith('/config'))
+
+    const post = async (payload) => {
+      const body = JSON.stringify(payload)
+      const req = {
+        method: 'POST',
+        url: '/dsh-fish/config',
+        headers: { 'content-type': 'application/json' },
+        on: (ev, fn) => { if (ev === 'data') fn(Buffer.from(body, 'utf8')); if (ev === 'end') fn() },
+      }
+      let status = 0
+      let out = null
+      await config.handler(req, {
+        writeHead: (s) => { status = s },
+        end: (s) => { out = JSON.parse(s || '{}') },
+        setHeader: () => {},
+      })
+      return { status, out }
+    }
+
+    // 整表提交（buildConfig 的形状），白名单里混一个这台机器上没有的名字 + 改一个无关设置
+    const { status, out } = await post({
+      tools: { restrict: true, allow: ['delete', 'read_image'] },
+      wakesPerDay: 3,
+    })
+    assert.equal(status, 200, `不该整表拒掉：${JSON.stringify(out)}`)
+    assert.deepEqual(out.config.tools.allow, ['read_image'], '坏名字丢掉，好的留下')
+    assert.deepEqual(out.droppedTools, ['delete'], '丢掉了哪些要原样告诉界面')
+    assert.equal(out.config.wakesPerDay, 3, '同一张表里别的设置必须照常存进去')
+  } finally {
+    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
+  }
+})
+
+test('整张表全是坏名字时也只是白名单清空，不报错', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'fish-p5g-'))
+  try {
+    rememberFromView({
+      restrictableNames: new Set([...HER_TOOLS]),
+      visible: new Map([...HER_TOOLS.map((n) => [n, {}])]),
+    })
+    const ctx = fakeCtx(root)
+    ctx.cfg.connection = { requestRejection: () => null }
+    registerObserve(ctx, { root })
+    const config = ctx.routes.find((r) => String(r.path || '').endsWith('/config'))
+    const body = JSON.stringify({ tools: { restrict: true, allow: ['delete', 'remove'] } })
+    const req = {
+      method: 'POST',
+      url: '/dsh-fish/config',
+      headers: { 'content-type': 'application/json' },
+      on: (ev, fn) => { if (ev === 'data') fn(Buffer.from(body, 'utf8')); if (ev === 'end') fn() },
+    }
+    let status = 0
+    let out = null
+    await config.handler(req, {
+      writeHead: (s) => { status = s },
+      end: (s) => { out = JSON.parse(s || '{}') },
+      setHeader: () => {},
+    })
+    assert.equal(status, 200)
+    assert.deepEqual(out.config.tools.allow, [])
+    assert.deepEqual(out.droppedTools, ['delete', 'remove'])
+  } finally {
+    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
+  }
+})
+

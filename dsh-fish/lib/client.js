@@ -387,6 +387,10 @@ window.__ModuleLoader__.load({
       // 失败是一个要处理的状态，放在页签栏上方，一句人话 + 一行技术信息，自己点掉。
       // 尤其不能让失败去占「改完就生效」那条说明的位置——两句摆在一起自相矛盾。
       const [saveFail, setSaveFail] = useState('')
+      // 保存时被跳过的工具名（2026-10-31，issue #14 @ming-fish）。
+      // 服务端不再因为一个「这台机器上没有的名字」把整张表拒掉，而是丢掉它、其余照存。
+      // 丢掉的东西必须说出来——否则用户以为自己设的还在，实际悄悄少了一个。
+      const [droppedTools, setDroppedTools] = useState([])
       const savedTimer = useRef(null)
       const flashSaved = () => {
         setAutoNote(`已保存 ${new Date().toTimeString().slice(0, 8)}`)
@@ -765,8 +769,18 @@ window.__ModuleLoader__.load({
         if (bad) { setSaveFail(`「${bad}」这个数不在允许范围里，所以没有写进去。`); return }
         const t = setTimeout(async () => {
           try {
-            await jpost('/config', buildConfig())
+            const r = await jpost('/config', buildConfig())
             lastSaved.current = cfgSig
+            // 服务端丢掉了几个「这台机器上不存在」的名字（2026-10-31 issue #14）：
+            //   · 把 cleaned 名单收回来，否则下一次整表提交又带着它、每次都白丢一遍；
+            //   · 名字说出来，别让用户以为自己设的还在。
+            //   · 只改「已存名单」，不动输入框里的草稿——他可能正在那儿打字。
+            const gone = Array.isArray(r?.droppedTools) ? r.droppedTools.filter(Boolean) : []
+            if (gone.length) {
+              const kept = Array.isArray(r?.config?.tools?.allow) ? r.config.tools.allow.map(String) : []
+              setToolsAllowSaved(kept)
+              setDroppedTools(gone)
+            }
             flashSaved()
           } catch (e) { setSaveFail(e.message) }
         }, 700)
@@ -796,7 +810,10 @@ window.__ModuleLoader__.load({
           // 这点必须说出来，否则用户以为「过了校验」就等于「名字一定存在」。
           const onlyShape = !known || !known.length
           const before = toolsAllowSaved.length
-          await jpost('/config', { tools: { restrict: Boolean(toolsRestrict), allow: check.names } })
+          // strictTools：这是用户刚在输入框里敲完点的「保存」，坏名字要当场拦下来。
+          // 页面自动保存走的是另一条（不带这个标记）：那边丢掉坏名字、其余照存，
+          // 因为回传的是盘上已有的旧名单，用户没在编辑它（2026-10-31 issue #14）。
+          await jpost('/config', { tools: { restrict: Boolean(toolsRestrict), allow: check.names }, strictTools: true })
           setToolsAllowSaved(check.names)
           await load()
           const delta = check.names.length - before
@@ -3563,11 +3580,30 @@ window.__ModuleLoader__.load({
         note ? h('pre', { className: 'ok' }, note) : null,
         // 保存回执只是确认「存到了」，不占页签里的说明位（2026-10-29 用户）。
         autoNote ? h('p', { className: 'ok', style: { margin: '0 0 8px' } }, autoNote) : null,
+        // 保存时被跳过的工具名（2026-10-31 issue #14）：和失败框分开——
+        // 设置**存下去了**，只是名单里少了几个名字。悄悄少一个是更大的问题，所以必须说出来。
+        droppedTools.length
+          ? h('div', { className: 'card', style: { margin: '0 0 10px', borderLeft: '3px solid currentColor' } },
+              h('div', null, `白名单里有 ${droppedTools.length} 个名字在这台机器上不存在，已经跳过：${droppedTools.join('、')}`),
+              h('div', { className: 'dim', style: { marginTop: '4px' } }, '其它设置都存进去了。这些名字可能是以前装的插件留下的，也可能是拼错了。'),
+              h('div', { className: 'row', style: { marginTop: '6px' } },
+                h('button', {
+                  onClick: () => {
+                    // 名单里已经没有被丢掉的名字了（服务端存的就是干净那份），
+                    // 这里只是把输入框草稿里可能还留着的字一起抹掉，然后收起这条提示。
+                    const gone = new Set(droppedTools.map((n) => String(n)))
+                    const keep = parseToolNames(toolsAllowText).filter((n) => !gone.has(n))
+                    setToolsAllowText(keep.join(', '))
+                    setDroppedTools([])
+                  },
+                }, '从名单里清掉这些名字'),
+                h('button', { style: { marginLeft: '8px' }, onClick: () => setDroppedTools([]) }, '知道了')))
+          : null,
         // 保存失败是一个要处理的状态，不是提示：一句人话先说清「不是你填错了」，
         // 技术信息另起一行留给开发者，自己点掉。放在页签栏上方，不混进设置项里。
         saveFail
           ? h('div', { className: 'err', style: { margin: '0 0 10px' } },
-              h('div', null, '这一项没存上。可能是插件这一版还没接上它——不是你填错了，改别的照样会存；重启应用再试一次。'),
+              h('div', null, '这一项没存上。不是你填错了——已经保存的内容没丢，调整之后再改一次就会重试；实在不行重启应用看看。'),
               h('div', { className: 'dim', style: { marginTop: '4px' } }, `技术信息：${saveFail}`),
               h('div', { className: 'row', style: { marginTop: '6px' } },
                 h('button', { onClick: () => setSaveFail('') }, '知道了')))

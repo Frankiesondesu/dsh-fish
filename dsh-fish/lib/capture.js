@@ -67,7 +67,7 @@ export function registerCapture(ctx, deps = {}) {
         // 「我变成了什么样」可以凭空写——这正是叙事漂移的入口。
         '写 narration（你对自己整体的说法）时，也要用 refs 指向 her_recall 翻到的那几条 id；' +
         '真的没想清楚，就直接写「我没想清楚」，那句也算数。' +
-        '这个工具不会告诉你你的任何状态，也不会返回你的设定。如果这次没什么想说的，就不要调用。',
+        '这个工具不会告诉你你的任何状态，也不会返回你的设定。这会儿有想留下的就留下；确实没有，不写也行。',
       // 必须 toJsonSchema：简写 DSL 直接发出去会被 provider 拒
       // （"schema must be a JSON Schema of 'type: object', got 'type: null'"）
       parameters: toJsonSchema({

@@ -46,7 +46,7 @@ import { logBoot, makeLogger } from './log.js'
 export const name = 'dsh-fish'
 
 /** 版本号：只用于日志导出（排查时第一件事是确认跑的是哪一版）。 */
-export const VERSION = '0.8.2'
+export const VERSION = '0.8.3'
 
 // ⚠️ 一个数组写全，不要拆成对象
 // 2026-10-30（m02961）：`userQuestions` **不再写进 inject**。写进 inject 的东西缺一个，
@@ -352,7 +352,9 @@ export function apply(ctx, baseConfig = {}) {
         ...(devModeSync(root) ? [() => registerDream(ctx, { root, tenant: tenancy })] : []),
         // 0.8.1 本机实验（2026-10-30 m04610）：主动说话——她自己判断有没有话想说。
         // 同样只在 .dev 下注册；公开版没有 her_say，也没有空手回合。
-        ...(devModeSync(root) ? [() => registerProactive(ctx, { root, log: (...a) => logger.info(...a) })] : []),
+        // 2026-10-30 真机：这里原来只有 { root, log }，guardWrite 拿到 undefined 的 state，
+        // checkCaller(undefined) 每次都判「不在这个家」；写入守卫要的是 tenancy。
+        ...(devModeSync(root) ? [() => registerProactive(ctx, { root, tenant: tenancy, log: (...a) => logger.info(...a) })] : []),
       ]) {
         try {
           const d = reg()

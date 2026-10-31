@@ -184,7 +184,7 @@ export async function sayToHer(ctx, text, deps = {}) {
       : []),
     ...(watchText ? [watchText, ''] : []),
     ...(lengthBudget(config?.chat?.replyChars) ? [`（${lengthBudget(config?.chat?.replyChars)}）`, ''] : []),
-    '（你想回就回。可以用 growth_commit 把你想说的留下来；不想说也可以不说。）',
+    '先把话回给他。回完了，如果这一轮里有什么是你自己想留下的，再用 growth_commit 记下来——不回也不记，也可以。',
   ]
   const content = ['## 这次', '', ...parts].join('\n')
 
