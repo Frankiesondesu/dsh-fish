@@ -34,6 +34,7 @@ import { noteRoot } from './homes.js'
 import { writeSelfDoc } from './selfdoc.js'
 import { claimRoot, beatRoot, releaseRoot, HEARTBEAT_MS } from './tenant.js'
 import { registerToolRestrict } from './restrict.js'
+import { registerSkillCatalogGuard } from './skillcatalog.js'
 // `clearWakeSection` 在 dispose 里用：它挂在 system prompt 段上，是个模块级变量，
 // 停用时不清的话下次启用会带着上一次的残留（2026-10-25）。
 import { clearWakeSection, registerIdentity } from './identity.js'
@@ -232,6 +233,17 @@ export function apply(ctx, baseConfig = {}) {
       if (typeof off === 'function') disposers.push(off)
     } catch (err) {
       logger.warn('[dsh-fish] 工具面收窄没挂上', err?.message ?? err)
+    }
+
+    // ---- 技能目录：别把两百多个技能塞进她的上下文（fork.3，2026-11-01）----
+    // 实测她那条会话里躺着两份技能目录、共 11 万字，每轮重读。工具面明明已经收窄
+    // （`skill` 不在发给她的 19 个工具里），目录照样进——宿主那个插件查的是注册表，
+    // 不看收窄后的可见面。详见 lib/skillcatalog.js 的文件头。
+    try {
+      const off = registerSkillCatalogGuard(ctx, { herDir, log: (...a) => logger.info(...a) })
+      if (typeof off === 'function') disposers.push(off)
+    } catch (err) {
+      logger.warn('[dsh-fish] 技能目录闸没挂上', err?.message ?? err)
     }
 
     // ---- 她的身份：走 system prompt，不进对话历史（2026-10-25 改）----
