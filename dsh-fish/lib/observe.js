@@ -67,6 +67,8 @@ import { looksMojibake } from './guard.js'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
 import { fileURLToPath } from 'node:url'
+// 本地通路（fork 新增，2026-11-01）：给进程外的 IM 网关一把共享密钥。
+import { randomBytes, timingSafeEqual } from 'node:crypto'
 import { ensureDataReadme } from './readme.js'
 import { rulesByLayer } from './rules.js'
 import { ruleStatus, offerHistory, pendingOffer, activeGrants } from './unlock.js'
@@ -186,6 +188,89 @@ export function registerObserve(ctx, deps = {}) {
         send(res, err?.statusCode ?? 500, { error: String(err?.message ?? err) })
       }
     }
+  }
+
+  // ---- 本地通路：给进程外的 IM 网关（fork 新增，2026-11-01）----
+  //
+  // 为什么非要另开一条：`guarded()` 走宿主 `connection.requestRejection()`，
+  // 而桌面版只有经 `dsh-app://` 自定义协议认证过的界面请求能过——
+  // 进程外来的（curl / 独立网关进程）一律 403。实测：路由确实挂在
+  // 127.0.0.1:53491/dsh-fish/*，/dsh-fish/zzz 回 404（说明路由表正常），
+  // 但 /dsh-fish/status 回 403，就是这一道栅栏挡的。
+  //
+  // 网关恰恰是"另一个进程替你递话"，绕不过去。所以这里开一条只认
+  // **回环地址 + 共享密钥**的路，它不碰宿主信任链，也不比它更宽：
+  //   · 只接受 127.0.0.1 / ::1 的连接（外面根本连不进来）
+  //   · 必须带 x-fish-key；密钥首次启动时随机生成，落在 <root>/local.key
+  // 能读到那把密钥，本身就已经能读这个数据目录了，所以不额外扩大攻击面。
+  const LOCAL_KEY_FILE = join(root, 'local.key')
+
+  function localKey() {
+    try {
+      const k = fs.readFileSync(LOCAL_KEY_FILE, 'utf8').trim()
+      if (k.length >= 32) return k
+    } catch { /* 还没有：下面生成 */ }
+    const k = randomBytes(24).toString('hex')
+    try {
+      fs.mkdirSync(root, { recursive: true })
+      fs.writeFileSync(LOCAL_KEY_FILE, k + '\n', { mode: 0o600 })
+    } catch { /* 写不下去就让这次生成的 key 只活在内存里 */ }
+    return k
+  }
+
+  /** 定长比较，别让密钥靠响应时间一位一位试出来。 */
+  function sameKey(given) {
+    const a = Buffer.from(String(given ?? ''))
+    const b = Buffer.from(localKey())
+    return a.length === b.length && timingSafeEqual(a, b)
+  }
+
+  function isLoopbackRequest(req) {
+    const addr = String(req?.socket?.remoteAddress ?? '')
+    return addr === '127.0.0.1' || addr === '::1' || addr === '::ffff:127.0.0.1'
+  }
+
+  function localOnly(handler) {
+    return async (req, res) => {
+      if (!isLoopbackRequest(req)) return send(res, 403, { error: 'loopback only' })
+      if (!sameKey(req.headers?.['x-fish-key'])) return send(res, 401, { error: 'bad key' })
+      try {
+        await handler(req, res)
+      } catch (err) {
+        send(res, err?.statusCode ?? 500, { error: String(err?.message ?? err) })
+      }
+    }
+  }
+
+  /**
+   * 递一句话给她。`/say`（界面用）和 `/local/say`（网关用）共用这一个实现，
+   * 免得两条路的行为哪天悄悄分叉。
+   */
+  async function handleSay(req, res) {
+    if (req.method !== 'POST') return send(res, 405, { error: 'method not allowed' })
+    // 带图的请求会大很多（base64 膨胀 4/3），单独给一个更高的上限
+    const raw = await readBody(req, 12_000_000)
+    let body = {}
+    try { body = JSON.parse(raw || '{}') } catch { return send(res, 400, { error: 'body 不是 JSON' }) }
+    const text = String(body.text ?? '').trim()
+
+    // 图：落盘成文件，然后只把**路径**递给她（她用 read_image 读）
+    // 不走 content block / attachment 体系——那是给附件上传用的，插件侧没有稳定入口；
+    // 而 read_image 这条路已实测可用（2026-10-23：她读出一张写着 7 的图并答「七」）。
+    let imagePath = ''
+    if (body.image) {
+      const dec = decodeBase64Image(body.image)
+      if (!dec.ok) return send(res, 400, { error: dec.why })
+      const saved = await saveImage(root, dec.buf, { prefix: 'him' })
+      if (!saved.ok) return send(res, 400, { error: saved.why })
+      imagePath = saved.path
+    }
+
+    if (!text && !imagePath) return send(res, 400, { error: 'text 不能为空' })
+    const r = await sayToHer(ctx, text, { root, imagePath, log: (...a) => console.log('[dsh-fish]', ...a) })
+    // 一律 200：请求本身是合法的，被拦下是**规则的结果**，不是接口出错。
+    // 用 503 会让观测台的 jpost 抛异常，把「这句我没递给她」变成一句技术错误。
+    send(res, 200, r)
   }
 
   const routes = [
@@ -893,32 +978,8 @@ export function registerObserve(ctx, deps = {}) {
     // ---- P3-1：对话入口 ----
     // 这是唯一一条"你说的话会进到她那里"的路由。POST { text }。
     // 返回她这一轮新写的话（可能一句都没有——允许她不回）。
-    ['/say', async (req, res) => {
-      if (req.method !== 'POST') return send(res, 405, { error: 'method not allowed' })
-      // 带图的请求会大很多（base64 膨胀 4/3），单独给一个更高的上限
-      const raw = await readBody(req, 12_000_000)
-      let body = {}
-      try { body = JSON.parse(raw || '{}') } catch { return send(res, 400, { error: 'body 不是 JSON' }) }
-      const text = String(body.text ?? '').trim()
-
-      // 图：落盘成文件，然后只把**路径**递给她（她用 read_image 读）
-      // 不走 content block / attachment 体系——那是给附件上传用的，插件侧没有稳定入口；
-      // 而 read_image 这条路已实测可用（2026-10-23：她读出一张写着 7 的图并答「七」）。
-      let imagePath = ''
-      if (body.image) {
-        const dec = decodeBase64Image(body.image)
-        if (!dec.ok) return send(res, 400, { error: dec.why })
-        const saved = await saveImage(root, dec.buf, { prefix: 'him' })
-        if (!saved.ok) return send(res, 400, { error: saved.why })
-        imagePath = saved.path
-      }
-
-      if (!text && !imagePath) return send(res, 400, { error: 'text 不能为空' })
-      const r = await sayToHer(ctx, text, { root, imagePath, log: (...a) => console.log('[dsh-fish]', ...a) })
-      // 一律 200：请求本身是合法的，被拦下是**规则的结果**，不是接口出错。
-      // 用 503 会让观测台的 jpost 抛异常，把「这句我没递给她」变成一句技术错误。
-      send(res, 200, r)
-    }],
+    // 实现在上面的 handleSay()，与本地通路 /local/say 共用。
+    ['/say', handleSay],
 
     // ---- P3-2：信箱 ----
     ['/inbox', async (req, res) => {
@@ -2077,6 +2138,27 @@ export function registerObserve(ctx, deps = {}) {
       else if (d && typeof d.dispose === 'function') disposers.push(() => d.dispose())
     } catch (err) {
       console.warn('[dsh-fish] 路由注册失败', p, err?.message ?? err)
+    }
+  }
+
+  // ---- 本地通路的两条路由（fork 新增）----
+  // 刻意**不走** guarded()：网关在进程外，过不了桌面版的 dsh-app:// 认证。
+  // 换成本地密钥，判定在 localOnly() 里，见上面的说明。
+  const localRoutes = [
+    ['/local/ping', async (req, res) => {
+      send(res, 200, { ok: true, version: deps.version ?? '', pid: process.pid })
+    }],
+    ['/local/say', handleSay],
+  ]
+
+  for (const [p, h] of localRoutes) {
+    try {
+      const d = webServer.register({ kind: 'prefix', path: PREFIX + p, handler: localOnly(h) })
+      if (typeof d === 'function') disposers.push(d)
+      else if (d && typeof d.dispose === 'function') disposers.push(() => d.dispose())
+      console.log(`[dsh-fish] 本地通路已开 ${PREFIX}${p}（密钥：${LOCAL_KEY_FILE}）`)
+    } catch (err) {
+      console.warn('[dsh-fish] 本地通路注册失败', p, err?.message ?? err)
     }
   }
 
