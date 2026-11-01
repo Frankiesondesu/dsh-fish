@@ -190,6 +190,11 @@ export const DEFAULTS = {
   // 只记「说明卡看过一遍」，不是开关——看过的不用再看，没看过的按钮先挡着。
   outing: {
     ack: false,
+    // fork.5（2026-11-01）：出门默认**关**。
+    // 出门会把她放进一个真工作区，那儿有 bash/read/write，读到的东西直接进
+    // 那条会话的上下文，插件这层给不了 debrief 标注——是整条路上唯一一处
+    // 未经标注的外来文本。要开就把它设成 true。
+    enabled: false,
   },
 
   // 观测台
@@ -329,9 +334,11 @@ export function normalizeConfig(raw = {}) {
     cfg.comment.window = validWindow(cw, DEFAULTS.comment.window)
   }
 
-  // 出门：只存一个布尔（老配置里没有这一组）
+  // 出门：只存布尔（老配置里没有这一组）
   cfg.outing = { ...DEFAULTS.outing, ...cfg.outing }
   cfg.outing.ack = Boolean(cfg.outing.ack)
+  // fork.5：默认关。只有明确写了 true 才开——老配置里没有这一项时是 false。
+  cfg.outing.enabled = cfg.outing.enabled === true
 
   // 主动说话（0.8.1 本机实验）：布尔严格化 + 数值夹紧（夹紧规则真身在 proactive.js）
   cfg.proactive = { ...DEFAULTS.proactive, ...cfg.proactive }

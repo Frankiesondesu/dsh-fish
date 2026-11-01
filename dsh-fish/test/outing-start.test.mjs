@@ -57,7 +57,11 @@ function fakeAgent(id, cwd) {
  * @param {{ create?: Function, registry?: object[], agents?: object[] }} opts
  *   `create` 模拟宿主的 `sessionController.create`：返回一条 agent（或抛错）。
  */
-function harness(root, { create = async () => fakeAgent('session-new', root), registry = [], agents = [] } = {}) {
+function harness(root, { create = async () => fakeAgent('session-new', root), registry = [], agents = [], outing = true } = {}) {
+  // fork.5（2026-11-01）：出门默认关。这些用例测的是出门流程本身，
+  // 所以显式打开；「关掉时不许出门」另有单独的用例。
+  mkdirSync(root, { recursive: true })
+  writeFileSync(join(root, 'config.json'), JSON.stringify({ outing: { enabled: outing === true } }))
   const routes = new Map()
   const prompts = []
   const created = []
@@ -326,4 +330,37 @@ test('/possession 结束：那条对话没开着时，交接句排进队列', as
   } finally {
     rmSync(root, { recursive: true, force: true })
   }
+})
+
+/**
+ * fork.5（2026-11-01）：出门默认关。
+ *
+ * 关的理由见 lib/settings.js 里 outing.enabled 那段注释：出门把她放进一个真工作区，
+ * 那儿读到的东西直接进上下文，插件这层给不了 debrief 标注。
+ * 这个用例只钉住一件事——关着的时候，点「出门」不许真的把她送出去，
+ * 而且连会话都不该建（建了就又是一次"幽灵出门"）。
+ */
+test('/outing start：出门关着时整条拦住，不建会话', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'fish-outing-off-'))
+  try {
+    mkdirSync(join(root, 'home'), { recursive: true })
+    writeFileSync(join(root, 'home', '她的身份.md'), '我是大肥鱼。\n')
+    const wsPath = join(root, 'ws1')
+    mkdirSync(wsPath, { recursive: true })
+    writeFileSync(join(root, 'events.jsonl'), line('ev_before', '2026-11-01T00:00:00.000Z'))
+
+    const h = harness(root, {
+      outing: false,
+      registry: [{ id: 'w1', path: wsPath, title: '素材' }],
+    })
+
+    const r = await h.call('POST', { action: 'start', workspaceId: 'w1' })
+    assert.equal(r.status, 409, '关着的时候要明确拒绝')
+    assert.match(String(r.json?.why ?? ''), /出门关掉了/)
+    assert.equal(h.created.length, 0, '一个会话都不该建')
+    assert.equal(h.prompts.length, 0, '一句话都不该递')
+
+    const { outings } = await readOutings(root)
+    assert.equal(outings.filter((o) => o.status === 'active').length, 0, '台账里不该留 active')
+  } finally { rmSync(root, { recursive: true, force: true }) }
 })

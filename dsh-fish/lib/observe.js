@@ -1644,6 +1644,21 @@ export function registerObserve(ctx, deps = {}) {
       }
 
       if (action === 'start') {
+        // fork.5（2026-11-01）：出门默认关掉。
+        //
+        // 为什么：出门 = 把她作为**一个真的 agent** 放进一个真工作区会话，那儿有
+        // bash / read / write，她读到的文件和网页直接进那条会话的上下文，插件这一层
+        // 拦不到，也就没法给它们立 debrief 的牌子（`debrief()` 只覆盖 browse/look
+        // 那条网），等于整条路上唯一一处"未标注的外来文本"。
+        // 出门本身不是坏设计，但它跟"只让她在自己屋里长大"这个目标冲突。
+        // 想开的时候把配置里的 outing.enabled 设成 true 就行，回家那几条路没关。
+        const outingCfg = (await loadConfig(root).catch(() => ({ config: null }))).config?.outing ?? {}
+        if (outingCfg.enabled !== true) {
+          return send(res, 409, {
+            ok: false,
+            why: '出门关掉了（配置里 outing.enabled 不是 true）。她在自己屋里就够。',
+          })
+        }
         // 出门口袋（干活模式）：一个从没写过记忆的空工作区，注入只剩骨架。
         const wantPocket = Boolean(b.pocket)
         let wsId = String(b.workspaceId ?? '').trim()
