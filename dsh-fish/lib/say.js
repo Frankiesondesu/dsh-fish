@@ -293,13 +293,18 @@ export async function sayToHer(ctx, text, deps = {}) {
     const fresh = newHerEventsSince(after.events, sinceId)
     const said = fresh.map((e) => ({ id: e.id, type: e.type, text: e.text, verdict: e.verdict ?? null }))
 
-    // 两条来源合起来才是「她这一轮说了什么」（fork.2）：
-    //   ① 会话里 assistant/message 的 text 块 —— 她实际说出口的话；
-    //   ② events.jsonl 里的 HER_TYPES —— 她主动调 growth_commit 认下来的句子。
-    // 只有 ② 时，「在吗」这种日常对话的 herReply 恒为空，网关拿不到她的回话。
+    // 两条来源（fork.2 / fork.7）：
+    //   ① 会话里 assistant/message 的 text 块 —— 她实际**说出口**的话；
+    //   ② events.jsonl 里的 HER_TYPES —— 她主动调 growth_commit 记下的判断。
+    //
+    // `herReply` 只给 ①：它是"她回了你什么"，不是"她脑子里记了什么"。
+    // 早先写成 ①+② 拼接，结果 QQ/面板里会把她记下的一条内心判断当成回话一起发出去，
+    // 读起来像她在回复里夹了一段第三人称的自我分析。
+    // ②仍单独放在 `said` 里，谁也不丢；只有她一句话都没说时才拿它兜底
+    //（老调用方、以及"她只记了没开口"的场景）。
     const spoken = speech.parts.join('\n\n').trim()
     const committed = said.map((s) => s.text).filter(Boolean).join('\n\n')
-    const herReply = [spoken, committed].filter(Boolean).join('\n\n')
+    const herReply = spoken || committed
     const spokeAny = Boolean(spoken || committed)
 
     // 信箱落盘：她开口了才重写（没开口就没必要动文件）
