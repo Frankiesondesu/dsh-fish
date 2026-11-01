@@ -32,12 +32,17 @@ import { refreshSelfDoc } from './selfdoc.js'
 import { looksLikeRewriting } from './guard.js'
 import { classifyReaction } from './refuse.js'
 import { lengthBudget } from './budget.js'
+// 她在会话里**说出口**的话（fork.2，2026-11-01）。解析逻辑与 turns.js 共用，
+// 免得同一件事两处各写一遍、哪天悄悄分叉。
+import { assistantText } from './turns.js'
 
 // 等她说完最多等这么久。一次回话通常 8–30 秒；75 秒还没结束就先把
 // 已落盘的交出去（她可能在调工具，也可能卡住了），不让人干等到超时。
 const REPLY_WAIT_MS = 75_000
 // 她自己开口的上限：一句话 2000 字由 schema 兜，这里只兜条数
 const MAX_TEXT = 4000
+// 一轮里她可能分几步说话，最多合并这么多条（与 turns.js 的 TURN_MSGS_MAX 同量级）
+const SPEECH_MAX = 5
 
 /**
  * 等这一轮真正结束（turn/end）。与 scheduler.watchTurnEnd 同源，
@@ -74,6 +79,46 @@ function waitTurnEnd(ctx, sessionId, timeoutMs) {
       if (typeof off !== 'function') off = null
     }
   })
+}
+
+/**
+ * 收她这一轮**说出口**的话（fork.2，2026-11-01）。
+ *
+ * 为什么要单开一条：`herReply` 原来只从事件流里捞 HER_TYPES——而那只在她调
+ * growth_commit 主动记一句时才写。她在对话里正常回话根本不进事件流，于是
+ * 「在吗」这种最普通的对话会返回 `herReply: ''`：网关那头永远收不到她的话，
+ * 一句话递进去、没有一句话递回来。上游 0.8.5 在 turns.js 里修过同一个坑
+ * （换会话要搬「上次说到这」时 her 永远是空串），say.js 这边漏了。
+ *
+ * 必须**在 sc.prompt 之前**挂上：assistant/message 是在这一轮进行中发出来的，
+ * 等 prompt 返回再挂就漏了。
+ *
+ * @returns {() => void} 注销函数
+ */
+function collectHerSpeech(ctx, sessionId, sink) {
+  if (typeof ctx?.on !== 'function') return () => {}
+  let off = null
+  try {
+    off = ctx.on('session/event', (session, event) => {
+      try {
+        const id = session?.header?.id ?? session?.id
+        if (id !== sessionId) return
+        if (event?.type !== 'assistant/message') return
+        if (sink.parts.length >= SPEECH_MAX) return
+        // 同一条消息可能分几步重放（interrupted / 续写会改同一个 message id）
+        const mid = String(event?.data?.message?.id ?? '')
+        if (mid) {
+          if (sink.seen.has(mid)) return
+          sink.seen.add(mid)
+        }
+        const text = assistantText(event?.data)
+        if (text) sink.parts.push(text)
+      } catch { /* 收话出错不该连累她说话 */ }
+    })
+  } catch {
+    return () => {}
+  }
+  return () => { try { off?.() } catch { /* ignore */ } }
 }
 
 // 反应只在 3 天内追：更早的那次拒绝已经翻篇了，事后再归因是编故事。
@@ -220,6 +265,10 @@ export async function sayToHer(ctx, text, deps = {}) {
   kill.unref?.()
   const t0 = Date.now()
 
+  // 她这一轮说出口的话，边跑边收（必须在 prompt 之前挂，见 collectHerSpeech）
+  const speech = { parts: [], seen: new Set() }
+  const stopSpeech = collectHerSpeech(ctx, sessionId, speech)
+
   try {
     await sc.prompt(
       { requestId: `say-${dk}-${Date.now()}`, sessionId, mode: 'queue', content: [{ type: 'text', text: content }] },
@@ -242,9 +291,19 @@ export async function sayToHer(ctx, text, deps = {}) {
     const after = await readEvents(root)
     const fresh = newHerEventsSince(after.events, sinceId)
     const said = fresh.map((e) => ({ id: e.id, type: e.type, text: e.text, verdict: e.verdict ?? null }))
-    const herReply = said.map((s) => s.text).join('\n\n')
+
+    // 两条来源合起来才是「她这一轮说了什么」（fork.2）：
+    //   ① 会话里 assistant/message 的 text 块 —— 她实际说出口的话；
+    //   ② events.jsonl 里的 HER_TYPES —— 她主动调 growth_commit 认下来的句子。
+    // 只有 ② 时，「在吗」这种日常对话的 herReply 恒为空，网关拿不到她的回话。
+    const spoken = speech.parts.join('\n\n').trim()
+    const committed = said.map((s) => s.text).filter(Boolean).join('\n\n')
+    const herReply = [spoken, committed].filter(Boolean).join('\n\n')
+    const spokeAny = Boolean(spoken || committed)
 
     // 信箱落盘：她开口了才重写（没开口就没必要动文件）
+    // 注意信箱是从 events 攒的（inbox.js 的 readInbox 只读事件流），
+    // 所以这里的判据仍是 `said`——她在对话里说的话不进信箱。
     if (said.length) {
       await writeInboxFile(root).catch(() => null)
     }
@@ -253,7 +312,7 @@ export async function sayToHer(ctx, text, deps = {}) {
     // 满了就换，旧的改名留档，原话搬几句到新会话（talkmem）。
     // 换失败不算对话失败：她还在旧会话里，只是这次没换成。
     let rotated = ''
-    let note = said.length ? '' : '她这次没说话。'
+    let note = spokeAny ? '' : '她这次没说话。'
     await addExchange(root, { me: body, her: herReply }).catch(() => {})
     const turns = await bumpTurns(root, 1)
     // A2（2026-10-30，用户 m00112）：每 hearEvery 轮，把他说的**一句原话**记下来。
@@ -275,9 +334,9 @@ export async function sayToHer(ctx, text, deps = {}) {
     }
 
     // 2026-10-29（用户 m02241）：投递成功的收尾也留一行，但压到最短。
-    // 只在「她一条都没说」时记——她开口了的话事件流里本来就有；
+    // 只在「她一个字都没说」时记——她开口了的话事件流/会话里本来就有；
     // 这里要能回答的只是「话送进去了吗、她为什么没回」。
-    if (!said.length) {
+    if (!spokeAny) {
       log?.('say: 递进去了，她这次没说话', `session=${sessionId}`, `waited=${Date.now() - t0}ms`)
     }
 
@@ -286,6 +345,9 @@ export async function sayToHer(ctx, text, deps = {}) {
       note,
       said,
       herReply,
+      // 她在会话里实际说出口的那部分（fork.2）。herReply = spoken + 她 growth_commit 记下的；
+      // 分开留着，是为了让网关能判断"她是真的回话了"还是"只留了一句判断"。
+      spoken,
       waitedMs: Date.now() - t0,
       rotated,
       // 这句话归因到她哪次拒绝上（没归因就是 null）。观测台与测试用。
@@ -293,8 +355,9 @@ export async function sayToHer(ctx, text, deps = {}) {
     }
   } catch (err) {
     log('say failed', err?.message ?? err)
-    return { ok: false, note: `没送到：${String(err?.message ?? err).slice(0, 120)}`, said: [], herReply: '' }
+    return { ok: false, note: `没送到：${String(err?.message ?? err).slice(0, 120)}`, said: [], herReply: '', spoken: '' }
   } finally {
     clearTimeout(kill)
+    stopSpeech()
   }
 }

@@ -317,3 +317,53 @@ test('对话不改写日记、不生成报告文件（说话就是说话）', as
     assert.equal(events.some((e) => String(e.text).startsWith('wake:')), false, '对话不是唤醒，不记 wake 配额')
   } finally { await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) }
 })
+
+/**
+ * fork.2（2026-11-01）：她在会话里正常回话、但**没有**调 growth_commit 时，
+ * herReply 也必须带回她说出口的那句。
+ *
+ * 真机上踩到的形状：发「在吗」进去，她明明回了「在。刚醒着…」，
+ * 接口却返回 `herReply: ''`——因为原实现只从 events.jsonl 里捞 HER_TYPES，
+ * 而那只在她主动记一句时才写。网关那头于是永远收不到她的话，一句话递进去、
+ * 没有一句话递回来。
+ */
+test('她只在会话里回话（没调 growth_commit）时，herReply 也要带回原话', async () => {
+  const root = await tmpRoot()
+  try {
+    await appendEvent({ type: 'seed', text: '起点。' }, { day: 1, stage: 1, source: 'system' }, root)
+
+    const base = fakeCtx()
+    const listeners = []
+    // 假事件总线：只用一个会话 id，跟 fakeCtx 建出来的屋子一致
+    const emit = (event) => {
+      for (const fn of [...listeners]) fn({ header: { id: 's-house' } }, event)
+    }
+    const ctx = {
+      ...base,
+      on(evt, fn) {
+        if (evt !== 'session/event') return () => {}
+        listeners.push(fn)
+        return () => {
+          const i = listeners.indexOf(fn)
+          if (i >= 0) listeners.splice(i, 1)
+        }
+      },
+    }
+    ctx.sessionController.prompt = async (req, signal) => {
+      base.calls.push({ op: 'prompt', req, signal })
+      // 同一条消息分两步重放（真机上 interrupted/续写会这样）：同一个 id 只算一次
+      const data = { message: { id: 'm-1', content: [{ type: 'reasoning', text: '想一想' }, { type: 'text', text: '在。' }] } }
+      emit({ type: 'assistant/message', data })
+      emit({ type: 'assistant/message', data })
+      // turn/end 要等 waitTurnEnd 挂上监听之后再来
+      setTimeout(() => emit({ type: 'turn/end' }), 30)
+    }
+
+    const r = await sayToHer(ctx, '在吗', { root, waitMs: 5_000 })
+    assert.equal(r.ok, true)
+    assert.deepEqual(r.said, [], '她没调 growth_commit，事件流里不该有她写的话')
+    assert.equal(r.herReply, '在。', 'herReply 必须带回她会话里说出口的那句')
+    assert.equal(r.spoken, '在。')
+    assert.equal(r.note, '', '她开口了，就不该说「她这次没说话」')
+  } finally { await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) }
+})
