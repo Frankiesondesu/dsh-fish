@@ -59,8 +59,17 @@ export function classifyMessage(data) {
   const rid = String(src.rpcId ?? '')
   if (rid && PLUGIN_RPC.test(rid)) return 'plugin'
   // 客户端（桌面/网页侧栏）打的字一定带时区——宿主从浏览器那边取的。
-  // 没有时区的 user 消息分不清是"老客户端"还是"别的插件灌的"，宁可少算一轮。
   if (src.clientTimeZone) return 'human'
+  // fork.6（2026-11-01）：没有 rpcId 的 user 消息，就是 IM 网关注入的。
+  //
+  // dsh-im-gateway 用 `createUserMessage({ content, source: { kind: 'user' } })` 投递，
+  // 既不带 rpcId 也不带 clientTimeZone。按原来的判据这会落到 'unknown'，
+  // 于是 QQ/微信里说的每一句都不涨轮、不记原话、也不触发换会话——
+  // 而那条路正是我们要接的。
+  //
+  // 判据收得很窄：**只有完全不带 rpcId** 才认。带 uuid 的那种仍按老样子算
+  // unknown（分不清是老客户端还是别的插件灌的，宁可少算一轮）。
+  if (!rid) return 'human'
   return 'unknown'
 }
 
@@ -172,6 +181,20 @@ export function registerTurns(ctx, deps = {}) {
     }
     const text = cut(messageText(data))
     if (!text) return
+    // fork.6（2026-11-01）：他在场。
+    //
+    // 这条 meta 是冷落检测（absence.js）的唯一依据，但原来只有 /say 那条路写它
+    // （say.js 里 `await appendEvent({type:'meta', text:'seen:...'})`），
+    // 侧栏打字和 IM 网关都不写。结果是：天天在 QQ 里跟她聊天，她却记不到"有人来过"，
+    // 冷落检测一路返回 no-contact-yet。
+    //
+    // 这里能安全地写，是因为 onHuman 只对真人消息触发——定时唤醒（timer）不会进来。
+    // source 必须是 'system'：schema 只允许 tool 源写 HER_TYPES，meta 写成 tool 会被拒。
+    appendEvent(
+      { type: 'meta', text: `seen:${new Date().toISOString()}` },
+      { day: 0, stage: 1, source: 'system' },
+      root,
+    ).catch(() => null)
     // 他递来一条视频（2026-10-28）：记一条事实 `hand:<日期> <bvid>`。
     // **不等于她看过**——评论闸门不认这一行，认的是 look:/watched:。
     // 只记 BV 号；短链在这一层不解析（要发网络请求，不该卡在她说话的路径上）。

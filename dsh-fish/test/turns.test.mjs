@@ -162,6 +162,10 @@ test('来源判据：真人 / 插件 / 上下文 分得清', () => {
   assert.equal(classifyMessage({}), 'context')
   // 老客户端 / 别的插件灌的：没有时区，分不清就不算——宁可少算一轮
   assert.equal(classifyMessage({ source: { kind: 'user', rpcId: 'uuid-2' } }), 'unknown')
+  // fork.6（2026-11-01）：IM 网关注入的消息既没有 rpcId 也没有时区
+  //（dsh-im-gateway 用 createUserMessage({source:{kind:'user'}})），要算人说的，
+  // 否则 QQ/微信里说的每句话都不涨轮、不记原话、也不触发换会话。
+  assert.equal(classifyMessage({ source: { kind: 'user' } }), 'human')
 })
 
 test('正文提取：真机 content 数组、老宿主 data.text 都兜得住', () => {
