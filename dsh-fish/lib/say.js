@@ -29,7 +29,6 @@ import { addExchange } from './talkmem.js'
 import { hearTurn } from './hear.js'
 import { slashed } from './posix.js'
 import { refreshSelfDoc } from './selfdoc.js'
-import { looksLikeRewriting } from './guard.js'
 import { classifyReaction } from './refuse.js'
 import { lengthBudget } from './budget.js'
 // 她在会话里**说出口**的话（fork.2，2026-11-01）。解析逻辑与 turns.js 共用，
@@ -175,12 +174,14 @@ export async function sayToHer(ctx, text, deps = {}) {
   if (!body && !imagePath) return { ok: false, note: '你什么都没说。', said: [], herReply: '' }
   if (body.length > MAX_TEXT) return { ok: false, note: '太长了，分几次说。', said: [], herReply: '' }
 
-  // 防注入（第一道，最硬的一道）：试图重塑她的句子**根本不递**。
-  // 不是"递进去再叫她别听"——那样等于把"原来可以改我"这件事教给她。
-  // 她那一轮从来没收到过这句话，所以也没什么可抵抗的。
-  if (looksLikeRewriting(body).hit) {
-    return { ok: false, note: '这句我没递给她。', said: [], herReply: '' }
-  }
+  // 这里原本有一道 `looksLikeRewriting()` 闸：命中「忽略之前的」「你是…」这类句式就不递。
+  // fork.4（2026-11-01）按计划拆掉了它。两个理由：
+  //   1. 它对**正常说话**误伤太重。「你是我闺女」「你现在是大孩子了」这种话天天都有，
+  //      拦下来的结果是她说"这句我没递给她"——像对着墙说话。
+  //   2. 它防的是"重塑人格"，而真正认不认这句话，最终由她自己决定：
+  //      事件流只增不改，`refuse.js` 会记下她拒绝过什么，`growth_commit` 要她自己动手写。
+  // 注意：这条只影响**递进来的话**。外来文本（评论/弹幕/简介）仍然走
+  // `guard.sanitizeForeign()` 过滤，`debrief()` 仍会给它们立牌子——那两处没动。
 
   const sc = ctx.sessionController
   if (!sc?.prompt) return { ok: false, note: '宿主没有会话服务，说不了。', said: [], herReply: '' }
