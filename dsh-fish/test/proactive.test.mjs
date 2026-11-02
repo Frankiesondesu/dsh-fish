@@ -119,7 +119,10 @@ test('空手回合的正文只说事实和许可，不写「你应该」', () =>
   const text = proactiveSection({ now: Date.now(), state: { idleHours: 9.5, chance: 0.3 }, material: [{ id: 'ev_a', type: 'utterance', text: '今天有点累' }], loose: [{ id: 'ev_b', text: '你问过一件事，还没答复。' }] })
   assert.match(text, /没有人跟你说话/)
   assert.match(text, /想说什么就说/)
-  assert.match(text, /他看得见/, '得说她的话有收件人，不然她以为只是记一笔')
+  assert.match(text, /他回到这个窗口就看得见/, '得说她的话有收件人，不然她以为只是记一笔')
+  // 2026-11-02 真机：原来只写「也可以再用 her_say」，她按字面理解就没记，QQ 那边什么都收不到。
+  // 两个去处必须如实说清——只写在对话里的，他不在这个窗口就看不到。
+  assert.match(text, /只有你用 her_say 记进流水的话/, '得说清「他不在窗口时，只有记进流水的才到得了他眼前」')
   assert.match(text, /什么都不做|什么都别做/)
   assert.match(text, /1–6 条/)
   assert.doesNotMatch(text, /你应该/)

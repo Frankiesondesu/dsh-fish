@@ -148,6 +148,7 @@ export function startScheduler(ctx, deps = {}) {
   // 主动说话：每小时最多掷一次骰子；skip 原因同一句只记一次，别把日志刷满。
   let lastProbe = 0
   let proactiveSkip = ''
+  let proactiveEntered = false
 
   /**
    * 开一次空手回合（她自己的回合，不是叫醒）。
@@ -161,6 +162,12 @@ export function startScheduler(ctx, deps = {}) {
 
   async function maybeProactive({ events, config, dk, now }) {
     if (!devModeSync(root)) return false
+    // 2026-11-02：这一路原来是全静默的，真机上「一条日志都没有」既可能是
+    // 没进函数、也可能是卡在下面某个 return，分不清。进门记一次就够了。
+    if (!proactiveEntered) {
+      proactiveEntered = true
+      log('proactive', '调度器已进入主动说话检查')
+    }
     if (!sweptSession) {
       try {
         const sid = await talkSessionId(ctx, { root, log })
@@ -187,9 +194,21 @@ export function startScheduler(ctx, deps = {}) {
       return false
     }
     const sc = ctx.sessionController
-    if (!sc?.prompt) return false
+    if (!sc?.prompt) {
+      if (proactiveSkip !== '拿不到 sessionController') {
+        proactiveSkip = '拿不到 sessionController'
+        log('proactive skip', '宿主没给 ctx.sessionController.prompt')
+      }
+      return false
+    }
     const sessionId = await talkSessionId(ctx, { root, log })
-    if (!sessionId) return false
+    if (!sessionId) {
+      if (proactiveSkip !== '拿不到会话 id') {
+        proactiveSkip = '拿不到会话 id'
+        log('proactive skip', '解析不出她那条会话（home.json 里的 sessionId）')
+      }
+      return false
+    }
 
     const material = recentMaterial(events, { now })
     const loose = looseEnds(events, { now })
