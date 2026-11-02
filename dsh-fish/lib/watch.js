@@ -196,6 +196,8 @@ export function registerWatch(ctx, deps = {}) {
               : []),
             posix,
             '用 read_image 读它就能看见。要在回复里贴这张图，路径就照抄上面这一行——用正斜杠。',
+            // fork.14：字幕台词（如果这条视频有字幕轨）。按画面取帧时刻对齐的几句。
+            ...(r.subsText ? ['', '画面那几个时刻的台词：', r.subsText] : []),
           ].join('\n'),
           note: '',
         }

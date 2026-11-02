@@ -258,6 +258,67 @@ export function normalizeAt(at, duration = 0) {
  * @param {string} [o.caFile] 显式 CA 包路径；给了就同时开证书校验（-tls_verify 1），只在 http(s) 时生效
  * @returns {Promise<{ok:boolean, path:string, why:string, title:string, up:string, view:number, duration:number, shots:number}>}
  */
+/** 一轮台词最多带多少字（对齐画面取帧时刻的那几句） */
+export const TRANSCRIPT_MAX_CHARS = 1600
+
+/**
+ * 从字幕轨里挑出配得上画面的话（fork.14）。
+ *
+ * 纯函数，方便测试。三条规则：
+ *   ① 优先取「画面取帧的那一刻正说着的」台词（15 秒内算对上）；
+ *   ② 一句都没对上 → 均匀抽 8 句（总比没有强）；
+ *   ③ 按时间排好、去掉重复、总量封顶。
+ */
+export function pickTranscript(lines, { times = [], maxChars = TRANSCRIPT_MAX_CHARS } = {}) {
+  const arr = (lines ?? [])
+    .map((l) => ({ t: Number(l?.t) || 0, text: String(l?.text ?? '').trim() }))
+    .filter((l) => l.text)
+    .sort((a, b) => a.t - b.t)
+  if (!arr.length) return ''
+
+  const nearest = (t) => {
+    let best = -1
+    let d = Infinity
+    for (let i = 0; i < arr.length; i++) {
+      const dd = Math.abs(arr[i].t - t)
+      if (dd < d) {
+        d = dd
+        best = i
+      }
+    }
+    return d <= 15 ? best : -1
+  }
+
+  let picked = []
+  const seenIdx = new Set()
+  for (const t of times) {
+    const i = nearest(t)
+    if (i >= 0 && !seenIdx.has(i)) {
+      seenIdx.add(i)
+      picked.push(arr[i])
+    }
+  }
+  if (!picked.length) {
+    const step = Math.max(1, Math.floor(arr.length / 8))
+    for (let i = 0; i < arr.length && picked.length < 8; i += step) picked.push(arr[i])
+  }
+
+  picked.sort((a, b) => a.t - b.t)
+  const out = []
+  const usedText = new Set()
+  let total = 0
+  for (const p of picked) {
+    if (usedText.has(p.text)) continue
+    if (total + p.text.length > maxChars) break
+    usedText.add(p.text)
+    total += p.text.length
+    const mm = Math.floor(p.t / 60)
+    const ss = String(Math.floor(p.t % 60)).padStart(2, '0')
+    out.push(`[${mm}:${ss}] ${p.text}`)
+  }
+  return out.join('\n')
+}
+
 export async function grabFrames(o = {}) {
   const root = o.root ?? rootDir()
   const bvid = String(o.bvid ?? '').trim()
@@ -396,6 +457,27 @@ export async function grabFrames(o = {}) {
     return fail('拼好的图存下来是空的（磁盘写入后被截断？）')
   }
 
+  // fork.14（2026-11-02）：把**字幕台词**也带上。
+  //
+  // 为什么：只有画面没有台词，等于给了照片不给声音——她看得到"几点的画面"，
+  // 听不到那几秒里的人在说什么。B 站字幕轨（官方 CC / AI 字幕）要登录态才能拿，
+  // 她的 cookie 就在 client 里；bili.js 的 subtitle() 早就写好了，只是从没接到 watch 上。
+  //
+  // 预算：台词按**取帧时刻对齐**挑（画面在看的正是那一刻），对不上的才均匀抽样；
+  // 总量封 1600 字——9 帧图加 1600 字台词，一轮的工具返回就不会失控。
+  // 拿不到字幕轨（多数视频没有）就是空串，调用方按没有处理；这是加餐，失败不连累画面。
+  let subsText = ''
+  if (o.subs !== false) {
+    try {
+      const sub = await client.subtitle(bvid, cid)
+      if (sub?.ok && Array.isArray(sub.data) && sub.data.length) {
+        subsText = pickTranscript(sub.data, { times })
+      }
+    } catch {
+      /* 字幕是加餐 */
+    }
+  }
+
   return {
     ok: true,
     // 交给模型的路径用正斜杠（反斜杠写进 markdown 图片会显示成「无法预览」，2026-10-26 实测）
@@ -405,8 +487,11 @@ export async function grabFrames(o = {}) {
     up: String(info.data?.up ?? ''),
     view: Number(info.data?.view) || 0,
     duration,
+    cid,
     shots: shots.length,
     // 实际取到的是哪几秒：她要核对「我看的是不是我想看的那一段」
     times: times.map((t) => Math.round(t * 10) / 10),
+    // fork.14：字幕台词（B 站字幕轨）。拿不到就是空串，调用方按没有处理。
+    subsText,
   }
 }
