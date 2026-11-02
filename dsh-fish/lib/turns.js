@@ -29,6 +29,7 @@
 import { rootDir, readEvents, appendEvent } from './store.js'
 import { loadConfig, dateKey } from './settings.js'
 import { parseWatchIntent, handText } from './intent.js'
+import { recordHandFromLink } from './hand.js'
 import { homeStatus, bumpTurns, rotateTalkSession, adoptTalkSession } from './home.js'
 import { addExchange } from './talkmem.js'
 import { logExchange } from './talklog.js'
@@ -207,6 +208,9 @@ export function registerTurns(ctx, deps = {}) {
         { day: 0, stage: 1, source: 'system' },
         root,
       ).catch(() => {})
+    } else if (want.hasVideo && want.linkOnly) {
+      // 短链要先解析成 BV 才知道是哪条。异步补记，不等它（见 hand.js）。
+      recordHandFromLink(root, text)
     }
     if (!pending || pending.sessionId !== sessionId) {
       const { events } = await readEvents(root).catch(() => ({ events: [] }))

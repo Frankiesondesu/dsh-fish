@@ -21,6 +21,7 @@
 
 import { readEvents, appendEvent, rootDir, ensureHer } from './store.js'
 import { parseWatchIntent, watchHint, handText } from './intent.js'
+import { recordHandFromLink } from './hand.js'
 import { loadConfig, dateKey } from './settings.js'
 import { deriveSelf } from './derive.js'
 import { writeInboxFile, newHerEventsSince } from './inbox.js'
@@ -228,6 +229,10 @@ export async function sayToHer(ctx, text, deps = {}) {
       { day: 0, stage: 1, source: 'system' },
       root,
     ).catch(() => {})
+  } else if (want.hasVideo && want.linkOnly) {
+    // 手机分享出来的多半是 b23.tv 短链：先记下"他递过一条"，解析成 BV 再补一行。
+    // 异步、不 await——解析要发网络请求，不能卡在她回话前面。
+    recordHandFromLink(root, body)
   }
 
   const parts = [
