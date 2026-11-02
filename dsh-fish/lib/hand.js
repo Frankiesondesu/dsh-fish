@@ -18,36 +18,49 @@ import { dateKey } from './settings.js'
 import { handText } from './intent.js'
 
 // b23.tv / bili2233.cn 是 B 站自己的短链域名；带不带 https:// 都认。
-const LINK_RE = /(?:https?:\/\/)?(?:b23\.tv|bili2233\.cn)\/[0-9A-Za-z]+/i
+const LINK_RE = /(?:https?:\/\/)?(?:b23\.tv|bili2233\.cn)\/[0-9A-Za-z]+/gi
 
-/** 他这条消息里的短链（没有就是空串）。 */
+/** 他这条消息里的第一条短链（没有就是空串）。 */
 export function shortLinkOf(text) {
-  const m = String(text ?? '').match(LINK_RE)
-  if (!m) return ''
-  return /^https?:\/\//i.test(m[0]) ? m[0] : `https://${m[0]}`
+  return shortLinksOf(text)[0] ?? ''
+}
+
+/** 他这条消息里**所有**短链（去重，补上协议）。一条消息丢好几条链接是常事。 */
+export function shortLinksOf(text) {
+  const all = String(text ?? '').match(LINK_RE) ?? []
+  const out = all.map((u) => (/^https?:\/\//i.test(u) ? u : `https://${u}`))
+  return [...new Set(out)]
 }
 
 /**
  * 短链 → BV → 记一行 `hand:`。**不 await、不抛、不记日志噪音**。
  *
  * 只有解析出 BV 号才写：解析不出来就当这条没递过（她看的时候照常占额度）。
+ * 一条消息里几条短链就解析几条——只解析第一条的话，第二条会被当成她自己翻到的。
  */
 export function recordHandFromLink(root, text) {
-  const url = shortLinkOf(text)
-  if (!url) return
+  const urls = shortLinksOf(text)
+  if (!urls.length) return
   ;(async () => {
     try {
       const cookie = (await readOwner(root))?.cookie ?? ''
-      const r = await createClient({ cookie }).resolveUrl(url)
-      const bvid = r?.data?.bvid
-      if (!bvid) return
-      await appendEvent(
-        { type: 'meta', text: handText(dateKey(), bvid) },
-        { day: 0, stage: 1, source: 'system' },
-        root,
-      )
+      const client = createClient({ cookie })
+      for (const url of urls) {
+        try {
+          const r = await client.resolveUrl(url)
+          const bvid = r?.data?.bvid
+          if (!bvid) continue
+          await appendEvent(
+            { type: 'meta', text: handText(dateKey(), bvid) },
+            { day: 0, stage: 1, source: 'system' },
+            root,
+          )
+        } catch {
+          /* 这一条解析不了就跳过，别拖累其它几条 */
+        }
+      }
     } catch {
-      /* 解析不了就当没递过 */
+      /* 连 client 都建不起来：当没递过 */
     }
   })()
 }

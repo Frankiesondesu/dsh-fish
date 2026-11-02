@@ -28,17 +28,36 @@ export function vsSrcDefault() {
 }
 
 let modCache = null
+let lastWhy = ''
+
+/**
+ * 上一次加载失败的原因（给 watch.js 写进日志用）。
+ *
+ * fork.21（2026-11-02）：原来 catch 是空的，加载失败一律回报「没找到外挂」——
+ * 而真正的原因可能是"路径是空串""依赖缺了""导出名改了"，三种完全不同的毛病
+ * 在日志里长得一模一样。真机上 vs 从来没跑起来过，就是被这句话盖住的。
+ */
+export const storyboardWhy = () => lastWhy
+
 /** 动态加载 vs 的 pipeline 模块；不存在返回 null（按路径缓存） */
 export async function loadStoryboard(vsPath) {
-  const base = String(vsPath ?? vsSrcDefault()).replace(/\/+$/, '')
+  // 2026-11-02（fork.21）：`vsPath: ''` 是**默认值**（settings.js 写着"空 = 自动找"），
+  // 但这里原来只认 null/undefined——`String('' ?? default)` 得到的是空串，
+  // join('', 'pipeline.js') 于是变成相对路径 'pipeline.js'，从 vs.js 旁边找，
+  // 必然找不到。结果：**默认配置下 vs 一次都没跑起来过**，每次都静默退回九帧。
+  const raw = String(vsPath ?? '').trim()
+  const base = (raw || vsSrcDefault()).replace(/\/+$/, '')
   if (modCache?.path === base) return modCache.mods
   let mods = null
+  let why = ''
   try {
     const mod = await import(pathToFileURL(join(base, 'pipeline.js')).href)
     if (mod?.runStoryboard && mod?.saveStoryboards) mods = mod
-  } catch {
-    mods = null
+    else why = `导出了 ${Object.keys(mod ?? {}).slice(0, 6).join('/') || '（空）'}，但没有 runStoryboard/saveStoryboards`
+  } catch (err) {
+    why = String(err?.message ?? err)
   }
+  lastWhy = why
   modCache = { path: base, mods }
   return mods
 }
@@ -59,7 +78,7 @@ export async function loadStoryboard(vsPath) {
 export async function watchViaStoryboard(o = {}) {
   const mod = o.impl ?? (await loadStoryboard(o.vsPath))
   if (!mod?.runStoryboard || !mod?.saveStoryboards) {
-    return { ok: false, why: '没找到 dsh-video-storyboard 外挂' }
+    return { ok: false, why: `没找到 dsh-video-storyboard 外挂${lastWhy ? `（${lastWhy}）` : ''}` }
   }
 
   const opts = {

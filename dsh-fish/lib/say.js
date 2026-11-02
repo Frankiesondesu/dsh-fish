@@ -20,7 +20,7 @@
  */
 
 import { readEvents, appendEvent, rootDir, ensureHer } from './store.js'
-import { parseWatchIntent, watchHint, handText } from './intent.js'
+import { parseWatchIntent, watchHint, handText, extractBvids } from './intent.js'
 import { recordHandFromLink } from './hand.js'
 import { loadConfig, dateKey } from './settings.js'
 import { deriveSelf } from './derive.js'
@@ -223,15 +223,19 @@ export async function sayToHer(ctx, text, deps = {}) {
   // （bridge → 这个文件）。结果是"他递过来的视频"在手机上递的一次都记不上，
   // watch.js 里那条"他给的不占额度"就永远不成立。
   // **仍然不等于她看过**：评论闸门认的是 look:/watched:，不认这一行。
-  if (want.hasVideo && want.bvid) {
-    appendEvent(
-      { type: 'meta', text: handText(dateKey(), want.bvid) },
-      { day: 0, stage: 1, source: 'system' },
-      root,
-    ).catch(() => {})
-  } else if (want.hasVideo && want.linkOnly) {
-    // 手机分享出来的多半是 b23.tv 短链：先记下"他递过一条"，解析成 BV 再补一行。
-    // 异步、不 await——解析要发网络请求，不能卡在她回话前面。
+  if (want.hasVideo) {
+    // fork.21：一条消息里丢两条链接是常事，**每一条都要记**。
+    // 原来只记第一条（extractBvid 只取第一个），第二条就被当成她自己翻到的，
+    // 照旧占额度——20:44 真机就是这样。
+    for (const bv of extractBvids(body)) {
+      appendEvent(
+        { type: 'meta', text: handText(dateKey(), bv) },
+        { day: 0, stage: 1, source: 'system' },
+        root,
+      ).catch(() => {})
+    }
+    // 短链另走异步解析（同一条消息里既有 BV 又有短链也照顾得到）。
+    // 不 await——解析要发网络请求，不能卡在她回话前面。
     recordHandFromLink(root, body)
   }
 

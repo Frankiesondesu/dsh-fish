@@ -50,6 +50,19 @@ export function extractBvid(text) {
 }
 
 /**
+ * 抠出**所有** BV 号（去重，保持出现顺序）。
+ *
+ * fork.21（2026-11-02）：`extractBvid` 只取第一个，是为了给"他这条消息里说的是哪条"
+ * 一个明确答复（见下面的注释）。但**记账不能只用第一个**——他一次丢两条链接过来，
+ * 第二条就不会被记成"他递的"，她去看的时候照旧占额度。
+ * 20:44 真机就是这样：一条消息两个 BV，只有第一条免了额度。
+ */
+export function extractBvids(text) {
+  const all = String(text ?? '').match(BV_RE) ?? []
+  return [...new Set(all)]
+}
+
+/**
  * @param {string} text 他说的那句话
  * @returns {{hasVideo:boolean, bvid:string, linkOnly:boolean, intent:'must'|'maybe'|'none', why:string}}
  */

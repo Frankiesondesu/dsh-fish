@@ -28,7 +28,7 @@
 
 import { rootDir, readEvents, appendEvent } from './store.js'
 import { loadConfig, dateKey } from './settings.js'
-import { parseWatchIntent, handText } from './intent.js'
+import { parseWatchIntent, handText, extractBvids } from './intent.js'
 import { recordHandFromLink } from './hand.js'
 import { homeStatus, bumpTurns, rotateTalkSession, adoptTalkSession } from './home.js'
 import { addExchange } from './talkmem.js'
@@ -202,13 +202,15 @@ export function registerTurns(ctx, deps = {}) {
     // 只记 BV 号；短链在这一层不解析（要发网络请求，不该卡在她说话的路径上）。
     // fork.20（2026-11-02）：格式挪进 intent.js 的 handText——say.js 那条路（QQ）也要写它。
     const want = parseWatchIntent(text)
-    if (want.hasVideo && want.bvid) {
-      appendEvent(
-        { type: 'meta', text: handText(dateKey(), want.bvid) },
-        { day: 0, stage: 1, source: 'system' },
-        root,
-      ).catch(() => {})
-    } else if (want.hasVideo && want.linkOnly) {
+    if (want.hasVideo) {
+      // fork.21：一条消息里几条视频就记几条（原来只记第一条，见 say.js 同一处注释）。
+      for (const bv of extractBvids(text)) {
+        appendEvent(
+          { type: 'meta', text: handText(dateKey(), bv) },
+          { day: 0, stage: 1, source: 'system' },
+          root,
+        ).catch(() => {})
+      }
       // 短链要先解析成 BV 才知道是哪条。异步补记，不等它（见 hand.js）。
       recordHandFromLink(root, text)
     }

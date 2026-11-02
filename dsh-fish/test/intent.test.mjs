@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { extractBvid, parseWatchIntent, watchHint, handText, isHanded } from '../lib/intent.js'
+import { extractBvid, extractBvids, parseWatchIntent, watchHint, handText, isHanded } from '../lib/intent.js'
 import { renderSelfDoc } from '../lib/selfdoc.js'
 import { deriveSelf } from '../lib/derive.js'
 
@@ -103,4 +103,16 @@ test('isHanded：只认 meta 里的 hand:，且只认那一条', () => {
 test('isHanded：不带日期窗口——他递过一次，这条就一直是"他给的"', () => {
   const events = [{ type: 'meta', text: `hand:2026-10-01 ${BV}` }]
   assert.equal(isHanded(events, BV), true)
+})
+
+// fork.21（2026-11-02 真机 20:44）：他一条消息丢了两条链接，只有第一条被记成"他递的"，
+// 第二条她去看的时候照旧占了额度。记账必须按"条"来，不能按"消息"来。
+test('extractBvids：一条消息里几条就返回几条，去重且保序', () => {
+  const s = 'https://www.bilibili.com/video/BV1uQ8E6LE6G/ https://www.bilibili.com/video/BV1LExL6iE2Y/ 你看这两个？'
+  assert.deepEqual(extractBvids(s), ['BV1uQ8E6LE6G', 'BV1LExL6iE2Y'])
+  assert.deepEqual(extractBvids('BV1uQ8E6LE6G 和 BV1uQ8E6LE6G 是同一条'), ['BV1uQ8E6LE6G'])
+  assert.deepEqual(extractBvids('没链接'), [])
+  assert.deepEqual(extractBvids(null), [])
+  // extractBvid 仍然只取第一条（给"他这次说的是哪条"一个明确答复）
+  assert.equal(extractBvid(s), 'BV1uQ8E6LE6G')
 })
