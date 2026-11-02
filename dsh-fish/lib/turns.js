@@ -31,6 +31,7 @@ import { loadConfig, dateKey } from './settings.js'
 import { parseWatchIntent } from './intent.js'
 import { homeStatus, bumpTurns, rotateTalkSession, adoptTalkSession } from './home.js'
 import { addExchange } from './talkmem.js'
+import { logExchange } from './talklog.js'
 import { newHerEventsSince } from './inbox.js'
 import { HER_TYPES } from './schema.js'
 import { refreshSelfDoc } from './selfdoc.js'
@@ -251,6 +252,14 @@ export function registerTurns(ctx, deps = {}) {
       const committed = picked.map((e) => String(e.text ?? '').trim()).filter(Boolean).join('\n\n')
       const her = [spoken, committed].filter(Boolean).join('\n\n')
       await addExchange(root, { me: p.msgs.join('\n'), her }).catch(() => {})
+      // fork.11：侧栏里说的这些也进账本——不然她从 QQ 那条路能翻到对话，
+      // 从侧栏说的就翻不到，两边的"过去"会不一样厚。
+      await logExchange(root, {
+        me: p.msgs.join('\n'),
+        her: spoken,
+        day: growthDay(after.events),
+        stage: 1,
+      }).catch(() => {})
       const turns = await bumpTurns(root, 1)
       const { config } = await loadConfig(root).catch(() => ({ config: null }))
       // A2（2026-10-30，用户 m00112）：每 hearEvery 轮，把他说的**一句原话**记下来。

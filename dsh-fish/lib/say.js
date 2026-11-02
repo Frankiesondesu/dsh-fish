@@ -27,6 +27,7 @@ import { writeInboxFile, newHerEventsSince } from './inbox.js'
 import { bumpTurns, rotateTalkSession, talkSessionId } from './home.js'
 import { addExchange } from './talkmem.js'
 import { hearTurn } from './hear.js'
+import { logExchange } from './talklog.js'
 import { slashed } from './posix.js'
 import { refreshSelfDoc } from './selfdoc.js'
 import { classifyReaction } from './refuse.js'
@@ -320,6 +321,15 @@ export async function sayToHer(ctx, text, deps = {}) {
     let rotated = ''
     let note = spokeAny ? '' : '她这次没说话。'
     await addExchange(root, { me: body, her: herReply }).catch(() => {})
+    // fork.11：把这一轮的原话落进账本——她要能翻到「我们说过什么」，
+    // 而不只是「我当时怎么想」。只存她**说出口**的那句，不存她写下的判断。
+    await logExchange(root, {
+      me: body,
+      her: spoken,
+      day: model.day,
+      stage: model.stage,
+      sessionId: talkSessionId(ctx),
+    }).catch(() => {})
     const turns = await bumpTurns(root, 1)
     // A2（2026-10-30，用户 m00112）：每 hearEvery 轮，把他说的**一句原话**记下来。
     // 没写字只发了图时 body 为空，pickHearSentence 会自己跳过。

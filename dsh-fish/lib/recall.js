@@ -53,7 +53,7 @@ const SKIP_TYPES = new Set(['meta'])
  * 她问"上次那个视频"，账本里明明有标题，却一条都搜不出来。
  * 只放带内容的那几种；`seen:` / `fired:` / `sched:` 这些是记账噪音，继续跳过。
  */
-const META_KEEP = Object.freeze(['watched:', 'saw:', 'browse:'])
+const META_KEEP = Object.freeze(['watched:', 'saw:', 'browse:', 'talk:'])
 
 /**
  * 换词兜底用的近义表（fork.10）。
@@ -194,7 +194,8 @@ export function searchEvents(events, query, o = {}) {
     : new Set(Array.isArray(o.solidIds) ? o.solidIds.map(String) : [])
   const refs = weigh ? refCounts(events) : new Map()
 
-  const scored = []
+  // ---- 先过一遍筛，把候选挑出来（后面算稀有度要用整批当分母） ----
+  const cand = []
   for (const ev of events ?? []) {
     if (!ev) continue
     if (SKIP_TYPES.has(ev.type)) {
@@ -207,21 +208,53 @@ export function searchEvents(events, query, o = {}) {
     if (!text) continue
     const ts = Date.parse(ev.ts)
     if (!Number.isFinite(ts) || ts < since) continue
+    cand.push({ ev, text, ts, lower: text.toLowerCase() })
+  }
 
-    const lower = text.toLowerCase()
+  /**
+   * fork.11（2026-11-02）：按**词的稀有度**给分，而不是按"命中了几段"。
+   *
+   * 原来每个命中的片段都加分，于是「视频」「记得」这种到处都有的词，
+   * 和一个只有两三条记录里才出现的词（「皮影」）功劳一样大——
+   * 真正能把旧事捞出来的那个词，反而被稀释了。
+   * idf 高的词更有信息量，这一条是那份 B 站笔记里「召回 43%→91%」的做法。
+   */
+  const N = Math.max(1, cand.length)
+  const idf = new Map()
+  for (const t of toks) {
+    let df = 0
+    for (const c of cand) if (c.lower.includes(t)) df++
+    if (df > 0) idf.set(t, Math.log((N + 1) / (df + 1)) + 1)
+  }
+
+  const scored = []
+  for (const { ev, text, ts, lower } of cand) {
     let score = 0
     for (const t of toks) {
       if (!lower.includes(t)) continue
-      // 长片段更值钱：两字切片只算 1，整词算它自己的长度
-      score += t.length >= 3 ? t.length : 1
+      const w = idf.get(t) ?? 1
+      // 长片段更值钱：两字切片打折，整词按自己的稀有度全额
+      score += w * (t.length >= 3 ? 1.5 : 1)
     }
     // 一个整词都没对上时，再试字面重合（fork.10）——换了个说法也能翻到
     if (score <= 0) score = looseScore(text, query)
     if (score <= 0) continue
 
-    // 显著性：字面命中之后，重要/被检验过的排前面。
-    // 幅度刻意压小（最多 +6）：不能盖过「她问的那件事正好在里面」。
-    let rank = score
+    // ---- 遗忘（fork.11）：越久越难想起，但**不删除**，翻得到 ----
+    // 半衰期按"这条有多重要"分开：被检验过的 180 天，被引用过的 90 天，
+    // 她经历的事 45 天，普通判断 30 天。衰减到 0.35 就到底，不会归零。
+    const ageDays = Math.max(0, (now - ts) / DAY_MS)
+    const cited = (refs.get(String(ev.id)) ?? 0) > 0
+    const half = solid.has(String(ev.id))
+      ? 180
+      : cited
+        ? 90
+        : ev.type === 'meta'
+          ? 45
+          : Math.max(1, Number(o.halfLifeDays ?? 30))
+    const decay = 0.35 + 0.65 * Math.pow(0.5, ageDays / half)
+
+    let rank = score * decay
     if (weigh) {
       if (solid.has(String(ev.id))) rank += 3
       rank += Math.min(3, refs.get(String(ev.id)) ?? 0)
@@ -254,6 +287,10 @@ function displayOf(r) {
 
   if (text.startsWith('saw:')) return `你看过：${text.slice(4).trim()}`
   if (text.startsWith('browse:')) return `那天翻到的：${text.slice(7).trim()}`
+  if (text.startsWith('talk:')) {
+    // talk:2026-11-02 他说「…」／我答「…」 —— 后半句已经是人话了，去掉日期前缀即可
+    return text.replace(/^talk:\S*\s*/, '')
+  }
   if (text.startsWith('watched:')) {
     const m = text.match(/^watched:\S*\s*(\S+)?\s*(\{[\s\S]*)$/)
     if (m?.[2]) {
