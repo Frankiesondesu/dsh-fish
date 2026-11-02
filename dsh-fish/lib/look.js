@@ -140,6 +140,21 @@ export async function lookOnce(o = {}) {
     const stamp = sessionId ? { sessionId } : {}
     for (const p of packs) {
       await appendEvent({ type: 'meta', text: `looked:${p.video.bvid}`, ...stamp }, { ...who }, root).catch(() => {})
+      // fork.10（2026-11-02）：`looked:` 里只有 BV 号，她日后想"那个视频叫什么"就翻不到。
+      // 单独立一行 `saw:`，带标题和作者，纯文本——`watched:` 那种 JSON 是给报表读的，
+      // 这行是给她自己回忆时读的，不该长得像机器配置。
+      // 不动 `looked:` 的格式：browse.js 靠 `t.slice(7)` 取 bvid 去重，改了会串。
+      {
+        const t = String(p.video?.title ?? p.title ?? '').trim()
+        const up = String(p.video?.up ?? p.up ?? '').trim()
+        if (t) {
+          await appendEvent(
+            { type: 'meta', text: `saw:${p.video.bvid} 《${t.slice(0, 80)}》${up ? ' ' + up.slice(0, 40) : ''}`, ...stamp },
+            { ...who },
+            root,
+          ).catch(() => {})
+        }
+      }
       // 今天真的看过的那一条：评论闸门认这一行（2026-10-28）。
       // 与 looked: 的区别是带日期——昨天看过的，今天不能拿去评。
       await appendEvent({ type: 'meta', text: `look:${dk} ${p.video.bvid}`, ...stamp }, { ...who }, root).catch(() => {})

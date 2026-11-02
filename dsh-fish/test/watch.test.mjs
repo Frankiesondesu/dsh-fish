@@ -160,8 +160,12 @@ test('额度用完时日志写数字（1/1），好追额度怎么用掉的', as
 test('抽帧失败时写 warn 一行，带上失败原因', async () => {
   await withRoot(async (root) => {
     // ffmpeg 不在 PATH 上 → grabFrames 失败；这条是导出包里最值钱的一行
+    // fork.10（2026-11-02）：只清 PATH 不够——detectFfmpeg 会先看 DSH_FISH_FFMPEG，
+    // 那是个绝对路径，装了新版 ffmpeg 的机器上（包括 CI 和本机）清 PATH 照样能抽帧。
     const saved = process.env.PATH
+    const savedFf = process.env.DSH_FISH_FFMPEG
     process.env.PATH = ''
+    delete process.env.DSH_FISH_FFMPEG
     try {
       await updateConfig({ browse: { enabled: true }, video: { enabled: true } }, root)
       const ctx = fakeCtx()
@@ -170,6 +174,8 @@ test('抽帧失败时写 warn 一行，带上失败原因', async () => {
       assert.match(readLog(root), /看画面：抽帧失败 BV1ED4y1Y7dc/)
     } finally {
       process.env.PATH = saved
+      if (savedFf === undefined) delete process.env.DSH_FISH_FFMPEG
+      else process.env.DSH_FISH_FFMPEG = savedFf
     }
   })
 })

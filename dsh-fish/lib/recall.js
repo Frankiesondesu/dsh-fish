@@ -46,6 +46,49 @@ const REF_TYPES = new Set(['test', 'answer', 'revise'])
 /** 不参与回忆的类型：这些不是「她经历的事」 */
 const SKIP_TYPES = new Set(['meta'])
 
+/**
+ * fork.10（2026-11-02）：但 meta 里有一部分**正是她经历的事**。
+ *
+ * 原来一律跳过，于是她能翻到的只有"我当时怎么想的"，翻不到"我看过什么"。
+ * 她问"上次那个视频"，账本里明明有标题，却一条都搜不出来。
+ * 只放带内容的那几种；`seen:` / `fired:` / `sched:` 这些是记账噪音，继续跳过。
+ */
+const META_KEEP = Object.freeze(['watched:', 'saw:', 'browse:'])
+
+/**
+ * 换词兜底用的近义表（fork.10）。
+ *
+ * 为什么要它：`her_recall` 是字面匹配，她换个说法就翻不到。
+ * 真机上她记得"皮影"，问"变戏法"就全落空。真正的语义检索要上向量模型，
+ * 这一步只做最小的补偿：几个她日常会用到的近义组，加上下面的字面重合兜底。
+ * 表要短——每加一组都可能带来误召回，宁可少而准。
+ */
+const SYNONYMS = Object.freeze([
+  ['视频', '片子', '短片', 'bv'],
+  ['弹幕', '评论', '留言'],
+  ['名字', '称呼', '叫什么'],
+  ['屋子', '房间', '家'],
+  ['看', '瞧', '瞅'],
+  ['好笑', '逗', '笑死', '好玩'],
+  ['难过', '难受', '委屈', '不是滋味'],
+  ['生气', '恼', '火大', '气'],
+])
+
+const SYN_MAP = (() => {
+  const m = new Map()
+  for (const group of SYNONYMS) {
+    for (const w of group) {
+      const cur = m.get(w) ?? new Set()
+      for (const v of group) if (v !== w) cur.add(v)
+      m.set(w, cur)
+    }
+  }
+  return m
+})()
+
+/** 虚字不进字面兜底：它们哪儿都有，算进来等于把一切判成相关 */
+const STOP_CHARS = new Set('的了是我你他她它在有和就都也不很吗呢吧啊呀么这那个些什么'.split(''))
+
 const DAY_MS = 86_400_000
 
 /**
@@ -65,7 +108,31 @@ export function tokensOf(query) {
       for (let i = 0; i + 2 <= p.length; i++) out.add(p.slice(i, i + 2))
     }
   }
+  // 近义扩展（fork.10）：她自己换了个说法，也让她能翻到
+  for (const t of [...out]) {
+    const syn = SYN_MAP.get(t)
+    if (syn) for (const s of syn) out.add(s)
+  }
   return [...out]
+}
+
+/**
+ * 字面重合兜底（fork.10）。整词一个都没命中时，看汉字覆盖度。
+ *
+ * 只给很小的分（每字 0.3，最多 1.5）：
+ * 它的作用是把"勉强相关"的排到后面，绝不盖过真正命中的那几条。
+ */
+export function looseScore(text, query) {
+  const lower = String(text ?? '').toLowerCase()
+  const chars = []
+  for (const ch of String(query ?? '')) {
+    if (/[\u4e00-\u9fa5]/.test(ch) && !STOP_CHARS.has(ch)) chars.push(ch)
+  }
+  if (chars.length < 3) return 0
+  let hit = 0
+  for (const c of chars) if (lower.includes(c)) hit++
+  if (hit / chars.length < 0.6) return 0
+  return Math.min(1.5, hit * 0.3)
 }
 
 /**
@@ -129,7 +196,12 @@ export function searchEvents(events, query, o = {}) {
 
   const scored = []
   for (const ev of events ?? []) {
-    if (!ev || SKIP_TYPES.has(ev.type)) continue
+    if (!ev) continue
+    if (SKIP_TYPES.has(ev.type)) {
+      // meta 只放「她经历的事」那几种，`seen:` 之类的记账不进回忆
+      const raw = String(ev.text ?? '')
+      if (!META_KEEP.some((p) => raw.startsWith(p))) continue
+    }
     if (kind && String(ev.type) !== kind) continue
     const text = String(ev.text ?? '').trim()
     if (!text) continue
@@ -143,6 +215,8 @@ export function searchEvents(events, query, o = {}) {
       // 长片段更值钱：两字切片只算 1，整词算它自己的长度
       score += t.length >= 3 ? t.length : 1
     }
+    // 一个整词都没对上时，再试字面重合（fork.10）——换了个说法也能翻到
+    if (score <= 0) score = looseScore(text, query)
     if (score <= 0) continue
 
     // 显著性：字面命中之后，重要/被检验过的排前面。
@@ -167,6 +241,34 @@ export function searchEvents(events, query, o = {}) {
 }
 
 /** 渲染成她能读的一段（不是 JSON） */
+/**
+ * 把一条记录转成她读得懂的一句（fork.10）。
+ *
+ * `saw:` / `watched:` / `browse:` 是系统记账，原文长得像配置项。
+ * 她翻旧账时不该看见 `saw:BV1xx 《…》` 这种，得说成人话。
+ */
+function displayOf(r) {
+  const text = String(r.text ?? '')
+  if (r.type === 'heard') return `他说：${text}`
+  if (r.type !== 'meta') return text
+
+  if (text.startsWith('saw:')) return `你看过：${text.slice(4).trim()}`
+  if (text.startsWith('browse:')) return `那天翻到的：${text.slice(7).trim()}`
+  if (text.startsWith('watched:')) {
+    const m = text.match(/^watched:\S*\s*(\S+)?\s*(\{[\s\S]*)$/)
+    if (m?.[2]) {
+      try {
+        const j = JSON.parse(m[2])
+        const t = String(j?.title ?? '').trim()
+        const up = String(j?.up ?? '').trim()
+        if (t) return `你看了画面：《${t}》${up ? ' ' + up : ''}`
+      } catch { /* 被 200 字截断的 JSON，退回原文 */ }
+    }
+    return `你看了画面：${text.slice(8).trim()}`
+  }
+  return text
+}
+
 export function renderRecall(rows) {
   if (!rows?.length) return '你翻了，没翻到。'
   const lines = ['你翻到的：']
@@ -175,9 +277,7 @@ export function renderRecall(rows) {
     // 没写 id 的老调用方（测试里的手写 fixture）就不显示括号，别凭空造一个。
     const mark = r.id ? `（${r.id}）` : ''
     const ago = Number.isFinite(r.ago) && r.ago > 0 ? `（${r.ago} 天前）` : ''
-    // heard 是旁听来的：明确写成「他说」，别让她误以为是自己说的。
-    const text = r.type === 'heard' ? `他说：${r.text}` : r.text
-    lines.push(`- ${r.date}${ago}｜${text}${mark}`)
+    lines.push(`- ${r.date}${ago}｜${displayOf(r)}${mark}`)
   }
   return lines.join('\n')
 }
