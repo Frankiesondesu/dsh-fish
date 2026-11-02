@@ -13,7 +13,7 @@ import { join } from 'node:path'
 
 import { watchedToday, watchedInTariff, registerWatch } from '../lib/watch.js'
 import { logFile } from '../lib/log.js'
-import { appendEvent } from '../lib/store.js'
+import { appendEvent, readEvents } from '../lib/store.js'
 import { updateConfig } from '../lib/settings.js'
 
 test('watchedToday 只数当天的 watched: 记录，昨天的不算', () => {
@@ -133,36 +133,46 @@ test('watchedInTariff：带 free 标记的（他递过来的）不算额度，�
   assert.equal(watchedToday(events, dk), 3)
 })
 
-test('bili_watch：额度满了，但他递过来的那条照样能看（不报额度已满）', async () => {
-  await withRoot(async (root) => {
-    const saved = process.env.PATH
-    const savedFf = process.env.DSH_FISH_FFMPEG
-    process.env.PATH = '' // 让抽帧必然失败——这一条只验"过没过额度闸门"
-    delete process.env.DSH_FISH_FFMPEG
-    try {
-      await updateConfig({ browse: { enabled: true }, video: { enabled: true, perDay: 1, offPeakPerDay: 1 } }, root)
-      const { dateKey } = await import('../lib/settings.js')
-      const dk = dateKey()
-      // 两档各塞满一条：无论此刻是峰是谷，额度都满了
-      await appendEvent({ type: 'meta', text: `watched:${dk} BV1xx411c7mD ${JSON.stringify({ tariff: 'peak' })}` }, { source: 'system' }, root)
-      await appendEvent({ type: 'meta', text: `watched:${dk} BV1yy411c7mE ${JSON.stringify({ tariff: 'idle' })}` }, { source: 'system' }, root)
-      // 他递过这一条
-      await appendEvent({ type: 'meta', text: `hand:${dk} BV1ED4y1Y7dc` }, { source: 'system' }, root)
+// fork.22：lite 已删，引擎变成可注入（deps.watch）——单测不该真去下视频。
+function fakeWatch(ok = true) {
+  return async () =>
+    ok
+      ? {
+        ok: true,
+        path: 'C:/tmp/sheet-BV-test-1.png',
+        paths: ['C:/tmp/sheet-BV-test-1.png', 'C:/tmp/sheet-BV-test-2.png'],
+        text: '《测试视频》：这次认真看，2 张宫格。',
+        title: '测试视频',
+        up: '某UP',
+        duration: 100,
+      }
+      : { ok: false, why: '外挂没装' }
+}
 
-      const ctx = fakeCtx()
-      registerWatch(ctx, { root })
-      const out = await ctx._tools[0].execute({ bvid: 'BV1ED4y1Y7dc' })
-      const log = readLog(root)
-      assert.doesNotMatch(log, /今日额度已满/, '他给的这条不该被额度挡下')
-      assert.match(log, /他递过来的，不占额度/)
-      // 闸门过了，后面失败在抽帧上（这台机器没有 ffmpeg）
-      assert.equal(out.note !== '今天看不成了。', true)
-      assert.match(log, /抽帧失败 BV1ED4y1Y7dc/)
-    } finally {
-      process.env.PATH = saved
-      if (savedFf === undefined) delete process.env.DSH_FISH_FFMPEG
-      else process.env.DSH_FISH_FFMPEG = savedFf
-    }
+test('bili_watch：额度满了，但他递过来的那条照样能看，账本里带 free', async () => {
+  await withRoot(async (root) => {
+    await updateConfig({ browse: { enabled: true }, video: { enabled: true, perDay: 1, offPeakPerDay: 1 } }, root)
+    const { dateKey } = await import('../lib/settings.js')
+    const dk = dateKey()
+    // 两档各塞满一条：无论此刻是峰是谷，额度都满了
+    await appendEvent({ type: 'meta', text: `watched:${dk} BV1xx411c7mD ${JSON.stringify({ tariff: 'peak' })}` }, { source: 'system' }, root)
+    await appendEvent({ type: 'meta', text: `watched:${dk} BV1yy411c7mE ${JSON.stringify({ tariff: 'idle' })}` }, { source: 'system' }, root)
+    // 他递过这一条
+    await appendEvent({ type: 'meta', text: `hand:${dk} BV1ED4y1Y7dc` }, { source: 'system' }, root)
+
+    const ctx = fakeCtx()
+    registerWatch(ctx, { root, watch: fakeWatch(true) })
+    const out = await ctx._tools[0].execute({ bvid: 'BV1ED4y1Y7dc' })
+    assert.equal(out.ok, true)
+    const log = readLog(root)
+    assert.doesNotMatch(log, /今日额度已满/, '他给的这条不该被额度挡下')
+    assert.match(log, /他递过来的，不占额度/)
+
+    // 看过就得留凭证，但标记 free——"看过"和"占额度"是两件事
+    const ev = await readEvents(root)
+    const w = ev.events.filter((e) => String(e.text ?? '').startsWith(`watched:${dk} BV1ED4y1Y7dc`))
+    assert.equal(w.length, 1, '看成了就该记一条 watched:')
+    assert.match(w[0].text, /"free":true/)
   })
 })
 
@@ -177,10 +187,28 @@ test('bili_watch：额度满了，她自己翻到的另一条仍然被挡（免�
     await appendEvent({ type: 'meta', text: `hand:${dk} BV1zz411c7mF` }, { source: 'system' }, root)
 
     const ctx = fakeCtx()
-    registerWatch(ctx, { root })
+    registerWatch(ctx, { root, watch: fakeWatch(true) })
     const out = await ctx._tools[0].execute({ bvid: 'BV1ED4y1Y7dc' })
     assert.equal(out.ok, false)
     assert.equal(out.note, '今天看不成了。')
+  })
+})
+
+// fork.22：九帧兜底删掉之后，"看不成"必须如实说——不能拿九张均匀抽的图冒充看过。
+test('bili_watch：vs 没走通就如实说没看成，且不记 watched:', async () => {
+  await withRoot(async (root) => {
+    await updateConfig({ browse: { enabled: true }, video: { enabled: true } }, root)
+    const ctx = fakeCtx()
+    registerWatch(ctx, { root, watch: fakeWatch(false) })
+    const out = await ctx._tools[0].execute({ bvid: 'BV1ED4y1Y7dc' })
+    assert.equal(out.ok, false)
+    assert.equal(out.note, '这次没看成。')
+    // 技术原因进日志，不进她的话
+    assert.match(readLog(root), /看画面：vs 没走通 BV1ED4y1Y7dc/)
+    assert.doesNotMatch(out.note, /外挂|管线|ffmpeg/)
+    // 没看成就不该留"看过"的凭证
+    const ev = await readEvents(root)
+    assert.equal(ev.events.filter((e) => String(e.text ?? '').startsWith('watched:')).length, 0)
   })
 })
 
@@ -232,28 +260,8 @@ test('额度用完时日志写数字（1/1），好追额度怎么用掉的', as
   })
 })
 
-test('抽帧失败时写 warn 一行，带上失败原因', async () => {
-  await withRoot(async (root) => {
-    // ffmpeg 不在 PATH 上 → grabFrames 失败；这条是导出包里最值钱的一行
-    // fork.10（2026-11-02）：只清 PATH 不够——detectFfmpeg 会先看 DSH_FISH_FFMPEG，
-    // 那是个绝对路径，装了新版 ffmpeg 的机器上（包括 CI 和本机）清 PATH 照样能抽帧。
-    const saved = process.env.PATH
-    const savedFf = process.env.DSH_FISH_FFMPEG
-    process.env.PATH = ''
-    delete process.env.DSH_FISH_FFMPEG
-    try {
-      await updateConfig({ browse: { enabled: true }, video: { enabled: true } }, root)
-      const ctx = fakeCtx()
-      registerWatch(ctx, { root })
-      await ctx._tools[0].execute({ bvid: 'BV1ED4y1Y7dc' })
-      assert.match(readLog(root), /看画面：抽帧失败 BV1ED4y1Y7dc/)
-    } finally {
-      process.env.PATH = saved
-      if (savedFf === undefined) delete process.env.DSH_FISH_FFMPEG
-      else process.env.DSH_FISH_FFMPEG = savedFf
-    }
-  })
-})
+// fork.22：原来这条测的是"ffmpeg 不在 PATH → 抽帧失败"。lite 删掉之后没有抽帧了，
+// 现在最值钱的一行是「vs 没走通 + 真实原因」——那条已在上面单独测过。
 
 // issue #16 第二半（2026-11-01，用户 m03454）：看画面写的 watched: 也要认调用者。
 test('bili_watch：不在这个家里的会话调不动它', async () => {

@@ -13,7 +13,6 @@
 import { readEvents, appendEvent, rootDir, readOwner } from './store.js'
 import { loadConfig, dateKey } from './settings.js'
 import { createClient } from './bili.js'
-import { grabFrames } from './video.js'
 import { watchViaStoryboard } from './vs.js'
 import { logLine } from './log.js'
 import { isHanded } from './intent.js'
@@ -90,12 +89,20 @@ async function enrichInfo(root, r, bvid) {
     if (d.owner?.name) r.up = String(d.owner.name)
     if (!Number(r.duration)) r.duration = Number(d.duration) || 0
     if (!Number(r.view)) r.view = Number(d.view) || 0
+    // vs 拼说明时只知道 BV 号，抬头会写成《BV1xx…》。补到标题就顺手换掉，
+    // 不然她读到的是个编号，人在报告里也认不出是哪条。
+    if (r.title && r.title !== bvid && typeof r.text === 'string') {
+      r.text = r.text.replace(`《${bvid}》`, `《${r.title}》`)
+    }
   } catch {
     /* 补不到就留裸 BV 号，记账照走 */
   }
 }
 
-/** 没有 tenancy（单测、老调用）时自己拼一个，理由同 look.js 的 tenancyOf。 */function tenancyOf(root, tenancy) {
+/**
+ * 没有 tenancy（单测、老调用）时自己拼一个，理由同 look.js 的 tenancyOf。
+ */
+function tenancyOf(root, tenancy) {
   if (tenancy && typeof tenancy === 'object') {
     return { root, herDir: String(tenancy.herDir ?? ''), tenant: tenancy.tenant ?? { ok: true } }
   }
@@ -104,15 +111,17 @@ async function enrichInfo(root, r, bvid) {
 
 export function registerWatch(ctx, deps = {}) {
   const root = deps.root ?? rootDir()
+  // fork.22：引擎可注入（单测用）。默认就是 vs——lite 已删，没有第二个选择。
+  const runWatch = deps.watch ?? watchViaStoryboard
 
   return ctx.tools.register(
     defineTool({
       name: 'bili_watch',
       description:
-        '看一条视频的画面。会把整条视频里取几张截图拼成一张图存下来，告诉你文件在哪，' +
-        '你用 read_image 打开它就能看见画面了。取画面要花十几秒，所以别每条都看，' +
-        '挑你真的想知道"画面里是什么"的那条。默认在整条视频里分段随机取几张' +
-        '（每次取到的时刻不一样）；想盯住某一刻就传 at（秒），只取你点的那几秒。不用它也可以。',
+        '看一条视频的画面。会把整条视频按镜头切开、每段挑一帧，拼成几张宫格图存下来，' +
+        '告诉你文件在哪，你用 read_image 打开就能看见；同时把每一格对应的台词也给你。' +
+        '要下载整条视频，一次几十秒到几分钟，所以别每条都看，' +
+        '挑你真的想知道"画面里是什么"的那条。想盯住某一刻就传 at（秒），只看那一段。不用它也可以。',
       // 用完整 JSON Schema（不是简写 DSL）：工具参数必须是根级 type:object，
       // 否则 provider 直接拒 "schema must be a JSON Schema of 'type: object'"。
       parameters: {
@@ -194,51 +203,33 @@ export function registerWatch(ctx, deps = {}) {
           return { ok: false, path: '', text: '', note: '今天看不成了。' }
         }
 
-        // fork.17（2026-11-02）：看画面走两条引擎。
-        //   vs（默认）= 用户的 dsh-video-storyboard 全管线：镜头切分取帧、
-        //               每格选最锐利帧、最多 4 张宫格、硬字幕 OCR、台词对齐。
-        //   lite      = 内置九帧（HTTP seek，不下载全片）。
-        // vs 走不通就退回 lite 兜底——两条路都要写 watched: 记账，额度才数得对。
-        const engine = String(config?.video?.engine ?? 'vs')
-        let r = null
-        if (engine === 'vs') {
-          r = await watchViaStoryboard({
-            bvid,
-            root,
-            hotword: config?.video?.hotword,
-            at: args?.at,
-            vsPath: config?.video?.vsPath,
-          }).catch((err) => ({ ok: false, why: String(err?.message ?? err) }))
-          if (!r?.ok) logLine('warn', ['看画面：vs 外挂没走通，退回轻量九帧', r?.why ?? ''], root)
-        }
+        // fork.22（2026-11-02，用户定案）：**只走 vs，lite 已删。**
+        //
+        // 删掉的理由不是"新的更好"，是她自己说的：用九帧看完之后她只能回
+        // 「一个动漫小屋，中间浮着一块设置表，字很小，放大了也读不出」「我这边没有声音」。
+        // 九张均匀抽的图既漏内容、又拿不到台词——那不是"看得少一点"，那是**没看过**。
+        // 拿它冒充看过，比直说没看成更糟。
+        //
+        // 现在 vs 走不通就如实说没看成，不再有兜底。
+        const r = await runWatch({
+          bvid,
+          root,
+          hotword: config?.video?.hotword,
+          at: args?.at,
+          vsPath: config?.video?.vsPath,
+        }).catch((err) => ({ ok: false, why: String(err?.message ?? err) }))
         if (!r?.ok) {
-          const lite = await grabFrames({
-            bvid,
-            root,
-            frames: config?.video?.frames,
-            at: args?.at,
-            subs: config?.video?.subs,
-            asr: config?.video?.asr,
-            vsPath: config?.video?.vsPath,
-            chunkSec: config?.video?.chunkSec,
-            asrBudgetMs: config?.video?.asrBudgetMs,
-            asrWaitMs: config?.video?.asrWaitMs,
-            hotword: config?.video?.hotword,
-          })
-          if (!lite.ok) {
-            logLine('warn', ['看画面：抽帧失败', bvid, lite.why ?? ''], root)
-            return { ok: false, path: '', text: '', note: lite.why }
-          }
-          r = lite
+          logLine('warn', ['看画面：vs 没走通', bvid, r?.why ?? ''], root)
+          // 对她只说这一句：真的没看成。技术原因进日志，不进她的话。
+          return { ok: false, path: '', text: '', note: '这次没看成。' }
         }
         // fork.20：vs 那边没有标题，补一次接口，报告才认得出来是哪条。
         await enrichInfo(root, r, bvid)
-        // ---- 记账：两条引擎都必须写 ----
+        // ---- 记账：一次 ----
         //
         // fork.20（2026-11-02）：原来 vs 分支在下面提前 return，这一步被整个跳过。
         // 而 fork.17 起 vs 是默认引擎——于是每一次成功的看画面都不进账本：
         // 报告里没有、额度不涨、评论闸门（认的正是 watched:）还会把她挡在外面。
-        // 记账挪到 return 之前，两条路共用一次。
         await appendEvent(
           {
             type: 'meta',
@@ -266,37 +257,18 @@ export function registerWatch(ctx, deps = {}) {
         // 日志里说清这一条是怎么算的：占额度就写 n/cap，他给的就直说。
         const quotaText = free ? '他给的，不占额度' : `${used + 1}/${cap}`
 
-        // vs 路径自带说明文字（多张图 + 台词），直接用
-        if (engine === 'vs' && r.text) {
-          logLine(
-            'info',
-            ['看画面（vs）：取到了', bvid, `${(r.paths ?? []).length} 张`, quotaText, r.path ?? ''],
-            root,
-          )
-          return { ok: true, path: r.path ?? '', text: r.text, note: '' }
-        }
-
         // 路径一律给正斜杠：宿主渲染 markdown 图片时会拿路径拼 /api/file，
         // C:\... 这种反斜杠写法在客户端解析后取不到文件，图片就显示成「无法预览」
         // （2026-10-26 实测：同一张图 C:\ 版失败、C:/ 版正常）。
         const posix = slashed(r.path)
         // 成功的这一条也要记：跟日志里「今日额度已满」对得上，才知道额度是怎么用掉的。
-        logLine('info', ['看画面：取到了', bvid, quotaText, posix], root)
-        return {
-          ok: true,
-          path: posix,
-          text: [
-            `《${r.title || bvid}》的画面，我取了几张拼成一张图放在这儿：`,
-            ...(Array.isArray(r.times) && r.times.length
-              ? [`（取的是：${r.times.map((t) => `${t} 秒`).join('、')}）`]
-              : []),
-            posix,
-            '用 read_image 读它就能看见。要在回复里贴这张图，路径就照抄上面这一行——用正斜杠。',
-            // fork.14：字幕台词（如果这条视频有字幕轨）。按画面取帧时刻对齐的几句。
-            ...(r.subsText ? ['', '画面那几个时刻的台词：', r.subsText] : []),
-          ].join('\n'),
-          note: '',
-        }
+        logLine(
+          'info',
+          ['看画面：取到了', bvid, quotaText, `${(r.paths ?? []).length} 张`, posix],
+          root,
+        )
+        // 说明文字由 vs 那边拼（每张图 + 每格时刻 + 那一格的台词），原样给她。
+        return { ok: true, path: posix, text: String(r.text ?? ''), note: '' }
       },
     }),
   )

@@ -20,7 +20,6 @@ import { pathToFileURL } from 'node:url'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { mediaDir } from './media.js'
-import { pickTranscript } from './video.js'
 
 /** vs 插件 src 的默认位置；video.vsPath 可覆盖 */
 export function vsSrcDefault() {
@@ -87,11 +86,15 @@ export async function watchViaStoryboard(o = {}) {
     ocr: o.ocr !== false,
   }
   if (o.hotword) opts.hotwords = String(o.hotword)
-  // 她点名的时刻 → 一个窗口。前后各留 5 秒余量；乱写的时刻 normalizeAt 已经夹过
-  const at = Array.isArray(o.at) ? o.at : o.at ? [o.at] : []
+  // 她点名的时刻 → 一个窗口，前后各留 5 秒余量。
+  // fork.22：lite 删掉之后，`normalizeAt` 那道夹取也跟着没了，这里得自己挡一遍——
+  // 她传 ['abc'] 或者负数过来，`Math.floor(NaN)` 会让 from 变成 NaN，整条管线就废了。
+  const at = (Array.isArray(o.at) ? o.at : o.at != null ? [o.at] : [])
+    .map((x) => Number(x))
+    .filter((x) => Number.isFinite(x) && x >= 0)
   if (at.length) {
-    opts.from = Math.max(0, Math.floor(at[0] - 5))
-    opts.to = Math.ceil(at[at.length - 1] + 5)
+    opts.from = Math.max(0, Math.floor(Math.min(...at) - 5))
+    opts.to = Math.ceil(Math.max(...at) + 5)
   }
 
   let res
@@ -112,26 +115,56 @@ export async function watchViaStoryboard(o = {}) {
   if (!paths.length) return { ok: false, why: 'vs 没有产出任何宫格图' }
 
   // ---- 给她拼一段能读的说明 ----
+  //
+  // fork.22（2026-11-02，真机）：这里原来读 `res.transcript.segments` 当数组用。
+  // 实际形状是 `{source, model, segments: 544, chars, charsPerSec}` —— `segments` 是
+  // **段数**，不是段。`.map` 一进来就 TypeError，vs 每次都在最后一步崩掉，
+  // 兜底的九帧顶上，她于是永远只看到九张图。台词其实早就贴在每个格子上（`cells[].text`）。
   const winStart = Number(res.window?.start ?? 0)
-  const sheets = res.sheets ?? []
-  const segs = (res.transcript?.segments ?? res.transcript?.data ?? [])
-    .map((s) => ({ t: Number(s.from ?? s.t) || 0, text: String(s.text ?? '').trim() }))
-    .filter((s) => s.text)
-  // 台词对齐到每格的中点——她看哪格，就读到哪格的话
-  const times = []
+  const sheets = Array.isArray(res.sheets) ? res.sheets : []
+  const mmss = (s) => {
+    const n = Math.max(0, Math.round(Number(s) || 0))
+    return `${Math.floor(n / 60)}:${String(n % 60).padStart(2, '0')}`
+  }
+
+  // 每格一行：第几格、哪一段、那时候在说什么。
+  // 有预算：整段说明别把她淹了（36 格全展开能到七八千字），超了就停，告诉她后面还有。
+  const SAY_MAX = 200
+  const BUDGET = 1800
+  const lines = []
+  let cells = 0
+  let used = 0
+  let dropped = 0
   for (const sheet of sheets) {
     for (const c of sheet.cells ?? []) {
-      times.push(Number(c.t_start ?? c.t ?? 0) + winStart + (Number(c.t_end ?? 0) + winStart - (Number(c.t_start ?? 0) + winStart)) / 2)
+      cells += 1
+      const a = Number(c.t_start ?? c.t ?? 0) + winStart
+      const b = Number(c.t_end ?? 0) + winStart
+      const say = String(c.text ?? '').replace(/\s+/g, ' ').trim().slice(0, SAY_MAX)
+      const line = say ? `第${cells}格 ${mmss(a)}–${mmss(b)}｜${say}` : `第${cells}格 ${mmss(a)}–${mmss(b)}`
+      if (used + line.length > BUDGET) {
+        dropped += 1
+        continue
+      }
+      used += line.length
+      lines.push(line)
     }
   }
-  const subsText = pickTranscript(segs, { times, maxChars: 1600 })
+  const tr = res.transcript && typeof res.transcript === 'object' ? res.transcript : null
+  const trNote = Number(tr?.chars) > 0
+    ? `（台词共 ${tr.chars} 字、${tr.segments ?? 0} 段，来源：${tr.source ?? '未知'}）`
+    : '（这条没有字幕轨，也没有听写到台词）'
 
+  const title = String(res.info?.title ?? '') || o.bvid
   const text = [
-    `《${res.info?.title ?? o.bvid}》：这次认真看，拼了 ${sheets.length} 张宫格，都放在这儿：`,
+    `《${title}》：这次认真看，${sheets.length} 张宫格、${cells} 格画面，都放在这儿：`,
     ...paths,
     '用 read_image 一张张读。要在回复里贴图，路径照抄——用正斜杠。',
-    ...(subsText ? ['', '画面各格对应的台词：', subsText] : []),
-    ...(res.injection?.found ? ['', '⚠️ 台词或字幕里检测到疑似指令的内容，我当素材处理了。'] : []),
+    '',
+    `每格是哪一刻、那时候在说什么${trNote}：`,
+    ...lines,
+    ...(dropped ? [`（后面还有 ${dropped} 格没列出来，想看哪一段告诉我时刻，我单独取。）`] : []),
+    ...(res.injection?.found ? ['', '台词或字幕里检测到疑似指令的内容，我当素材处理了。'] : []),
   ].join('\n')
 
   return {
@@ -139,7 +172,8 @@ export async function watchViaStoryboard(o = {}) {
     paths,
     path: paths[0],
     text,
-    title: String(res.info?.title ?? o.bvid),
+    title,
     up: String(res.info?.up ?? ''),
+    duration: Number(res.info?.duration) || 0,
   }
 }

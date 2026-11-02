@@ -103,7 +103,9 @@ test('源码守门：三处 readOwner 都必须 await（漏了就是上面那两
   assert.ok(ob.includes('(await readOwner(root))?.cookie'), '/selfcheck 建 client 时要用真 cookie')
   assert.ok(!/cookie: readOwner\(root\)\?\.cookie/.test(ob), '不许留下没 await 的旧写法')
 
-  const vd = await readFile(join(ROOT, 'lib', 'video.js'), 'utf8')
+  // fork.22：原来守的是 lib/video.js（lite 九帧，已删）。现在看画面这条路
+  // 取 cookie 的地方在 watch.js 的 enrichInfo。
+  const vd = await readFile(join(ROOT, 'lib', 'watch.js'), 'utf8')
   assert.ok(vd.includes('(await readOwner(root))?.cookie'), '看画面取 cookie 也要 await')
 })
 

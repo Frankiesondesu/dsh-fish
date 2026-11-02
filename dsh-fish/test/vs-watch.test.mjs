@@ -1,9 +1,9 @@
 /**
- * fork.17：看画面双引擎——vs 全管线（默认）+ lite 九帧兜底。
+ * vs 引擎桥接（fork.17 起；fork.22 起它是唯一的看画面引擎，lite 已删）。
  *
  * 不跑真管线（要下载整条视频）：往 watchViaStoryboard 里注入假的 impl，
- * 钉住三条职责：多张宫格落盘并给出路径、失败返回 ok:false（让调用方兜底）、
- * 台词对齐进说明文字。
+ * 钉住三条职责：多张宫格落盘并给出路径、失败返回 ok:false（让调用方如实说没看成）、
+ * 每格时刻与台词进说明文字。
  */
 
 import { test } from 'node:test'
@@ -20,11 +20,13 @@ const TINY_PNG = Buffer.from(
   'hex',
 )
 
-const fixtureImpl = ({ fail = false } = {}) => ({
+// 形状照真管线抄（2026-11-02 实测 BV1LExL6iE2Y）：
+// `transcript.segments` 是**段数（数字）**，不是段数组；台词挂在 cells[].text 上。
+const fixtureImpl = ({ fail = false, segments = 12 } = {}) => ({
   async runStoryboard(opts) {
     if (fail) throw new Error('yt-dlp 不在')
     return {
-      info: { title: '测试视频', up: '某UP' },
+      info: { title: '测试视频', up: '某UP', duration: 10 },
       window: { start: 0 },
       sheets: [
         {
@@ -33,10 +35,10 @@ const fixtureImpl = ({ fail = false } = {}) => ({
           height: 4,
           cols: 1,
           rows: 1,
-          cells: [{ i: 1, t_start: 0, t_end: 10 }],
+          cells: [{ i: 1, t_start: 0, t_end: 10, t_frame: 5, text: '你好，这是一段台词' }],
         },
       ],
-      transcript: { segments: [{ from: 2, to: 3, text: '你好' }] },
+      transcript: { source: 'subtitle', model: 'site-cc:ai-zh', segments, chars: 9, charsPerSec: 3 },
       totalDuration: 10,
     }
   },
@@ -53,7 +55,7 @@ const fixtureImpl = ({ fail = false } = {}) => ({
   },
 })
 
-test('vs 引擎：多张宫格落盘、台词对齐、说明文字齐', async () => {
+test('vs 引擎：多张宫格落盘、每格带时刻和台词、说明文字齐', async () => {
   const root = mkdtempSync(join(tmpdir(), 'fish-vs-'))
   try {
     const r = await watchViaStoryboard({
@@ -66,9 +68,24 @@ test('vs 引擎：多张宫格落盘、台词对齐、说明文字齐', async ()
     assert.ok(r.paths?.length >= 1, '至少一张宫格')
     assert.ok(existsSync(r.path), '宫格图要真落盘')
     assert.ok(r.text.includes('测试视频'), '要有标题：' + r.text.slice(0, 80))
-    assert.ok(r.text.includes('台词：'), '要带台词段')
-    assert.ok(r.text.includes('你好'), '台词要对齐进来')
+    assert.ok(r.text.includes('第1格 0:00–0:10'), '每格要带时刻：' + r.text.slice(0, 200))
+    assert.ok(r.text.includes('你好，这是一段台词'), '台词要跟着格子进来')
+    assert.ok(r.text.includes('台词共 9 字、12 段'), '要交代台词来源和规模')
     assert.ok(r.text.includes(r.path), '路径要出现在说明里')
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+// fork.22 回归：真机上 `transcript.segments` 是数字（544），当年被当数组 .map，
+// vs 每次都在最后一步 TypeError 崩掉，于是永远只有九帧顶上。
+test('vs 引擎：transcript.segments 是数字也不许崩', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'fish-vs-'))
+  try {
+    for (const segments of [544, undefined, null, []]) {
+      const r = await watchViaStoryboard({ bvid: 'BV1ED4y1Y7dc', root, impl: fixtureImpl({ segments }) })
+      assert.equal(r.ok, true, `segments=${JSON.stringify(segments)} 时不该失败：${r.why ?? ''}`)
+    }
   } finally {
     rmSync(root, { recursive: true, force: true })
   }

@@ -297,10 +297,8 @@ window.__ModuleLoader__.load({
       const [videoOn, setVideoOn] = useState(true)
       const [videoPerDay, setVideoPerDay] = useState(2)
       const [videoOffPeak, setVideoOffPeak] = useState(4)
-      const [videoFrames, setVideoFrames] = useState(9)
-      const [videoSubs, setVideoSubs] = useState(true)
-      const [videoAsr, setVideoAsr] = useState(true)
-      const [videoEngine, setVideoEngine] = useState('vs')
+      // fork.22：lite 九帧删掉之后，帧数/字幕开关/听写开关/引擎选择都不再有任何作用，
+      // 对应的四个控件也一起拆了——留着只会让人以为调了有用。
       const [avoidMinDur, setAvoidMinDur] = useState(60)
       const [avoidMids, setAvoidMids] = useState('')
       const [sleepEvery, setSleepEvery] = useState(7)
@@ -681,7 +679,7 @@ window.__ModuleLoader__.load({
         },
         window: [wakeFrom, wakeTo],
         browse: { enabled: browseOn, perDay: Number(browsePerDay), topN: Number(browseTopN), deepRead: Number(browseDeepRead), danmaku: Number(browseDanmaku), voices: Boolean(browseVoices), window: [browseFrom, browseTo] },
-        video: { enabled: videoOn, engine: String(videoEngine), perDay: Number(videoPerDay), offPeakPerDay: Number(videoOffPeak), frames: Number(videoFrames), subs: videoSubs, asr: videoAsr },
+        video: { enabled: videoOn, perDay: Number(videoPerDay), offPeakPerDay: Number(videoOffPeak) },
         bili: { minIntervalMs: Number(biliMinGap), jitterMs: Number(biliJitter) },
         notify: { enabled: notifyOn },
         chat: { rotateAfter: Number(rotateAfter), replyChars: Number(replyChars) },
@@ -716,7 +714,6 @@ window.__ModuleLoader__.load({
         ['请求抖动', biliJitter, 0, 60000],
         ['高峰时段每天看几条', videoPerDay, 0, 6],
         ['空闲时段每天看几条', videoOffPeak, 0, 12],
-        ['抽几帧', videoFrames, 4, 16],
         ['多少轮换会话', rotateAfter, 0, 500],
         ['每轮最多写多少字', replyChars, 0, 2000],
         ['上下文上限', docBudget, 600, 4000],
@@ -2044,22 +2041,15 @@ window.__ModuleLoader__.load({
           '让她能看见视频画面，而不只是标题和评论。',
           h('div', { className: 'grid2' },
             Toggle({ label: '允许看视频画面', on: videoOn, onChange: setVideoOn,
-              hint: '需要本机有 ffmpeg。每条视频抽几帧拼成一张图给她看，一次约 10 秒。' }),
+              hint: '需要本机有 yt-dlp 与 ffmpeg/ffprobe，并装好 dsh-video-storyboard。' }),
             Num({ label: '高峰时段每天最多几条', value: videoPerDay, onChange: setVideoPerDay, min: 0, max: 6, unit: '条',
               hint: '工作日 9–12 点、14–18 点（原价时段）。看画面要花时间，默认 2 条。' }),
             Num({ label: '空闲时段每天最多几条', value: videoOffPeak, onChange: setVideoOffPeak, min: 0, max: 12, unit: '条',
               hint: '其余时间都是半价（含周末与节假日全天）。给得多些，默认 4 条。' }),
-            Sel({ label: '每条取几帧', value: videoFrames, onChange: setVideoFrames, options: [4, 6, 9, 12, 16],
-              fmt: (v) => (v == 9 ? '9 帧（3×3，推荐）' : `${v} 帧`),
-              hint: '帧越多越费时间。9 帧是一张 3×3 拼图，够看清在拍什么。' }),
-            Sel({ label: '看视频的方式', value: videoEngine, onChange: setVideoEngine,
-              options: ['vs', 'lite'],
-              fmt: (v) => (v === 'vs' ? '认真看（外挂管线：镜头切分/OCR/台词，最多 4 张）' : '轻量（内置九帧，单张）'),
-              hint: '认真看更准但要下载整条视频，一次几十秒到几分钟；轻量只拉 9 小块，10 秒级。走不通都会退回轻量。' }),
-            Toggle({ label: '带上字幕台词', on: videoSubs, onChange: setVideoSubs,
-              hint: '看画面时把 B 站字幕轨里、画面取帧那一刻正说着的几句一并给她（要登录态；没有字幕轨的视频没有）。' }),
-            Toggle({ label: '没有字幕时外挂听写', on: videoAsr, onChange: setVideoAsr,
-              hint: '字幕轨没有时，走 dsh-video-storyboard 外挂：服务没起就按 asr.json 自启，看完优雅关停；外挂不在就自动跳过，不影响看画面。' }))),
+            // fork.22：看画面只剩一条路（vs 全管线），这里不再有引擎/帧数/字幕开关。
+            h('p', { className: 'hint' },
+              '看画面走 dsh-video-storyboard 全管线：按镜头切开、每段挑最锐利的一帧、最多 4 张宫格，' +
+              '并把每一格的台词一起给她。要下载整条视频，一次几十秒到几分钟。走不通就是没看成——不再退回九帧。'))),
         // 请求节奏（issue #5）：机房/服务器 IP 与家宽的风控阈值差别很大。
         // 这里放的是**网络环境参数**，不是她看什么、怎么想。
         group('请求节奏（网络环境）',
