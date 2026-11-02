@@ -153,7 +153,18 @@ export function registerWatch(ctx, deps = {}) {
           return { ok: false, path: '', text: '', note: '今天看不成了。' }
         }
 
-        const r = await grabFrames({ bvid, root, frames: config?.video?.frames, at: args?.at })
+        const r = await grabFrames({
+          bvid,
+          root,
+          frames: config?.video?.frames,
+          at: args?.at,
+          // fork.14：字幕 + 本地听写外挂（没字幕轨、且用户的 ASR 服务在线时才真正跑）
+          subs: config?.video?.subs,
+          asr: config?.video?.asr,
+          asrUrl: config?.video?.asrUrl,
+          asrBudgetMs: config?.video?.asrBudgetMs,
+          hotword: config?.video?.hotword,
+        })
         if (!r.ok) {
           logLine('warn', ['看画面：抽帧失败', bvid, r.why ?? ''], root)
           return { ok: false, path: '', text: '', note: r.why }

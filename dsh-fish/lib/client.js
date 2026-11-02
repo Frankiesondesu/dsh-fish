@@ -299,6 +299,7 @@ window.__ModuleLoader__.load({
       const [videoOffPeak, setVideoOffPeak] = useState(4)
       const [videoFrames, setVideoFrames] = useState(9)
       const [videoSubs, setVideoSubs] = useState(true)
+      const [videoAsr, setVideoAsr] = useState(true)
       const [avoidMinDur, setAvoidMinDur] = useState(60)
       const [avoidMids, setAvoidMids] = useState('')
       const [sleepEvery, setSleepEvery] = useState(7)
@@ -570,6 +571,7 @@ window.__ModuleLoader__.load({
           setVideoPerDay(Number(cfg.video?.perDay ?? 2))
           setVideoOffPeak(Number(cfg.video?.offPeakPerDay ?? 4))
           setVideoSubs(cfg.video?.subs !== false)
+          setVideoAsr(cfg.video?.asr !== false)
           setVideoFrames(Number(cfg.video?.frames ?? 9))
           setAvoidMinDur(Number(cfg.avoid?.minDuration ?? 60))
           setAvoidMids(((cfg.avoid?.upMids) || []).join('，'))
@@ -677,7 +679,7 @@ window.__ModuleLoader__.load({
         },
         window: [wakeFrom, wakeTo],
         browse: { enabled: browseOn, perDay: Number(browsePerDay), topN: Number(browseTopN), deepRead: Number(browseDeepRead), danmaku: Number(browseDanmaku), voices: Boolean(browseVoices), window: [browseFrom, browseTo] },
-        video: { enabled: videoOn, perDay: Number(videoPerDay), offPeakPerDay: Number(videoOffPeak), frames: Number(videoFrames), subs: videoSubs },
+        video: { enabled: videoOn, perDay: Number(videoPerDay), offPeakPerDay: Number(videoOffPeak), frames: Number(videoFrames), subs: videoSubs, asr: videoAsr },
         bili: { minIntervalMs: Number(biliMinGap), jitterMs: Number(biliJitter) },
         notify: { enabled: notifyOn },
         chat: { rotateAfter: Number(rotateAfter), replyChars: Number(replyChars) },
@@ -2049,7 +2051,9 @@ window.__ModuleLoader__.load({
               fmt: (v) => (v == 9 ? '9 帧（3×3，推荐）' : `${v} 帧`),
               hint: '帧越多越费时间。9 帧是一张 3×3 拼图，够看清在拍什么。' }),
             Toggle({ label: '带上字幕台词', on: videoSubs, onChange: setVideoSubs,
-              hint: '看画面时把 B 站字幕轨里、画面取帧那一刻正说着的几句一并给她（要登录态；没有字幕轨的视频没有）。' }))),
+              hint: '看画面时把 B 站字幕轨里、画面取帧那一刻正说着的几句一并给她（要登录态；没有字幕轨的视频没有）。' }),
+            Toggle({ label: '没有字幕时本地听写', on: videoAsr, onChange: setVideoAsr,
+              hint: '字幕轨没有时，把音频送你机器上的本地 ASR 服务（127.0.0.1:18765，OpenAI 兼容）转文字。服务没开就自动跳过，不影响看画面。' }))),
         // 请求节奏（issue #5）：机房/服务器 IP 与家宽的风控阈值差别很大。
         // 这里放的是**网络环境参数**，不是她看什么、怎么想。
         group('请求节奏（网络环境）',

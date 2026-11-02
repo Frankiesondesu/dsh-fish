@@ -42,6 +42,7 @@ import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { spawn } from 'node:child_process'
 import { detectFfmpeg, mediaDir } from './media.js'
+import { transcribeViaLocalAsr } from './asr.js'
 import { createClient } from './bili.js'
 import { slashed } from './posix.js'
 import { rootDir, readOwner } from './store.js'
@@ -475,6 +476,26 @@ export async function grabFrames(o = {}) {
       }
     } catch {
       /* 字幕是加餐 */
+    }
+  }
+
+  // fork.14：没有字幕轨、但用户机器上跑着本地 ASR 服务时，用音频补台词。
+  // 外挂是可选的：服务不在线/音频拿不到/超预算，全部安静退场，画面照旧。
+  if (!subsText && o.asr && pu?.data?.audioUrl) {
+    try {
+      const ffprobe = String(ff.bin).replace(/ffmpeg(\.exe)?$/i, 'ffprobe$1')
+      const lines = await transcribeViaLocalAsr({
+        asrUrl: o.asrUrl,
+        audioUrl: pu.data.audioUrl,
+        cookie,
+        ffmpeg: ff.bin,
+        ffprobe,
+        budgetMs: o.asrBudgetMs,
+        hotword: o.hotword,
+      })
+      if (lines.length) subsText = pickTranscript(lines, { times })
+    } catch {
+      /* 外挂失败不连累画面 */
     }
   }
 

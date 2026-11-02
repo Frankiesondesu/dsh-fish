@@ -740,11 +740,20 @@ export function createClient(opts = {}) {
     const d = r.data ?? {}
     const v = d.dash?.video?.[0]
     const url = v?.baseUrl ?? v?.base_url ?? d.durl?.[0]?.url ?? ''
+    // fork.14：音频流一起给——她"听"视频靠它（本地 ASR 外挂的输入）。
+    const a = d.dash?.audio?.[0]
+    const audioUrl = a?.baseUrl ?? a?.base_url ?? ''
     return {
       ok: Boolean(url),
       code: r.code,
       message: url ? 'OK' : '没有可用的视频地址',
-      data: { url, duration: d.timelength ? d.timelength / 1000 : 0, width: v?.width ?? 0, height: v?.height ?? 0 },
+      data: {
+        url,
+        audioUrl,
+        duration: d.timelength ? d.timelength / 1000 : 0,
+        width: v?.width ?? 0,
+        height: v?.height ?? 0,
+      },
     }
   }
 
