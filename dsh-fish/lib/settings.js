@@ -123,6 +123,7 @@ export const DEFAULTS = {
   // 节假日没有内置表，按星期几判断：会被当成峰，宁可少看不多用。
   video: {
     enabled: true,
+    engine: 'vs',           // fork.17：'vs' = 用户的外挂全管线（镜头切分/OCR/台词，走不通退回 lite）；'lite' = 内置九帧
     perDay: 2,              // 高峰时段每天最多看几条（0 = 峰时从不）
     offPeakPerDay: 4,       // 空闲时段每天最多看几条（半价，给得多些）
     frames: 9,              // 每条取几帧（9 = 3×3 拼图）

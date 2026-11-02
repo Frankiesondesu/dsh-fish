@@ -300,6 +300,7 @@ window.__ModuleLoader__.load({
       const [videoFrames, setVideoFrames] = useState(9)
       const [videoSubs, setVideoSubs] = useState(true)
       const [videoAsr, setVideoAsr] = useState(true)
+      const [videoEngine, setVideoEngine] = useState('vs')
       const [avoidMinDur, setAvoidMinDur] = useState(60)
       const [avoidMids, setAvoidMids] = useState('')
       const [sleepEvery, setSleepEvery] = useState(7)
@@ -572,6 +573,7 @@ window.__ModuleLoader__.load({
           setVideoOffPeak(Number(cfg.video?.offPeakPerDay ?? 4))
           setVideoSubs(cfg.video?.subs !== false)
           setVideoAsr(cfg.video?.asr !== false)
+          setVideoEngine(String(cfg.video?.engine ?? 'vs'))
           setVideoFrames(Number(cfg.video?.frames ?? 9))
           setAvoidMinDur(Number(cfg.avoid?.minDuration ?? 60))
           setAvoidMids(((cfg.avoid?.upMids) || []).join('，'))
@@ -679,7 +681,7 @@ window.__ModuleLoader__.load({
         },
         window: [wakeFrom, wakeTo],
         browse: { enabled: browseOn, perDay: Number(browsePerDay), topN: Number(browseTopN), deepRead: Number(browseDeepRead), danmaku: Number(browseDanmaku), voices: Boolean(browseVoices), window: [browseFrom, browseTo] },
-        video: { enabled: videoOn, perDay: Number(videoPerDay), offPeakPerDay: Number(videoOffPeak), frames: Number(videoFrames), subs: videoSubs, asr: videoAsr },
+        video: { enabled: videoOn, engine: String(videoEngine), perDay: Number(videoPerDay), offPeakPerDay: Number(videoOffPeak), frames: Number(videoFrames), subs: videoSubs, asr: videoAsr },
         bili: { minIntervalMs: Number(biliMinGap), jitterMs: Number(biliJitter) },
         notify: { enabled: notifyOn },
         chat: { rotateAfter: Number(rotateAfter), replyChars: Number(replyChars) },
@@ -2050,6 +2052,10 @@ window.__ModuleLoader__.load({
             Sel({ label: '每条取几帧', value: videoFrames, onChange: setVideoFrames, options: [4, 6, 9, 12, 16],
               fmt: (v) => (v == 9 ? '9 帧（3×3，推荐）' : `${v} 帧`),
               hint: '帧越多越费时间。9 帧是一张 3×3 拼图，够看清在拍什么。' }),
+            Sel({ label: '看视频的方式', value: videoEngine, onChange: setVideoEngine,
+              options: ['vs', 'lite'],
+              fmt: (v) => (v === 'vs' ? '认真看（外挂管线：镜头切分/OCR/台词，最多 4 张）' : '轻量（内置九帧，单张）'),
+              hint: '认真看更准但要下载整条视频，一次几十秒到几分钟；轻量只拉 9 小块，10 秒级。走不通都会退回轻量。' }),
             Toggle({ label: '带上字幕台词', on: videoSubs, onChange: setVideoSubs,
               hint: '看画面时把 B 站字幕轨里、画面取帧那一刻正说着的几句一并给她（要登录态；没有字幕轨的视频没有）。' }),
             Toggle({ label: '没有字幕时外挂听写', on: videoAsr, onChange: setVideoAsr,

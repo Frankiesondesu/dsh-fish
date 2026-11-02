@@ -9,6 +9,7 @@
 import { readEvents, appendEvent, rootDir } from './store.js'
 import { loadConfig, dateKey } from './settings.js'
 import { grabFrames } from './video.js'
+import { watchViaStoryboard } from './vs.js'
 import { logLine } from './log.js'
 
 import { defineTool } from './tool.js'
@@ -153,23 +154,47 @@ export function registerWatch(ctx, deps = {}) {
           return { ok: false, path: '', text: '', note: '今天看不成了。' }
         }
 
-        const r = await grabFrames({
-          bvid,
-          root,
-          frames: config?.video?.frames,
-          at: args?.at,
-          // fork.14/16：字幕 + 分镜外挂听写（没字幕轨、且 vs 外挂可用时才真正跑）
-          subs: config?.video?.subs,
-          asr: config?.video?.asr,
-          vsPath: config?.video?.vsPath,
-          chunkSec: config?.video?.chunkSec,
-          asrBudgetMs: config?.video?.asrBudgetMs,
-          asrWaitMs: config?.video?.asrWaitMs,
-          hotword: config?.video?.hotword,
-        })
-        if (!r.ok) {
-          logLine('warn', ['看画面：抽帧失败', bvid, r.why ?? ''], root)
-          return { ok: false, path: '', text: '', note: r.why }
+        // fork.17（2026-11-02）：看画面走两条引擎。
+        //   vs（默认）= 用户的 dsh-video-storyboard 全管线：镜头切分取帧、
+        //               每格选最锐利帧、最多 4 张宫格、硬字幕 OCR、台词对齐。
+        //   lite      = 内置九帧（HTTP seek，不下载全片）。
+        // vs 走不通就退回 lite 兜底——两条路都要写 watched: 记账，额度才数得对。
+        const engine = String(config?.video?.engine ?? 'vs')
+        let r = null
+        if (engine === 'vs') {
+          r = await watchViaStoryboard({
+            bvid,
+            root,
+            hotword: config?.video?.hotword,
+            at: args?.at,
+            vsPath: config?.video?.vsPath,
+          }).catch((err) => ({ ok: false, why: String(err?.message ?? err) }))
+          if (!r?.ok) logLine('warn', ['看画面：vs 外挂没走通，退回轻量九帧', r?.why ?? ''], root)
+        }
+        if (!r?.ok) {
+          const lite = await grabFrames({
+            bvid,
+            root,
+            frames: config?.video?.frames,
+            at: args?.at,
+            subs: config?.video?.subs,
+            asr: config?.video?.asr,
+            vsPath: config?.video?.vsPath,
+            chunkSec: config?.video?.chunkSec,
+            asrBudgetMs: config?.video?.asrBudgetMs,
+            asrWaitMs: config?.video?.asrWaitMs,
+            hotword: config?.video?.hotword,
+          })
+          if (!lite.ok) {
+            logLine('warn', ['看画面：抽帧失败', bvid, lite.why ?? ''], root)
+            return { ok: false, path: '', text: '', note: lite.why }
+          }
+          r = lite
+        }
+        // vs 路径自带说明文字（多张图 + 台词），直接用
+        if (engine === 'vs' && r.text) {
+          logLine('info', ['看画面（vs）：取到了', bvid, `${(r.paths ?? []).length} 张`, r.path ?? ''], root)
+          return { ok: true, path: r.path ?? '', text: r.text, note: '' }
         }
 
         await appendEvent(
