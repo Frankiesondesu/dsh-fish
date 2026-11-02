@@ -127,11 +127,14 @@ export const DEFAULTS = {
     offPeakPerDay: 4,       // 空闲时段每天最多看几条（半价，给得多些）
     frames: 9,              // 每条取几帧（9 = 3×3 拼图）
     subs: true,             // fork.14：看的时候把 B 站字幕台词带上（要登录态；没有字幕轨就没有）
-    // 本地听写外挂（fork.14）：没有字幕轨时，把音频送用户的本地 ASR 服务转文字。
-    // 服务不在线就安静跳过——它是可选外挂，不是必需品。
-    asr: true,              // 没有字幕轨时尝试本地听写（要用户的 ASR 服务在线）
-    asrUrl: 'http://127.0.0.1:18765', // 本地 ASR 服务（OpenAI 兼容 /v1/audio/transcriptions）
+    // 本地听写外挂（fork.16）：没有字幕轨时，走用户的 dsh-video-storyboard
+    // 的本地 ASR 服务（~/.dsh/asr.json：服务地址、manage.start 自启、/shutdown 关停）。
+    // 服务不在线就安静跳过——它是可选外挂，不是必需品。看完只关自己拉起来的那份。
+    asr: true,              // 没有字幕轨时尝试外挂听写（要 vs 插件 + 本地 ASR 服务在线）
+    vsPath: '',             // vs 插件 src 目录；空 = 自动找 profiles/desktop/node_modules
+    chunkSec: 55,           // 听写分块秒数（用户实测 240 秒会 CUDA OOM，55 是跑通的值）
     asrBudgetMs: 90000,     // 听写总预算：到了就用手头已有的句子
+    asrWaitMs: 180000,      // 等模型就绪的上限（懒加载约 50s + CUDA 预热约 15s）
     hotword: '',            // 热词（可选，空格分开，提高专有名词识别率）
   },
 
@@ -240,6 +243,8 @@ const LIMITS = {
   'video.perDay': [0, 6],
   'video.offPeakPerDay': [0, 12],
   'video.asrBudgetMs': [15000, 300000],
+  'video.asrWaitMs': [20000, 600000],
+  'video.chunkSec': [10, 240],
   'video.frames': [4, 16],
   'avoid.minDuration': [0, 3600],
   'comment.perDay': [0, 5],

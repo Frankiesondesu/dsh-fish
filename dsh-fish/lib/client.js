@@ -2052,8 +2052,8 @@ window.__ModuleLoader__.load({
               hint: '帧越多越费时间。9 帧是一张 3×3 拼图，够看清在拍什么。' }),
             Toggle({ label: '带上字幕台词', on: videoSubs, onChange: setVideoSubs,
               hint: '看画面时把 B 站字幕轨里、画面取帧那一刻正说着的几句一并给她（要登录态；没有字幕轨的视频没有）。' }),
-            Toggle({ label: '没有字幕时本地听写', on: videoAsr, onChange: setVideoAsr,
-              hint: '字幕轨没有时，把音频送你机器上的本地 ASR 服务（127.0.0.1:18765，OpenAI 兼容）转文字。服务没开就自动跳过，不影响看画面。' }))),
+            Toggle({ label: '没有字幕时外挂听写', on: videoAsr, onChange: setVideoAsr,
+              hint: '字幕轨没有时，走 dsh-video-storyboard 外挂：服务没起就按 asr.json 自启，看完优雅关停；外挂不在就自动跳过，不影响看画面。' }))),
         // 请求节奏（issue #5）：机房/服务器 IP 与家宽的风控阈值差别很大。
         // 这里放的是**网络环境参数**，不是她看什么、怎么想。
         group('请求节奏（网络环境）',

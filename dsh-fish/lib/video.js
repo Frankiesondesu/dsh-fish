@@ -37,12 +37,12 @@
  *      给了 caFile 就成对加 `-tls_verify 1`，让 CA 真的起作用。
  */
 
-import { promises as fs } from 'node:fs'
+import { promises as fs, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { spawn } from 'node:child_process'
 import { detectFfmpeg, mediaDir } from './media.js'
-import { transcribeViaLocalAsr } from './asr.js'
+import { transcribeViaVs, downloadAudio } from './asr.js'
 import { createClient } from './bili.js'
 import { slashed } from './posix.js'
 import { rootDir, readOwner } from './store.js'
@@ -479,23 +479,30 @@ export async function grabFrames(o = {}) {
     }
   }
 
-  // fork.14：没有字幕轨、但用户机器上跑着本地 ASR 服务时，用音频补台词。
-  // 外挂是可选的：服务不在线/音频拿不到/超预算，全部安静退场，画面照旧。
+  // fork.16：没有字幕轨时，走用户的 dsh-video-storyboard 外挂听写。
+  // 它自带生命周期：服务不在就自启（asr.json manage.start），看完优雅关停
+  // （只关自己拉起来的）。服务/插件不存在、超预算，全部安静退场，画面照旧。
   if (!subsText && o.asr && pu?.data?.audioUrl) {
-    try {
-      const ffprobe = String(ff.bin).replace(/ffmpeg(\.exe)?$/i, 'ffprobe$1')
-      const lines = await transcribeViaLocalAsr({
-        asrUrl: o.asrUrl,
-        audioUrl: pu.data.audioUrl,
-        cookie,
-        ffmpeg: ff.bin,
-        ffprobe,
-        budgetMs: o.asrBudgetMs,
-        hotword: o.hotword,
-      })
-      if (lines.length) subsText = pickTranscript(lines, { times })
-    } catch {
-      /* 外挂失败不连累画面 */
+    const dl = await downloadAudio(pu.data.audioUrl, { cookie })
+    if (dl) {
+      try {
+        const lines = await transcribeViaVs({
+          audioFile: dl.file,
+          duration: Number(pu.data.duration) || 0,
+          vsPath: o.vsPath,
+          chunkSec: o.chunkSec,
+          budgetMs: o.asrBudgetMs,
+          waitMs: o.asrWaitMs,
+          hotwords: o.hotword,
+        })
+        if (lines.length) subsText = pickTranscript(lines, { times })
+      } finally {
+        try {
+          rmSync(dl.dir, { recursive: true, force: true })
+        } catch {
+          /* ignore */
+        }
+      }
     }
   }
 

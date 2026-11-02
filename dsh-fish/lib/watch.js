@@ -158,11 +158,13 @@ export function registerWatch(ctx, deps = {}) {
           root,
           frames: config?.video?.frames,
           at: args?.at,
-          // fork.14：字幕 + 本地听写外挂（没字幕轨、且用户的 ASR 服务在线时才真正跑）
+          // fork.14/16：字幕 + 分镜外挂听写（没字幕轨、且 vs 外挂可用时才真正跑）
           subs: config?.video?.subs,
           asr: config?.video?.asr,
-          asrUrl: config?.video?.asrUrl,
+          vsPath: config?.video?.vsPath,
+          chunkSec: config?.video?.chunkSec,
           asrBudgetMs: config?.video?.asrBudgetMs,
+          asrWaitMs: config?.video?.asrWaitMs,
           hotword: config?.video?.hotword,
         })
         if (!r.ok) {
