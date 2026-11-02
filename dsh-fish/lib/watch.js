@@ -21,6 +21,48 @@ export function watchedToday(events, dk) {
   return (events ?? []).filter((e) => e?.type === 'meta' && String(e.text ?? '').startsWith(key)).length
 }
 
+/**
+ * fork.12（2026-11-02）：现在是高峰还是空闲。
+ *
+ * 规则来自 DeepSeek 计价说明：北京时间周一至周五（不含法定节假日）
+ * 9:00–12:00、14:00–18:00 为高峰，**其余——包括周末与法定节假日全天——都是空闲，半价**。
+ *
+ * 法定节假日没有内置表：仍按星期几判断，节假日会被当成峰。
+ * 后果是节假日她可能少看一条，宁可少看，不多用。
+ */
+export function tariffOf(d = new Date()) {
+  const bj = new Date(d.getTime() + 8 * 3600 * 1000) // 挪到北京钟面，再按 UTC 字段读
+  const day = bj.getUTCDay()
+  if (day === 0 || day === 6) return 'idle'
+  const mins = bj.getUTCHours() * 60 + bj.getUTCMinutes()
+  const peak = (mins >= 540 && mins < 720) || (mins >= 840 && mins < 1080)
+  return peak ? 'peak' : 'idle'
+}
+
+/**
+ * fork.12：今天**这个电价档**已经看了几条。
+ *
+ * 老事件没有 tariff 字段。她基本都在晚上/周末看（都是空闲时段），
+ * 所以缺字段的按 idle 算——把"昨晚看的"记到今天空闲头上，
+ * 好过记到峰头上让她白白少看。
+ */
+export function watchedInTariff(events, dk, tariff) {
+  const key = `watched:${dk}`
+  return (events ?? []).filter((e) => {
+    if (e?.type !== 'meta') return false
+    const t = String(e.text ?? '')
+    if (!t.startsWith(key)) return false
+    let json = null
+    try {
+      const m = t.match(/\{[\s\S]*\}/)
+      json = m ? JSON.parse(m[0]) : null
+    } catch {
+      json = null
+    }
+    return (json?.tariff ?? 'idle') === tariff
+  }).length
+}
+
 /** 没有 tenancy（单测、老调用）时自己拼一个，理由同 look.js 的 tenancyOf。 */
 function tenancyOf(root, tenancy) {
   if (tenancy && typeof tenancy === 'object') {
@@ -92,8 +134,13 @@ export function registerWatch(ctx, deps = {}) {
 
         const ev = await readEvents(root).catch(() => ({ events: [] }))
         const dk = dateKey()
-        const cap = Math.max(0, Number(config?.video?.perDay ?? 2))
-        const used = watchedToday(ev.events, dk)
+        // fork.12：按峰谷分开算额度。高峰 = 北京时间工作日 9–12、14–18（半价以外），
+        // 其余都是空闲时段、半价——谷时给得多，峰时给得少。
+        const tariff = tariffOf()
+        const cap = tariff === 'peak'
+          ? Math.max(0, Number(config?.video?.perDay ?? 2))
+          : Math.max(0, Number(config?.video?.offPeakPerDay ?? 4))
+        const used = watchedInTariff(ev.events, dk, tariff)
         // 额度用完只说"不想看了"，不报数字——她不该知道有个计数器在管她（N2）
         if (used >= cap) {
           // 日志里可以写数字：这是给人看的，不是给她看的。
@@ -121,6 +168,7 @@ export function registerWatch(ctx, deps = {}) {
               up: String(r.up ?? '').slice(0, 60),
               duration: Number(r.duration) || 0,
               view: Number(r.view) || 0,
+              tariff,
             })}`,
           },
           { source: 'system' },

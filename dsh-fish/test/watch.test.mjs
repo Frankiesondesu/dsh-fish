@@ -99,10 +99,13 @@ test('registerWatch：画面功能关掉时拒，理由与"打不开"分开', as
 
 test('registerWatch：额度已经用完时只说"不想看了"，不报数字', async () => {
   await withRoot(async (root) => {
-    await updateConfig({ browse: { enabled: true }, video: { enabled: true, perDay: 1 } }, root)
+    // fork.12：额度按峰谷分开算，测试不知道跑的时候是峰还是谷——
+    // 两档各塞满一条，无论现在是什么时段，额度都是满的。
+    await updateConfig({ browse: { enabled: true }, video: { enabled: true, perDay: 1, offPeakPerDay: 1 } }, root)
     const { dateKey } = await import('../lib/settings.js')
     const dk = dateKey()
-    await appendEvent({ type: 'meta', text: `watched:${dk} BV1xx411c7mD` }, { source: 'system' }, root)
+    await appendEvent({ type: 'meta', text: `watched:${dk} BV1xx411c7mD ${JSON.stringify({ tariff: 'peak' })}` }, { source: 'system' }, root)
+    await appendEvent({ type: 'meta', text: `watched:${dk} BV1yy411c7mE ${JSON.stringify({ tariff: 'idle' })}` }, { source: 'system' }, root)
     const ctx = fakeCtx()
     registerWatch(ctx, { root })
     const out = await ctx._tools[0].execute({ bvid: 'BV1ED4y1Y7dc' })
@@ -147,9 +150,12 @@ test('视频号不合法时，日志里留下「视频号不合法」和原样�
 
 test('额度用完时日志写数字（1/1），好追额度怎么用掉的', async () => {
   await withRoot(async (root) => {
-    await updateConfig({ browse: { enabled: true }, video: { enabled: true, perDay: 1 } }, root)
+    // fork.12：两档各塞满一条，见上一条测试的注释
+    await updateConfig({ browse: { enabled: true }, video: { enabled: true, perDay: 1, offPeakPerDay: 1 } }, root)
     const { dateKey } = await import('../lib/settings.js')
-    await appendEvent({ type: 'meta', text: `watched:${dateKey()} BV1xx411c7mD` }, { source: 'system' }, root)
+    const dk = dateKey()
+    await appendEvent({ type: 'meta', text: `watched:${dk} BV1xx411c7mD ${JSON.stringify({ tariff: 'peak' })}` }, { source: 'system' }, root)
+    await appendEvent({ type: 'meta', text: `watched:${dk} BV1yy411c7mE ${JSON.stringify({ tariff: 'idle' })}` }, { source: 'system' }, root)
     const ctx = fakeCtx()
     registerWatch(ctx, { root })
     await ctx._tools[0].execute({ bvid: 'BV1ED4y1Y7dc' })

@@ -115,9 +115,16 @@ export const DEFAULTS = {
   // 为什么单独一个开关而不跟 browse 绑死：抽帧要十秒、要 ffmpeg、占带宽，
   // 有人只想让她读文字。默认开，但每天只给 2 条——一条 9 帧 ≈ 一张图的时间，
   // 再多就变成"以看图为主"了，那不是她该有的生活。
+  //
+  // fork.12（2026-11-02）：额度按 DeepSeek 的峰谷分开算。
+  // 高峰 = 北京时间工作日 9:00–12:00、14:00–18:00（原价），
+  // 其余——含周末与法定节假日全天——都是空闲时段、半价。
+  // 所以谷时给的额度多（offPeakPerDay），峰时少（perDay）。
+  // 节假日没有内置表，按星期几判断：会被当成峰，宁可少看不多用。
   video: {
     enabled: true,
-    perDay: 2,              // 每天最多看几条视频的画面（0 = 从不）
+    perDay: 2,              // 高峰时段每天最多看几条（0 = 峰时从不）
+    offPeakPerDay: 4,       // 空闲时段每天最多看几条（半价，给得多些）
     frames: 9,              // 每条取几帧（9 = 3×3 拼图）
   },
 
@@ -224,6 +231,7 @@ const LIMITS = {
   'bili.minIntervalMs': [200, 120000],
   'bili.jitterMs': [0, 60000],
   'video.perDay': [0, 6],
+  'video.offPeakPerDay': [0, 12],
   'video.frames': [4, 16],
   'avoid.minDuration': [0, 3600],
   'comment.perDay': [0, 5],

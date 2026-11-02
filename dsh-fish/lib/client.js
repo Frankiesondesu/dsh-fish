@@ -296,6 +296,7 @@ window.__ModuleLoader__.load({
       const [browseVoices, setBrowseVoices] = useState(true)
       const [videoOn, setVideoOn] = useState(true)
       const [videoPerDay, setVideoPerDay] = useState(2)
+      const [videoOffPeak, setVideoOffPeak] = useState(4)
       const [videoFrames, setVideoFrames] = useState(9)
       const [avoidMinDur, setAvoidMinDur] = useState(60)
       const [avoidMids, setAvoidMids] = useState('')
@@ -566,6 +567,7 @@ window.__ModuleLoader__.load({
           setBrowseVoices(cfg.browse?.voices !== false)
           setVideoOn(cfg.video?.enabled !== false)
           setVideoPerDay(Number(cfg.video?.perDay ?? 2))
+          setVideoOffPeak(Number(cfg.video?.offPeakPerDay ?? 4))
           setVideoFrames(Number(cfg.video?.frames ?? 9))
           setAvoidMinDur(Number(cfg.avoid?.minDuration ?? 60))
           setAvoidMids(((cfg.avoid?.upMids) || []).join('，'))
@@ -673,7 +675,7 @@ window.__ModuleLoader__.load({
         },
         window: [wakeFrom, wakeTo],
         browse: { enabled: browseOn, perDay: Number(browsePerDay), topN: Number(browseTopN), deepRead: Number(browseDeepRead), danmaku: Number(browseDanmaku), voices: Boolean(browseVoices), window: [browseFrom, browseTo] },
-        video: { enabled: videoOn, perDay: Number(videoPerDay), frames: Number(videoFrames) },
+        video: { enabled: videoOn, perDay: Number(videoPerDay), offPeakPerDay: Number(videoOffPeak), frames: Number(videoFrames) },
         bili: { minIntervalMs: Number(biliMinGap), jitterMs: Number(biliJitter) },
         notify: { enabled: notifyOn },
         chat: { rotateAfter: Number(rotateAfter), replyChars: Number(replyChars) },
@@ -706,7 +708,8 @@ window.__ModuleLoader__.load({
         ['弹幕几条', browseDanmaku, 0, 30],
         ['请求间隔', biliMinGap, 200, 120000],
         ['请求抖动', biliJitter, 0, 60000],
-        ['每天看几个视频', videoPerDay, 0, 6],
+        ['高峰时段每天看几条', videoPerDay, 0, 6],
+        ['空闲时段每天看几条', videoOffPeak, 0, 12],
         ['抽几帧', videoFrames, 4, 16],
         ['多少轮换会话', rotateAfter, 0, 500],
         ['每轮最多写多少字', replyChars, 0, 2000],
@@ -2036,8 +2039,10 @@ window.__ModuleLoader__.load({
           h('div', { className: 'grid2' },
             Toggle({ label: '允许看视频画面', on: videoOn, onChange: setVideoOn,
               hint: '需要本机有 ffmpeg。每条视频抽几帧拼成一张图给她看，一次约 10 秒。' }),
-            Num({ label: '每天最多看几条', value: videoPerDay, onChange: setVideoPerDay, min: 0, max: 6, unit: '条',
-              hint: '看画面要花时间。默认 2 条——再多就变成以看图为主了。' }),
+            Num({ label: '高峰时段每天最多几条', value: videoPerDay, onChange: setVideoPerDay, min: 0, max: 6, unit: '条',
+              hint: '工作日 9–12 点、14–18 点（原价时段）。看画面要花时间，默认 2 条。' }),
+            Num({ label: '空闲时段每天最多几条', value: videoOffPeak, onChange: setVideoOffPeak, min: 0, max: 12, unit: '条',
+              hint: '其余时间都是半价（含周末与节假日全天）。给得多些，默认 4 条。' }),
             Sel({ label: '每条取几帧', value: videoFrames, onChange: setVideoFrames, options: [4, 6, 9, 12, 16],
               fmt: (v) => (v == 9 ? '9 帧（3×3，推荐）' : `${v} 帧`),
               hint: '帧越多越费时间。9 帧是一张 3×3 拼图，够看清在拍什么。' }))),
