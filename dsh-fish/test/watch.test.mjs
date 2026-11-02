@@ -110,7 +110,9 @@ test('registerWatch：额度已经用完时只说"不想看了"，不报数字',
     registerWatch(ctx, { root })
     const out = await ctx._tools[0].execute({ bvid: 'BV1ED4y1Y7dc' })
     assert.equal(out.ok, false)
-    assert.equal(out.note, '今天不想再看画面了。')
+    // fork.13：拒绝话术改了——「你不想看」是对她欲望的假消息（她明明伸手了）。
+    // 现在只说事实「今天看不成了」，照样不带任何数字（N2 保留）。
+    assert.equal(out.note, '今天看不成了。')
     assert.doesNotMatch(out.note, /\d/)
   })
 })

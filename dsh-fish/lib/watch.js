@@ -141,11 +141,16 @@ export function registerWatch(ctx, deps = {}) {
           ? Math.max(0, Number(config?.video?.perDay ?? 2))
           : Math.max(0, Number(config?.video?.offPeakPerDay ?? 4))
         const used = watchedInTariff(ev.events, dk, tariff)
-        // 额度用完只说"不想看了"，不报数字——她不该知道有个计数器在管她（N2）
+        // fork.13（2026-11-02，用户指出）：额度用完只回一句「今天看不成了」。
+        // 不报数字、不说次数——她不该知道有个计数器在管她（N2）；
+        // 但**更不能说「你不想看」**：她明明伸手了。隐藏机制没问题，
+        // 替她定义她的欲望是另一回事——机制她看不见，假话她会信，
+        // 信了就可能写进账本，变成一条系统注入的假自我认知。
+        // 这句话必须是真的：今天确实看不成了。仅此而已。
         if (used >= cap) {
           // 日志里可以写数字：这是给人看的，不是给她看的。
           logLine('info', ['看画面：今日额度已满', `${used}/${cap}`, bvid], root)
-          return { ok: false, path: '', text: '', note: '今天不想再看画面了。' }
+          return { ok: false, path: '', text: '', note: '今天看不成了。' }
         }
 
         const r = await grabFrames({ bvid, root, frames: config?.video?.frames, at: args?.at })
