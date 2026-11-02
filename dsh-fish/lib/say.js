@@ -328,7 +328,11 @@ export async function sayToHer(ctx, text, deps = {}) {
       her: spoken,
       day: model.day,
       stage: model.stage,
-      sessionId: talkSessionId(ctx),
+      // fork.18（2026-11-02）：这里原来写的是 `talkSessionId(ctx)`。那是个 async
+      // 函数，传进去的是 Promise，talklog 里 String(Promise) 就把账本写成
+      // `"sessionId":"[object Promise]"`——账本只增不改，写脏了擦不掉。
+      // 上面第 249 行的 sessionId 已经是 await 出来的那个，直接用，别再查一遍。
+      sessionId,
     }).catch(() => {})
     const turns = await bumpTurns(root, 1)
     // A2（2026-10-30，用户 m00112）：每 hearEvery 轮，把他说的**一句原话**记下来。

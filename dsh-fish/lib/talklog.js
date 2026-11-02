@@ -24,6 +24,20 @@ function cut(s) {
 }
 
 /**
+ * fork.18（2026-11-02）：sessionId 只收字符串/数字。
+ *
+ * 之前直接 `String(o.sessionId)`，于是调用方传了个没 await 的 Promise 时，
+ * 账本里留下的是 `"sessionId":"[object Promise]"`——账本只增不改，擦不掉。
+ * 与其指望每个调用点都记得 await，不如在这一层把非标量挡掉：
+ * 认不出来的就当没给（这字段只是溯源线索，缺了不影响她读）。
+ */
+function idOf(v) {
+  if (typeof v === 'string') return v.trim()
+  if (typeof v === 'number' && Number.isFinite(v)) return String(v)
+  return ''
+}
+
+/**
  * @param {string} root
  * @param {{me?:string, her?:string, day?:number, stage?:number, sessionId?:string}} o
  * @returns {Promise<boolean>} 写没写进去（写失败不抛，别连累对话）
@@ -34,12 +48,13 @@ export async function logExchange(root, o = {}) {
   if (!me && !her) return false
   const dk = new Date().toISOString().slice(0, 10)
   const body = [me ? `他说「${me}」` : '', her ? `我答「${her}」` : ''].filter(Boolean).join('／')
+  const sid = idOf(o.sessionId)
   try {
     await appendEvent(
       {
         type: 'meta',
         text: `talk:${dk} ${body}`,
-        ...(o.sessionId ? { sessionId: String(o.sessionId) } : {}),
+        ...(sid ? { sessionId: sid } : {}),
       },
       { day: Number(o.day ?? 0), stage: Number(o.stage ?? 1), source: 'system' },
       root,
