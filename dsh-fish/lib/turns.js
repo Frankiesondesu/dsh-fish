@@ -28,7 +28,7 @@
 
 import { rootDir, readEvents, appendEvent } from './store.js'
 import { loadConfig, dateKey } from './settings.js'
-import { parseWatchIntent } from './intent.js'
+import { parseWatchIntent, handText } from './intent.js'
 import { homeStatus, bumpTurns, rotateTalkSession, adoptTalkSession } from './home.js'
 import { addExchange } from './talkmem.js'
 import { logExchange } from './talklog.js'
@@ -199,10 +199,11 @@ export function registerTurns(ctx, deps = {}) {
     // 他递来一条视频（2026-10-28）：记一条事实 `hand:<日期> <bvid>`。
     // **不等于她看过**——评论闸门不认这一行，认的是 look:/watched:。
     // 只记 BV 号；短链在这一层不解析（要发网络请求，不该卡在她说话的路径上）。
+    // fork.20（2026-11-02）：格式挪进 intent.js 的 handText——say.js 那条路（QQ）也要写它。
     const want = parseWatchIntent(text)
     if (want.hasVideo && want.bvid) {
       appendEvent(
-        { type: 'meta', text: `hand:${dateKey()} ${want.bvid}` },
+        { type: 'meta', text: handText(dateKey(), want.bvid) },
         { day: 0, stage: 1, source: 'system' },
         root,
       ).catch(() => {})

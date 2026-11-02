@@ -4,13 +4,19 @@
  * 为什么不塞进 bili_look 自动做：抽一次帧要十秒左右、还要占额度。
  * 她翻列表时看四条视频就自动抽四次，既慢又浪费。**让她自己决定哪条值得看画面**，
  * 这也正好是「自主」这个维度唯一的可验证载体——跟当初给她 bili_look 是同一个理由。
+ *
+ * 额度管的是"她自己决定去看什么"（fork.20，2026-11-02 用户定案）：
+ * 他自己发过来的那条不算——选择是他做的，记在她头上没有道理。
+ * 判据只有账本里的 `hand:`，见 intent.js 的 isHanded。
  */
 
-import { readEvents, appendEvent, rootDir } from './store.js'
+import { readEvents, appendEvent, rootDir, readOwner } from './store.js'
 import { loadConfig, dateKey } from './settings.js'
+import { createClient } from './bili.js'
 import { grabFrames } from './video.js'
 import { watchViaStoryboard } from './vs.js'
 import { logLine } from './log.js'
+import { isHanded } from './intent.js'
 
 import { defineTool } from './tool.js'
 import { slashed } from './posix.js'
@@ -46,6 +52,9 @@ export function tariffOf(d = new Date()) {
  * 老事件没有 tariff 字段。她基本都在晚上/周末看（都是空闲时段），
  * 所以缺字段的按 idle 算——把"昨晚看的"记到今天空闲头上，
  * 好过记到峰头上让她白白少看。
+ *
+ * fork.20：带 `free: true` 的是**他递过来的那条**——记了 `watched:`（她确实看过），
+ * 但不占额度。两件事别混：`watched:` 是"看没看过"的凭证，额度只数"她自己挑的"。
  */
 export function watchedInTariff(events, dk, tariff) {
   const key = `watched:${dk}`
@@ -60,12 +69,33 @@ export function watchedInTariff(events, dk, tariff) {
     } catch {
       json = null
     }
-    return (json?.tariff ?? 'idle') === tariff
+    return (json?.tariff ?? 'idle') === tariff && json?.free !== true
   }).length
 }
 
-/** 没有 tenancy（单测、老调用）时自己拼一个，理由同 look.js 的 tenancyOf。 */
-function tenancyOf(root, tenancy) {
+/**
+ * vs 引擎只从 ffprobe 拿到时长，**没有标题/UP/播放量**（probe.js 不看 B 站接口）。
+ * 于是 fork.17 之后「她今天看了什么」里全是裸 BV 号，人根本认不出是哪条。
+ *
+ * 补一次 view 接口，拿不到就算了——这一步只影响报告好不好读，
+ * 绝不能因为网络抖一下就让她这次"没看成"。
+ */
+async function enrichInfo(root, r, bvid) {
+  if (!r || (r.title && r.title !== bvid)) return
+  try {
+    const cookie = (await readOwner(root))?.cookie ?? ''
+    const info = await createClient({ cookie }).view(bvid)
+    const d = info?.data ?? {}
+    if (d.title) r.title = String(d.title)
+    if (d.owner?.name) r.up = String(d.owner.name)
+    if (!Number(r.duration)) r.duration = Number(d.duration) || 0
+    if (!Number(r.view)) r.view = Number(d.view) || 0
+  } catch {
+    /* 补不到就留裸 BV 号，记账照走 */
+  }
+}
+
+/** 没有 tenancy（单测、老调用）时自己拼一个，理由同 look.js 的 tenancyOf。 */function tenancyOf(root, tenancy) {
   if (tenancy && typeof tenancy === 'object') {
     return { root, herDir: String(tenancy.herDir ?? ''), tenant: tenancy.tenant ?? { ok: true } }
   }
@@ -135,6 +165,16 @@ export function registerWatch(ctx, deps = {}) {
 
         const ev = await readEvents(root).catch(() => ({ events: [] }))
         const dk = dateKey()
+        // fork.20（2026-11-02，用户定案）：**他发的不限额，她自己翻的才限额。**
+        //
+        // 额度这个东西管的是"她自己决定去看什么"——bili_watch 单独拆出来，
+        // 就是为了让"哪条值得看画面"是她的判断（见本文件头注释）。
+        // 他递过来一条，选择是他做的，不该记在她的额度上。
+        //
+        // 判据只认账本里的 `hand:`（他真人消息里带过这条 BV），
+        // 不认工具参数、不认她自己的说法——那两样都是可以随口说的。
+        const free = isHanded(ev.events, bvid)
+        if (free) logLine('info', ['看画面：这条是他递过来的，不占额度', bvid], root)
         // fork.12：按峰谷分开算额度。高峰 = 北京时间工作日 9–12、14–18（半价以外），
         // 其余都是空闲时段、半价——谷时给得多，峰时给得少。
         const tariff = tariffOf()
@@ -148,7 +188,7 @@ export function registerWatch(ctx, deps = {}) {
         // 替她定义她的欲望是另一回事——机制她看不见，假话她会信，
         // 信了就可能写进账本，变成一条系统注入的假自我认知。
         // 这句话必须是真的：今天确实看不成了。仅此而已。
-        if (used >= cap) {
+        if (!free && used >= cap) {
           // 日志里可以写数字：这是给人看的，不是给她看的。
           logLine('info', ['看画面：今日额度已满', `${used}/${cap}`, bvid], root)
           return { ok: false, path: '', text: '', note: '今天看不成了。' }
@@ -191,12 +231,14 @@ export function registerWatch(ctx, deps = {}) {
           }
           r = lite
         }
-        // vs 路径自带说明文字（多张图 + 台词），直接用
-        if (engine === 'vs' && r.text) {
-          logLine('info', ['看画面（vs）：取到了', bvid, `${(r.paths ?? []).length} 张`, r.path ?? ''], root)
-          return { ok: true, path: r.path ?? '', text: r.text, note: '' }
-        }
-
+        // fork.20：vs 那边没有标题，补一次接口，报告才认得出来是哪条。
+        await enrichInfo(root, r, bvid)
+        // ---- 记账：两条引擎都必须写 ----
+        //
+        // fork.20（2026-11-02）：原来 vs 分支在下面提前 return，这一步被整个跳过。
+        // 而 fork.17 起 vs 是默认引擎——于是每一次成功的看画面都不进账本：
+        // 报告里没有、额度不涨、评论闸门（认的正是 watched:）还会把她挡在外面。
+        // 记账挪到 return 之前，两条路共用一次。
         await appendEvent(
           {
             type: 'meta',
@@ -212,18 +254,34 @@ export function registerWatch(ctx, deps = {}) {
               duration: Number(r.duration) || 0,
               view: Number(r.view) || 0,
               tariff,
+              // fork.20：他递过来的那条不占额度。她确实看过（凭证照记），
+              // 但计数那边（watchedInTariff）认这个标记跳过它。
+              ...(free ? { free: true } : {}),
             })}`,
           },
           { source: 'system' },
           root,
         ).catch(() => {})
 
+        // 日志里说清这一条是怎么算的：占额度就写 n/cap，他给的就直说。
+        const quotaText = free ? '他给的，不占额度' : `${used + 1}/${cap}`
+
+        // vs 路径自带说明文字（多张图 + 台词），直接用
+        if (engine === 'vs' && r.text) {
+          logLine(
+            'info',
+            ['看画面（vs）：取到了', bvid, `${(r.paths ?? []).length} 张`, quotaText, r.path ?? ''],
+            root,
+          )
+          return { ok: true, path: r.path ?? '', text: r.text, note: '' }
+        }
+
         // 路径一律给正斜杠：宿主渲染 markdown 图片时会拿路径拼 /api/file，
         // C:\... 这种反斜杠写法在客户端解析后取不到文件，图片就显示成「无法预览」
         // （2026-10-26 实测：同一张图 C:\ 版失败、C:/ 版正常）。
         const posix = slashed(r.path)
         // 成功的这一条也要记：跟日志里「今日额度已满」对得上，才知道额度是怎么用掉的。
-        logLine('info', ['看画面：取到了', bvid, `${used + 1}/${cap}`, posix], root)
+        logLine('info', ['看画面：取到了', bvid, quotaText, posix], root)
         return {
           ok: true,
           path: posix,

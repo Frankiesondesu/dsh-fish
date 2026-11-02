@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { extractBvid, parseWatchIntent, watchHint } from '../lib/intent.js'
+import { extractBvid, parseWatchIntent, watchHint, handText, isHanded } from '../lib/intent.js'
 import { renderSelfDoc } from '../lib/selfdoc.js'
 import { deriveSelf } from '../lib/derive.js'
 
@@ -72,4 +72,35 @@ test('身份档里写着这两档的区别', () => {
   assert.match(withBrowse, /那只是问我/)
   const noBrowse = renderSelfDoc(model, { browse: false })
   assert.doesNotMatch(noBrowse, /他有时会丢一条视频给我/)
+})
+
+// fork.20（2026-11-02，用户定案）：他发过来的那条不占看画面的额度。
+// 判据只有账本里的 `hand:`——不认工具参数、不认她自己的说法。
+test('handText 写出 whatseen 认得的形状：hand:<日期> <bvid>', async () => {
+  assert.equal(handText('2026-11-02', BV), `hand:2026-11-02 ${BV}`)
+  assert.equal(handText('2026-11-02', ` ${BV} `), `hand:2026-11-02 ${BV}`)
+  // 与 whatseen.js 的 parseDated 同一形状（hand: 后面先日期再空格再 bvid）
+  const { parseHandLine } = await import('../lib/whatseen.js')
+  assert.deepEqual(parseHandLine(handText('2026-11-02', BV)), { dk: '2026-11-02', bvid: BV, info: null })
+})
+
+test('isHanded：只认 meta 里的 hand:，且只认那一条', () => {
+  const events = [
+    { type: 'meta', text: `hand:2026-11-02 ${BV}` },
+    { type: 'meta', text: 'hand:2026-11-02 BV1aa411c7m1' },
+    { type: 'utterance', text: `hand:2026-11-02 BV1bb411c7m2` }, // 她写的不算
+    { type: 'meta', text: `watched:2026-11-02 BV1cc411c7m3` }, // 看过不等于他递的
+  ]
+  assert.equal(isHanded(events, BV), true)
+  assert.equal(isHanded(events, 'BV1aa411c7m1'), true)
+  assert.equal(isHanded(events, 'BV1bb411c7m2'), false, '她自己在正文里写的 hand: 不算数')
+  assert.equal(isHanded(events, 'BV1cc411c7m3'), false, '看过不等于他递过来')
+  assert.equal(isHanded(events, ''), false)
+  assert.equal(isHanded([], BV), false)
+  assert.equal(isHanded(null, BV), false)
+})
+
+test('isHanded：不带日期窗口——他递过一次，这条就一直是"他给的"', () => {
+  const events = [{ type: 'meta', text: `hand:2026-10-01 ${BV}` }]
+  assert.equal(isHanded(events, BV), true)
 })

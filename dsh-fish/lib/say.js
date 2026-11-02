@@ -20,7 +20,7 @@
  */
 
 import { readEvents, appendEvent, rootDir, ensureHer } from './store.js'
-import { parseWatchIntent, watchHint } from './intent.js'
+import { parseWatchIntent, watchHint, handText } from './intent.js'
 import { loadConfig, dateKey } from './settings.js'
 import { deriveSelf } from './derive.js'
 import { writeInboxFile, newHerEventsSince } from './inbox.js'
@@ -214,7 +214,21 @@ export async function sayToHer(ctx, text, deps = {}) {
   // ---- 他这条消息里有没有丢一条视频 ----
   // 只把"他说的是什么意思"写进去，不替她决定看不看（见 intent.js）。
   // 这一步是纯文本解析，不碰网络：她要不要真去 bili_look，仍然是她自己的事。
-  const watchText = watchHint(parseWatchIntent(body))
+  const want = parseWatchIntent(body)
+  const watchText = watchHint(want)
+  // 2026-11-02（fork.20）：这条也记 `hand:`。
+  //
+  // 原来只有侧栏那条路（turns.js 的 onHuman）写它，而他和她说话基本都在 QQ 上
+  // （bridge → 这个文件）。结果是"他递过来的视频"在手机上递的一次都记不上，
+  // watch.js 里那条"他给的不占额度"就永远不成立。
+  // **仍然不等于她看过**：评论闸门认的是 look:/watched:，不认这一行。
+  if (want.hasVideo && want.bvid) {
+    appendEvent(
+      { type: 'meta', text: handText(dateKey(), want.bvid) },
+      { day: 0, stage: 1, source: 'system' },
+      root,
+    ).catch(() => {})
+  }
 
   const parts = [
     '## 他跟你说话了',

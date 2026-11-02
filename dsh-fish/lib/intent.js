@@ -75,6 +75,38 @@ export function parseWatchIntent(text) {
 }
 
 /**
+ * `hand:` 记账行的唯一写法（2026-11-02，fork.20）。
+ *
+ * 原来这一行只在 turns.js 里现拼，QQ 那条路（bridge → /say）**一次都没写过**——
+ * 而他和她说话基本都在手机上。于是"他递过来的视频"在手机里递的全记不上，
+ * 账本里只剩侧栏那几次。格式只留一处，别让两边各拼各的。
+ */
+export const handText = (dk, bvid) => `hand:${dk} ${String(bvid ?? '').trim()}`
+
+/**
+ * 这条视频是不是他递过来的。
+ *
+ * fork.20（2026-11-02，用户定案）：**他发的不占额度，她自己翻的才占。**
+ * 理由不是给他开后门，是额度本身的语义——它管的是"她自己决定去看什么"
+ * （见 watch.js 头注释：这是「自主」维度唯一的可验证载体）。
+ * 他递过来的是他的选择，不是她的自主，不该记在她头上。
+ *
+ * 不带日期窗口：他递过一次，这条就一直是"他给的"。
+ * `hand:` 只在真人消息里写，量很小，全量扫一遍不心疼。
+ * 认的形状与 whatseen.js 的 `parseDated` 一致：`hand:<日期> <bvid>`。
+ */
+export function isHanded(events, bvid) {
+  const want = String(bvid ?? '').trim()
+  if (!want) return false
+  return (events ?? []).some((e) => {
+    if (e?.type !== 'meta') return false
+    const t = String(e.text ?? '')
+    if (!t.startsWith('hand:')) return false
+    return t.slice('hand:'.length).trim().split(/\s+/)[1] === want
+  })
+}
+
+/**
  * 拼成递给她的那一行。返回空串表示没什么要说的（看不出是视频，或他收回了要求）。
  *
  * 注意措辞：这里只描述"他说了什么"，不替她做决定。

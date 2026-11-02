@@ -11,7 +11,7 @@ import { readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { watchedToday, registerWatch } from '../lib/watch.js'
+import { watchedToday, watchedInTariff, registerWatch } from '../lib/watch.js'
 import { logFile } from '../lib/log.js'
 import { appendEvent } from '../lib/store.js'
 import { updateConfig } from '../lib/settings.js'
@@ -114,6 +114,73 @@ test('registerWatch：额度已经用完时只说"不想看了"，不报数字',
     // 现在只说事实「今天看不成了」，照样不带任何数字（N2 保留）。
     assert.equal(out.note, '今天看不成了。')
     assert.doesNotMatch(out.note, /\d/)
+  })
+})
+
+// fork.20（2026-11-02，用户定案）：他发过来的那条不占额度，她自己翻的才占。
+// 额度管的是"她自己决定去看什么"，选择是他做的那次不该记在她头上。
+test('watchedInTariff：带 free 标记的（他递过来的）不算额度，但照样在 watchedToday 里', () => {
+  const dk = '2026-11-02'
+  const events = [
+    { type: 'meta', text: `watched:${dk} BV1aa411c7m1 ${JSON.stringify({ tariff: 'idle', free: true })}` },
+    { type: 'meta', text: `watched:${dk} BV1bb411c7m2 ${JSON.stringify({ tariff: 'idle' })}` },
+    // 老事件没有 tariff 字段 → 按 idle 算（fork.12 的规矩不变）
+    { type: 'meta', text: `watched:${dk} BV1cc411c7m3` },
+  ]
+  assert.equal(watchedInTariff(events, dk, 'idle'), 2, 'free 那条不占额度')
+  assert.equal(watchedInTariff(events, dk, 'peak'), 0)
+  // 看没看过是另一回事：free 的照样算"看过"
+  assert.equal(watchedToday(events, dk), 3)
+})
+
+test('bili_watch：额度满了，但他递过来的那条照样能看（不报额度已满）', async () => {
+  await withRoot(async (root) => {
+    const saved = process.env.PATH
+    const savedFf = process.env.DSH_FISH_FFMPEG
+    process.env.PATH = '' // 让抽帧必然失败——这一条只验"过没过额度闸门"
+    delete process.env.DSH_FISH_FFMPEG
+    try {
+      await updateConfig({ browse: { enabled: true }, video: { enabled: true, perDay: 1, offPeakPerDay: 1 } }, root)
+      const { dateKey } = await import('../lib/settings.js')
+      const dk = dateKey()
+      // 两档各塞满一条：无论此刻是峰是谷，额度都满了
+      await appendEvent({ type: 'meta', text: `watched:${dk} BV1xx411c7mD ${JSON.stringify({ tariff: 'peak' })}` }, { source: 'system' }, root)
+      await appendEvent({ type: 'meta', text: `watched:${dk} BV1yy411c7mE ${JSON.stringify({ tariff: 'idle' })}` }, { source: 'system' }, root)
+      // 他递过这一条
+      await appendEvent({ type: 'meta', text: `hand:${dk} BV1ED4y1Y7dc` }, { source: 'system' }, root)
+
+      const ctx = fakeCtx()
+      registerWatch(ctx, { root })
+      const out = await ctx._tools[0].execute({ bvid: 'BV1ED4y1Y7dc' })
+      const log = readLog(root)
+      assert.doesNotMatch(log, /今日额度已满/, '他给的这条不该被额度挡下')
+      assert.match(log, /他递过来的，不占额度/)
+      // 闸门过了，后面失败在抽帧上（这台机器没有 ffmpeg）
+      assert.equal(out.note !== '今天看不成了。', true)
+      assert.match(log, /抽帧失败 BV1ED4y1Y7dc/)
+    } finally {
+      process.env.PATH = saved
+      if (savedFf === undefined) delete process.env.DSH_FISH_FFMPEG
+      else process.env.DSH_FISH_FFMPEG = savedFf
+    }
+  })
+})
+
+test('bili_watch：额度满了，她自己翻到的另一条仍然被挡（免额度不扩散）', async () => {
+  await withRoot(async (root) => {
+    await updateConfig({ browse: { enabled: true }, video: { enabled: true, perDay: 1, offPeakPerDay: 1 } }, root)
+    const { dateKey } = await import('../lib/settings.js')
+    const dk = dateKey()
+    await appendEvent({ type: 'meta', text: `watched:${dk} BV1xx411c7mD ${JSON.stringify({ tariff: 'peak' })}` }, { source: 'system' }, root)
+    await appendEvent({ type: 'meta', text: `watched:${dk} BV1yy411c7mE ${JSON.stringify({ tariff: 'idle' })}` }, { source: 'system' }, root)
+    // 他递过的是**别的**一条
+    await appendEvent({ type: 'meta', text: `hand:${dk} BV1zz411c7mF` }, { source: 'system' }, root)
+
+    const ctx = fakeCtx()
+    registerWatch(ctx, { root })
+    const out = await ctx._tools[0].execute({ bvid: 'BV1ED4y1Y7dc' })
+    assert.equal(out.ok, false)
+    assert.equal(out.note, '今天看不成了。')
   })
 })
 
