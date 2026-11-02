@@ -37,9 +37,15 @@ import { lengthBudget } from './budget.js'
 // 免得同一件事两处各写一遍、哪天悄悄分叉。
 import { assistantText } from './turns.js'
 
-// 等她说完最多等这么久。一次回话通常 8–30 秒；75 秒还没结束就先把
-// 已落盘的交出去（她可能在调工具，也可能卡住了），不让人干等到超时。
-const REPLY_WAIT_MS = 75_000
+// 等她说完最多等这么久。一次普通回话 8–30 秒，但 fork.22 起她看画面走 vs 全管线
+// （要下载整条视频），一条 20–40 秒；他一条消息丢两条链接就是 80 秒。
+//
+// 2026-11-02 22:01 真机：75 秒的死线正好卡在"她还在看"的时候，say 判她「没说话」，
+// 桥于是什么都不发；她的回话 8 秒后才落盘——DSH 里看得见，QQ 里没有。
+// 现在：**静默** 120 秒才判她说完；期间只要她还在动（有事件）就重新计时，
+// 最多陪到 240 秒。死线量的是"她停了多久"，不是"过了多久"。
+const REPLY_WAIT_MS = 120_000
+const REPLY_WAIT_MAX_MS = 240_000
 // 她自己开口的上限：一句话 2000 字由 schema 兜，这里只兜条数
 const MAX_TEXT = 4000
 // 一轮里她可能分几步说话，最多合并这么多条（与 turns.js 的 TURN_MSGS_MAX 同量级）
@@ -48,12 +54,17 @@ const SPEECH_MAX = 5
 /**
  * 等这一轮真正结束（turn/end）。与 scheduler.watchTurnEnd 同源，
  * 但这里**需要等待**，所以返回 Promise。
+ *
+ * fork.23（2026-11-02）：改成"静默计时"——每来一条这个会话的事件就把计时重开一次，
+ * 所以它量的是"她停了多久"，不是"过了多久"。她看视频时中间可能几十秒一声不响，
+ * 但只要还在动就接着等；真的卡死了，静默 timeoutMs 之后照样放手。
  */
-function waitTurnEnd(ctx, sessionId, timeoutMs) {
+export function waitTurnEnd(ctx, sessionId, timeoutMs, { maxMs = REPLY_WAIT_MAX_MS } = {}) {
   return new Promise((resolve) => {
     let done = false
     let timer = null
     let off = null
+    const hard = Date.now() + Math.max(timeoutMs, maxMs)
     const finish = () => {
       if (done) return
       done = true
@@ -61,21 +72,28 @@ function waitTurnEnd(ctx, sessionId, timeoutMs) {
       try { off?.() } catch { /* ignore */ }
       resolve()
     }
+    const arm = (ms) => {
+      if (timer) clearTimeout(timer)
+      timer = setTimeout(finish, ms)
+      if (typeof ctx.on === 'function') timer.unref?.()
+    }
     // 拿不到事件总线（单测 / 老宿主）就没有信号，只能等超时。
     // 真机上这条分支意味着"她回了，但我们不知道什么时候回完"——如实降级，不假装成功。
     const budget = typeof ctx.on === 'function' ? timeoutMs : Math.min(timeoutMs, 8_000)
-    timer = setTimeout(finish, budget)
+    arm(budget)
     // 只有真宿主（有事件总线）才 unref：那时进程还有别的句柄撑着，unref 只是
     // 不拖慢退出。没有总线时（单测 / 老宿主）这个定时器是唯一的句柄，一 unref
     // 事件循环立刻空转结束，等待中的 Promise 再也等不到 resolve——Node 20/22
     // 会直接判 "Promise resolution is still pending but the event loop has
     // already resolved"（CI 首跑就是被这条拖红了 7 个用例）。
-    if (typeof ctx.on === 'function') timer.unref?.()
     if (typeof ctx.on === 'function') {
       off = ctx.on('session/event', (session, event) => {
         const id = session?.header?.id ?? session?.id
         if (id !== sessionId) return
-        if (event?.type === 'turn/end') finish()
+        if (event?.type === 'turn/end') return finish()
+        // 她还在动（调工具 / 写字 / 想事情）：把静默计时重开，别在她干活时判她没说话。
+        const left = hard - Date.now()
+        if (left > 0) arm(Math.min(timeoutMs, left))
       })
       if (typeof off !== 'function') off = null
     }
@@ -286,7 +304,7 @@ export async function sayToHer(ctx, text, deps = {}) {
   } catch { /* 已存在就用旧的，上下文接着聊 */ }
 
   const ac = new AbortController()
-  const kill = setTimeout(() => ac.abort(), REPLY_WAIT_MS + 15_000)
+  const kill = setTimeout(() => ac.abort(), REPLY_WAIT_MAX_MS + 15_000)
   kill.unref?.()
   const t0 = Date.now()
 
@@ -309,8 +327,10 @@ export async function sayToHer(ctx, text, deps = {}) {
       root,
     ).catch(() => {})
 
-    const waitMs = Math.max(500, Math.min(deps.waitMs ?? REPLY_WAIT_MS, 120_000))
-    await waitTurnEnd(ctx, sessionId, waitMs)
+    const waitMs = Math.max(500, Math.min(deps.waitMs ?? REPLY_WAIT_MS, 240_000))
+    await waitTurnEnd(ctx, sessionId, waitMs, {
+      maxMs: Math.max(500, Math.min(deps.waitMaxMs ?? REPLY_WAIT_MAX_MS, 300_000)),
+    })
 
     // 她这一轮新写的话（可能一句都没有——允许她不回）
     const after = await readEvents(root)
