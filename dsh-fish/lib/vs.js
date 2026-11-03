@@ -176,6 +176,7 @@ export async function watchViaStoryboard(o = {}) {
     return t >= a - 1.5 && t <= b + 1.5
   })
   const lines = []
+  const cellList = []
   let cells = 0
   let used = 0
   let dropped = 0
@@ -184,6 +185,8 @@ export async function watchViaStoryboard(o = {}) {
       cells += 1
       const a = Number(c.t_start ?? c.t ?? 0) + winStart
       const b = Number(c.t_end ?? 0) + winStart
+      // 记下「第几格 = 哪一段」：她之后要放大某一格，靠的就是这张表（fork.35）。
+      cellList.push({ i: cells, from: a, to: b })
       const say = String(c.text ?? '').replace(/\s+/g, ' ').trim().slice(0, SAY_MAX)
       const fix = say ? fixFor(a, b) : null
       const was = fix ? String(fix.was ?? '').replace(/\s+/g, ' ').trim().slice(0, 30) : ''
@@ -242,5 +245,77 @@ export async function watchViaStoryboard(o = {}) {
     title,
     up: String(res.info?.up ?? ''),
     duration: Number(res.info?.duration) || 0,
+    // 格表（绝对秒）：watch.js 会存下来，供 bili_zoom 把「第 N 格」翻成时间段。
+    cells: cellList,
   }
+}
+
+/**
+ * 放大看一小段（fork.35，2026-11-03）。
+ *
+ * 她看完一条之后说「表格、界面那种小字，放大也不行」——整条视频拼进 4 张宫格时，
+ * 每格只有一百多像素宽，UI 上的字必然糊。**唯一的解法是把那几秒单独重新取一次**：
+ * 窗口短 → 格子少 → 每格占的像素多。
+ *
+ * 这里不做「按 cellId 查表」那套（vs 自己有 video_zoom，但它要宿主的 attachment 服务，
+ * 从我们这个插件里调不稳）。我们走同一条 runStoryboard，只是把窗口卡到那一格。
+ */
+export async function zoomViaStoryboard(o = {}) {
+  const mod = o.impl ?? (await loadStoryboard(o.vsPath))
+  if (!mod?.runStoryboard || !mod?.saveStoryboards) {
+    return { ok: false, why: `没找到 dsh-video-storyboard 外挂${lastWhy ? `（${lastWhy}）` : ''}` }
+  }
+  const from = Math.max(0, Number(o.from) - 0.4)
+  const to = Math.max(from + 0.8, Number(o.to) + 0.4)
+  const opts = {
+    input: `https://www.bilibili.com/video/${o.bvid}`,
+    from,
+    to,
+    // 一张图、几格、按画面大小均匀铺（sqrt(n) × sqrt(n)）——这正是"放大"的来源
+    maxSheets: 1,
+    minFrames: 4,
+    uniformTier: 'auto',
+    pick: 'sharp',
+    // 放大只为看清画面；台词这一段已经在主清单里给过了，不再花时间做 OCR 校正
+    ocr: false,
+  }
+  let res
+  try {
+    res = await mod.runStoryboard(opts)
+  } catch (err) {
+    return { ok: false, why: String(err?.message ?? err) }
+  }
+
+  const dir = await mediaDir(o.root)
+  const outPath = join(dir, `zoom-${o.bvid}-${Math.round(from)}-${Date.now()}.png`)
+  let paths = []
+  try {
+    paths = await mod.saveStoryboards(res, outPath, { evidence: false })
+  } catch (err) {
+    return { ok: false, why: '放大图落盘失败：' + String(err?.message ?? err) }
+  }
+  if (!paths.length) return { ok: false, why: 'vs 没有产出放大图' }
+
+  const winStart = Number(res.window?.start ?? 0)
+  const mmss = (s) => {
+    const n = Math.max(0, Math.round(Number(s) || 0))
+    return `${Math.floor(n / 60)}:${String(n % 60).padStart(2, '0')}`
+  }
+  const cells = []
+  for (const sheet of Array.isArray(res.sheets) ? res.sheets : []) {
+    for (const c of sheet.cells ?? []) {
+      const a = Number(c.t_start ?? 0) + winStart
+      const b = Number(c.t_end ?? 0) + winStart
+      const say = String(c.text ?? '').replace(/\s+/g, ' ').trim().slice(0, 120)
+      cells.push({ i: cells.length + 1, a, b, say })
+    }
+  }
+  const text = [
+    `放大 ${mmss(from)}–${mmss(to)} 这一段：${paths.length} 张图、${cells.length} 格。`,
+    ...paths,
+    '用 read_image 读。这一段每格比整条时大得多。',
+    ...cells.map((c) => `第${c.i}格 ${mmss(c.a)}–${mmss(c.b)}${c.say ? `｜${c.say}` : ''}`),
+  ].join('\n')
+
+  return { ok: true, path: paths[0], paths, text, from, to, cells: cells.map((c) => ({ i: c.i, from: c.a, to: c.b })) }
 }

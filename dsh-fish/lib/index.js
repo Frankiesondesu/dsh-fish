@@ -19,6 +19,7 @@ import { registerSpeak } from './speak.js'
 import { registerRecall } from './recall.js'
 import { registerHerDiary } from './herdiary.js'
 import { registerWatch } from './watch.js'
+import { registerZoom } from './zoom.js'
 import { registerLetter } from './letter.js'
 import { registerBringBack } from './keep.js'
 import { registerAsk } from './ask.js'
@@ -355,6 +356,8 @@ export function apply(ctx, baseConfig = {}) {
         // issue #7：日记不进事件流，所以她需要一个只读的窗口回头翻（her_diary）。
         () => registerHerDiary(ctx, { root }),
         () => registerWatch(ctx, { root, tenant: tenancy }),
+        // fork.35（2026-11-03）：看过之后把某一格放大重看。不占额度，同一条一天最多 3 次。
+        () => registerZoom(ctx, { root, tenant: tenancy }),
         // R4：留话（不审批）。和 growth_commit 一样是纯追加，但收件人明确。
         () => registerLetter(ctx, { root, tenant: tenancy }),
         // 0.6.17：纪念品。她只能「问」，真带回去要那个人在出门页点头。

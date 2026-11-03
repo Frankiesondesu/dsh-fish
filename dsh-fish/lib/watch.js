@@ -18,6 +18,7 @@ import { logLine } from './log.js'
 import { isHanded } from './intent.js'
 
 import { defineTool } from './tool.js'
+import { rememberCells } from './zoom.js'
 import { slashed } from './posix.js'
 import { guardWrite } from './tenant.js'
 
@@ -225,6 +226,9 @@ export function registerWatch(ctx, deps = {}) {
         }
         // fork.20：vs 那边没有标题，补一次接口，报告才认得出来是哪条。
         await enrichInfo(root, r, bvid)
+        // fork.35（2026-11-03）：记下「第几格 = 哪一段」，她要放大某一格时靠这张表。
+        // 失败不打扰任何人——顶多放大不了。
+        await rememberCells(root, bvid, r.cells).catch(() => {})
         // ---- 记账：一次 ----
         //
         // fork.20（2026-11-02）：原来 vs 分支在下面提前 return，这一步被整个跳过。
