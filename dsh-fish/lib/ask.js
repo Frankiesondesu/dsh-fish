@@ -29,7 +29,7 @@
 import { toJsonSchema } from './toolschema.js'
 import { rootDir, readEvents, appendEvent } from './store.js'
 import { loadConfig, updateConfig, dateKey } from './settings.js'
-import { deriveSelf } from './derive.js'
+import { deriveSelfCached } from './derive.js'
 import { defineTool } from './tool.js'
 import { callerOf } from './tenant.js'
 import { askInChat } from './askinchat.js'
@@ -198,7 +198,7 @@ export async function settleAsk(root, { askId, verdict, reason = '', via = 'ui',
   if (answersByAsk(events).has(id)) return { ok: false, why: '这条已经答过了' }
 
   const { config } = await loadConfig(root)
-  const model = deriveSelf(events, { growthDays: config.growthDays })
+  const model = deriveSelfCached(events, { growthDays: config.growthDays })
   const word = v === 'approve' ? '可以' : v === 'reject' ? '这次不行' : '以后再说'
   const text = String(reason ?? '').trim().slice(0, 200) || word
   const answer = await appendEvent({
@@ -380,7 +380,7 @@ export function registerAsk(ctx, deps = {}) {
         }
 
         const { config } = await loadConfig(root)
-        const model = deriveSelf(events, { growthDays: config.growthDays })
+        const model = deriveSelfCached(events, { growthDays: config.growthDays })
         const ev = await appendEvent({
           type: 'ask',
           text: question,

@@ -30,7 +30,7 @@ import { toJsonSchema } from './toolschema.js'
 import { rootDir, readEvents, appendEvent } from './store.js'
 import { loadConfig } from './settings.js'
 import { dateKey } from './settings.js'
-import { deriveSelf } from './derive.js'
+import { deriveSelfCached } from './derive.js'
 import { writeInboxFile } from './inbox.js'
 import { refreshSelfDoc } from './selfdoc.js'
 import { Reject, tsMs } from './schema.js'
@@ -124,7 +124,7 @@ export async function leaveLetter(root, text, { log, sessionId = '' } = {}) {
       return { ok: false, id: '', note: '今天已经留过了。明天再说也一样。' }
     }
 
-    const model = deriveSelf(events, { growthDays: config.growthDays })
+    const model = deriveSelfCached(events, { growthDays: config.growthDays })
     const env = { day: model.day, stage: model.stage, source: 'tool' }
     // 跟 growth_commit 一样带上「谁写的」（2026-10-28 用户 m01319）：
     // 两个家共用一个 root 时，信箱里的话也得认得出是哪一位留的。

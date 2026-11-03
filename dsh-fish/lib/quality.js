@@ -24,7 +24,7 @@
  *   所以它不是一个「越大越好」的分，是一个体检值。界面文案已经同步，不再说「越接近 1 越好」。
  */
 
-import { deriveSelf, similarity, clampInt } from './derive.js'
+import { deriveSelfCached, similarity, clampInt } from './derive.js'
 import { buildSections, shownCount } from './persona.js'
 
 /**
@@ -116,7 +116,7 @@ export function stability(events = [], opts = {}, ablate = {}) {
     withBans: ablate.withBans !== false,
   }
 
-  const base = deriveSelf(events, opts)
+  const base = deriveSelfCached(events, opts)
   const beliefIds = (base.beliefs ?? []).map((b) => b.id).filter(Boolean)
   if (beliefIds.length === 0) return { score: 0, worst: 0, sample: 0, k: 0, beliefs: 0 }
 
@@ -136,7 +136,7 @@ export function stability(events = [], opts = {}, ablate = {}) {
     // 那条判断的源头事件可能是一条 utterance，也可能是一条 revise——
     // 按 id 删，不按类型删。删 revise 会让它推翻的旧判断复活，那是真实的变化。
     const kept = events.filter((e) => !drop.has(e.id))
-    const m = deriveSelf(kept, opts)
+    const m = deriveSelfCached(kept, opts)
     const text = variableSelfText(m, renderOpts)
     const drift = 1 - similarity(baseText, text)
     sum += drift

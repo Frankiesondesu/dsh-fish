@@ -12,7 +12,7 @@
  *   4. 总量——多少条记录、跨多少天、都是些什么类型。
  */
 
-import { deriveSelf } from './derive.js'
+import { deriveSelfCached } from './derive.js'
 
 const DAY_MS = 86_400_000
 
@@ -73,7 +73,7 @@ export function examine(events = [], { now = Date.now(), growthDays = 30, staleD
     }
   }
 
-  const model = deriveSelf(list, { growthDays })
+  const model = deriveSelfCached(list, { growthDays })
   const ranked = Array.isArray(model?.ranked) ? model.ranked : []
 
   // 同一对判断可能被正反各报一次（detectTensions 两个方向都会看）——按无序对去重，别让一对占两行。

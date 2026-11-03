@@ -23,7 +23,7 @@ import { readEvents, appendEvent, rootDir, ensureHer } from './store.js'
 import { parseWatchIntent, watchHint, handText, extractBvids } from './intent.js'
 import { recordHandFromLink } from './hand.js'
 import { loadConfig, dateKey } from './settings.js'
-import { deriveSelf } from './derive.js'
+import { deriveSelfCached } from './derive.js'
 import { writeInboxFile, newHerEventsSince } from './inbox.js'
 import { bumpTurns, rotateTalkSession, talkSessionId } from './home.js'
 import { addExchange } from './talkmem.js'
@@ -208,7 +208,7 @@ export async function sayToHer(ctx, text, deps = {}) {
 
   const { events: firstEvents } = await readEvents(root)
   const { config } = await loadConfig(root)
-  let model = deriveSelf(firstEvents, { growthDays: config.growthDays })
+  let model = deriveSelfCached(firstEvents, { growthDays: config.growthDays })
   const dk = dateKey()
 
   // P1 第二块（2026-10-24 用户批准）：他这句话，是不是对她上一次拒绝的回应？
@@ -218,7 +218,7 @@ export async function sayToHer(ctx, text, deps = {}) {
   let events = firstEvents
   if (reaction) {
     events = (await readEvents(root)).events
-    model = deriveSelf(events, { growthDays: config.growthDays })
+    model = deriveSelfCached(events, { growthDays: config.growthDays })
   }
 
   // 记住"说话前最后一条事件"，用来分辨哪几句是她这一轮新写的

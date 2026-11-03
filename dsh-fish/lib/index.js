@@ -12,7 +12,7 @@
 
 import { rootDir, readEvents, appendEvent, readJson, paths, writeAtomic, ensureHer } from './store.js'
 import { loadConfig } from './settings.js'
-import { deriveSelf } from './derive.js'
+import { deriveSelfCached } from './derive.js'
 import { registerCapture } from './capture.js'
 import { registerLook } from './look.js'
 import { registerSpeak } from './speak.js'
@@ -209,7 +209,7 @@ export function apply(ctx, baseConfig = {}) {
       }
     }
 
-    const model = deriveSelf(await readEvents(root).then((r) => r.events), { growthDays: config.growthDays })
+    const model = deriveSelfCached(await readEvents(root).then((r) => r.events), { growthDays: config.growthDays })
 
     // ---- 她的屋子：工作区 + 专属会话（P3 核心）----
     // 这一步**先于**一切：她得先有个能被你看见的地方，才有"说话"这件事。

@@ -23,7 +23,7 @@
 import { toJsonSchema } from './toolschema.js'
 import { rootDir, readEvents, appendEvent } from './store.js'
 import { loadConfig } from './settings.js'
-import { deriveSelf } from './derive.js'
+import { deriveSelfCached } from './derive.js'
 import { defineTool } from './tool.js'
 import { guardWrite } from './tenant.js'
 import { readOutings, readPossessions } from './outing.js'
@@ -82,7 +82,7 @@ export async function writeDream(root, { text = '', refs = [], sessionId = '', l
 
   const { events } = await readEvents(root)
   const { config } = await loadConfig(root)
-  const model = deriveSelf(events, { growthDays: config.growthDays })
+  const model = deriveSelfCached(events, { growthDays: config.growthDays })
 
   if (dreamOn(events, model.day).length) {
     return { ok: false, id: '', note: '今天已经记过一条梦了。' }

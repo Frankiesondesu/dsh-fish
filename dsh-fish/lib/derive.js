@@ -895,6 +895,78 @@ export function deriveSelf(events = [], opts = {}) {
   return model
 }
 
+/**
+ * deriveSelf 的结果缓存（fork.27，2026-11-03）。
+ *
+ * 为什么：`deriveSelf` 一次要扫 6+ 趟账本，实测 330 条事件 **16.9 ms**、
+ * 3000 条 3.6 s（`dice` 占大头）。而它被调用的频率是「醒着的时候每分钟 2–3 次、
+ * 每回合 1–2 次、每次 growth_commit 2 次」——同一本账本在一分钟内被重算十几遍。
+ *
+ * 为什么能缓存：`deriveSelf` 是纯函数（文件头写着「不写盘、不缓存、不读环境变量」），
+ * 相同输入必得相同输出，只有 `now` 是活的。
+ *
+ * 键怎么定：
+ *   - 账本内容 → FNV-1a 哈希（id/type/text/refs/flags 全进），**不按长度+末条 id**
+ *     图省事——调用方会传子集（quality.js 传的是过滤后的一段），长度和尾条 id 撞车
+ *     就会拿到别人的模型，那种错误查起来是噩梦；
+ *   - `now` → 按**分钟**分桶。deriveSelf 里 now 只影响「天」级别的量（成长日、
+ *     冷落天数、固化过期线），一分钟的滞后对它没有语义意义，而调度器本来就是
+ *     一分钟一拍。显式传了 `opts.now`（测试）就原样进键，不做分桶。
+ *
+ * 命中返回**深冻结**的同一个对象：调用方只读（全仓 grep 过，没有就地改 model 的地方）。
+ * 冻上是故意的——万一以后有人开始改它，会当场炸出来，而不是悄悄把缓存改坏。
+ */
+const DERIVE_CACHE_MAX = 8
+const deriveCache = new Map() // key -> model
+
+function fnv1a(str, seed = 0x811c9dc5) {
+  let h = seed
+  for (let i = 0; i < str.length; i++) {
+    h ^= str.charCodeAt(i)
+    h = Math.imul(h, 0x01000193)
+  }
+  return h >>> 0
+}
+
+function ledgerFingerprint(events) {
+  // 整条事件都进哈希（不只 id/type/text）：测试与导入路径会就地改 fixture 的
+  // day/reaction/verdict 再算一遍，只认几个字段会拿到上一次的模型。
+  // 实测 330 条 ~0.2 ms，相对 deriveSelf 的 17 ms 可以忽略。
+  let h = 0x811c9dc5
+  for (const e of events) h = fnv1a(JSON.stringify(e) ?? '', h)
+  return h.toString(36)
+}
+
+function deepFreeze(v, seen = new Set()) {
+  if (!v || typeof v !== 'object' || seen.has(v)) return v
+  seen.add(v)
+  for (const k of Object.keys(v)) deepFreeze(v[k], seen)
+  return Object.freeze(v)
+}
+
+/** 让整个缓存作废（测试用；正常路径靠键自己失效） */
+export function forgetDerived() {
+  deriveCache.clear()
+}
+
+/**
+ * `deriveSelf` 的缓存版：语义完全一样，只是同一本账本在同一分钟内只算一次。
+ * 返回的对象是冻结的——要改就先自己拷贝。
+ */
+export function deriveSelfCached(events = [], opts = {}) {
+  const growthDays = clampInt(opts.growthDays ?? 30, 7, 180, 30)
+  const now = Number(opts.now ?? Date.now())
+  // 显式 now = 调用方要一个确定的结果（测试），原样进键；否则按分钟分桶。
+  const stamp = opts.now === undefined ? `m${Math.floor(now / 60000)}` : `n${now}`
+  const key = `${events.length}.${ledgerFingerprint(events)}.${growthDays}.${stamp}`
+  const hit = deriveCache.get(key)
+  if (hit) return hit
+  const model = deepFreeze(deriveSelf(events, opts))
+  if (deriveCache.size >= DERIVE_CACHE_MAX) deriveCache.delete(deriveCache.keys().next().value)
+  deriveCache.set(key, model)
+  return model
+}
+
 function gatePassed(gate, m) {
   const f = m.facts || {}
   switch (gate) {

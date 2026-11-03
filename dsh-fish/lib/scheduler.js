@@ -13,7 +13,7 @@
  */
 
 import { join } from 'node:path'
-import { deriveSelf } from './derive.js'
+import { deriveSelfCached } from './derive.js'
 import { validateEvent } from './schema.js'
 import { readEvents, appendEvent, rootDir, ensureHer, paths, readJson } from './store.js'
 import { loadConfig, dateKey, inWindow, pickWakeTime } from './settings.js'
@@ -226,7 +226,7 @@ export function startScheduler(ctx, deps = {}) {
     const material = recentMaterial(events, { now })
     const loose = looseEnds(events, { now })
     const text = proactiveSection({ now, state: st, material, loose })
-    const model = deriveSelf(events, { growthDays: config.growthDays })
+    const model = deriveSelfCached(events, { growthDays: config.growthDays })
 
     const ac = new AbortController()
     const kill = setTimeout(() => ac.abort(), WAKE_TIMEOUT_MS)
@@ -363,7 +363,7 @@ export function startScheduler(ctx, deps = {}) {
       const counts = await todayCounts(events, dk)
       if (now < scheduled.at) return    // 还没到今天的落点
 
-      const model = deriveSelf(events, { growthDays: config.growthDays })
+      const model = deriveSelfCached(events, { growthDays: config.growthDays })
       // 空档补偿只影响这一次挑选的冷却判断（见 gapSqueeze）
       const decision = plan(model, config, counts, events, { squeeze: gapSqueeze(gapSinceLastWake(events)) })
 
@@ -962,7 +962,7 @@ export async function wakeNow(ctx, deps = {}) {
   }
   const { events } = await readEvents(root)
   const { config } = await loadConfig(root)
-  const model = deriveSelf(events, { growthDays: config.growthDays })
+  const model = deriveSelfCached(events, { growthDays: config.growthDays })
   const dk = dateKey()
   const counts = { dateKey: dk, sent: 0, questions: 0, proactive: 0 }
   // focus='browse'：设置页那个「让她去刷 B 站」按钮（**仅本机测试版**，2026-10-26）。

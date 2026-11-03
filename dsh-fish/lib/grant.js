@@ -13,7 +13,7 @@
 
 import { appendEvent, readEvents, rootDir } from './store.js'
 import { validateEvent } from './schema.js'
-import { deriveSelf } from './derive.js'
+import { deriveSelfCached } from './derive.js'
 import { loadConfig } from './settings.js'
 import { refreshSelfDoc } from './selfdoc.js'
 import { pendingOffer } from './unlock.js'
@@ -37,7 +37,7 @@ export async function recordGrant(root = rootDir(), opts = {}) {
 
   const { config } = opts.config ? { config: opts.config } : await loadConfig(root)
   const { events } = await readEvents(root).catch(() => ({ events: [] }))
-  const model = deriveSelf(events, config)
+  const model = deriveSelfCached(events, config)
   const reason = String(opts.reason ?? '').trim()
   const text = reason || (verdict === 'approve' ? '可以。' : '这次不行。')
   const ctxArg = { day: model.day, stage: model.stage, source: 'system' }

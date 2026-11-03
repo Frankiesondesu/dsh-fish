@@ -12,7 +12,7 @@
 
 import { readEvents, rootDir, paths, readDaily, listDiary, readOwner } from './store.js'
 import { loadConfig, updateConfig, configFileInfo, dateKey, validateToolNames, sanitizeToolNames } from './settings.js'
-import { deriveSelf, consistency, novelty } from './derive.js'
+import { deriveSelfCached, consistency, novelty } from './derive.js'
 // 记忆体检（0.7.6，2026-10-30 用户 m00342）：只读诊断，不算分、不写盘。
 import { examine } from './health.js'
 // 记账行与「她的事」的分界（2026-11-02，用户 m00335）：只决定怎么数、怎么展示，不删行。
@@ -303,7 +303,7 @@ export function registerObserve(ctx, deps = {}) {
     ['/state', async (req, res) => {
       const { events, skipped } = await readEvents(root)
       const { config, fresh, broken } = await loadConfig(root)
-      const m = deriveSelf(events, { growthDays: config.growthDays })
+      const m = deriveSelfCached(events, { growthDays: config.growthDays })
       send(res, 200, {
         day: m.day,
         growthDays: m.growthDays,
@@ -460,7 +460,7 @@ export function registerObserve(ctx, deps = {}) {
     ['/beliefs', async (req, res) => {
       const { events } = await readEvents(root)
       const { config } = await loadConfig(root)
-      const m = deriveSelf(events, { growthDays: config.growthDays })
+      const m = deriveSelfCached(events, { growthDays: config.growthDays })
       send(res, 200, {
         active: m.beliefs.map((b) => ({ id: b.id, text: b.text, since: b.since, confidence: b.confidence })),
         refuted: m.refuted,
@@ -610,7 +610,7 @@ export function registerObserve(ctx, deps = {}) {
       if (req.method !== 'GET') return send(res, 405, { error: 'method not allowed' })
       const { events } = await readEvents(root).catch(() => ({ events: [] }))
       const { config } = await loadConfig(root)
-      const model = deriveSelf(events, config)
+      const model = deriveSelfCached(events, config)
       return send(res, 200, {
         layers: rulesByLayer(),
         status: ruleStatus(events, model, Date.now()),
@@ -1113,7 +1113,7 @@ export function registerObserve(ctx, deps = {}) {
     ['/memory', async (req, res) => {
       const { config } = await loadConfig(root)
       const { events } = await readEvents(root)
-      const model = deriveSelf(events, { growthDays: config.growthDays })
+      const model = deriveSelfCached(events, { growthDays: config.growthDays })
       const doc = await selfDocStatus(root)
       const h = await homeStatus(root)
       const budget = Number(config?.memory?.docBudget ?? 1800)
@@ -1397,7 +1397,7 @@ export function registerObserve(ctx, deps = {}) {
         const hasSeed = events.some((e) => e.type === 'seed')
         // 这一位是不是接来的，只认事件流（用户 m03769）。配置里不再存这件事。
         const { config } = await loadConfig(root).catch(() => ({ config: null }))
-        const model = deriveSelf(events, { growthDays: config?.growthDays })
+        const model = deriveSelfCached(events, { growthDays: config?.growthDays })
         return send(res, 200, {
           canImport: !hasSeed,
           reason: hasSeed ? '她已经有自己的起点了。想换成别人养的那一位，先重置成新的一局。' : '',
@@ -1418,7 +1418,7 @@ export function registerObserve(ctx, deps = {}) {
       // 身份文档立刻重算：不然要等下一次她开口才换成人设，设置页会显示"还没变"。
       await refreshSelfDoc(root).catch(() => {})
       const { events } = await readEvents(root).catch(() => ({ events: [] }))
-      const model = deriveSelf(events, await loadConfig(root).then((x) => x.config))
+      const model = deriveSelfCached(events, await loadConfig(root).then((x) => x.config))
       send(res, 200, {
         ok: true,
         name: r.name,
@@ -1664,7 +1664,7 @@ export function registerObserve(ctx, deps = {}) {
           try {
             const { events } = await readEvents(root)
             const { config } = await loadConfig(root)
-            const m = deriveSelf(events, { growthDays: config.growthDays })
+            const m = deriveSelfCached(events, { growthDays: config.growthDays })
             await appendEvent(
               validateEvent(
                 { type: 'meta', text: 'outing-reject:' + rejectedIds.join(' '), day: m.day, stage: m.stage },
@@ -2027,7 +2027,7 @@ export function registerObserve(ctx, deps = {}) {
           try {
             const { events } = await readEvents(root)
             const { config } = await loadConfig(root)
-            const m = deriveSelf(events, { growthDays: config.growthDays })
+            const m = deriveSelfCached(events, { growthDays: config.growthDays })
             await appendEvent(
               validateEvent(
                 { type: 'meta', text: 'possess-reject:' + rejectedIds.join(' '), day: m.day, stage: m.stage },

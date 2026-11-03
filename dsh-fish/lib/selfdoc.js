@@ -27,7 +27,7 @@ import { join } from 'node:path'
 import { rootDir, paths, readEvents, readJson, writeAtomic } from './store.js'
 import { loadConfig } from './settings.js'
 import { devModeSync } from './devmode.js'
-import { deriveSelf } from './derive.js'
+import { deriveSelfCached } from './derive.js'
 import { personaLine, toolBrief, RECALL_BRIEF, SPEAK_BRIEF, LETTER_BRIEF, ASK_BRIEF, DREAM_BRIEF, PROACTIVE_BRIEF, SCHEDULE_BRIEF, DIARY_BRIEF, SLEEP_BRIEF } from './persona.js'
 import { LOOK_BRIEF, WATCH_RULE } from './browse.js'
 import { activeCarry } from './home.js'
@@ -157,7 +157,7 @@ export async function writeSelfDoc(root = rootDir(), { log, exec, tenant } = {})
   try {
     const { events } = await readEvents(root)
     const { config } = await loadConfig(root)
-    const model = deriveSelf(events, { growthDays: config.growthDays })
+    const model = deriveSelfCached(events, { growthDays: config.growthDays })
     const text = renderSelfDoc(model, {
       budget: config?.memory?.docBudget,
       carry: await activeCarry(root),

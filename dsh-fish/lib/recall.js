@@ -29,7 +29,7 @@
 
 import { toJsonSchema } from './toolschema.js'
 import { rootDir, readEvents } from './store.js'
-import { deriveSelf } from './derive.js'
+import { deriveSelfCached } from './derive.js'
 
 import { defineTool } from './tool.js'
 
@@ -169,7 +169,7 @@ export function solidIdsOf(events = [], growthDays = 30) {
   const key = `${growthDays}:${events.length}:${last}`
   if (solidCache.key === key) return solidCache.ids
   try {
-    const m = deriveSelf(events, { growthDays })
+    const m = deriveSelfCached(events, { growthDays })
     const ids = new Set((m.solid ?? []).map((b) => String(b.id)))
     solidCache = { key, ids }
     return ids

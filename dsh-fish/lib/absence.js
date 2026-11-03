@@ -17,7 +17,7 @@
  */
 
 import { readEvents, appendEvent, rootDir } from './store.js'
-import { deriveSelf } from './derive.js'
+import { deriveSelfCached } from './derive.js'
 import { loadConfig } from './settings.js'
 
 const DAY_MS = 86_400_000
@@ -103,7 +103,7 @@ export async function detectAbsence(root = rootDir(), deps = {}) {
     const a = assess(events, now, { afterDays })
     if (!a.absent) return { written: false, why: a.reason, days: a.days }
 
-    const model = deriveSelf(events, { growthDays: config.growthDays })
+    const model = deriveSelfCached(events, { growthDays: config.growthDays })
     await appendEvent(
       {
         type: 'absence',

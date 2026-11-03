@@ -16,7 +16,7 @@ import { HER_TYPES, Reject } from './schema.js'
 // 让 test 能在没有 DSH 的情况下验证参数校验与写盘路径。
 import { defineTool } from './tool.js'
 import { appendEvent, readEvents, rootDir, writeDaily } from './store.js'
-import { deriveSelf } from './derive.js'
+import { deriveSelfCached } from './derive.js'
 import { loadConfig, dateKey } from './settings.js'
 import { toJsonSchema } from './toolschema.js'
 import { inWake } from './wakewin.js'
@@ -131,7 +131,7 @@ export function registerCapture(ctx, deps = {}) {
         // 算当前的 day / stage —— 但**只用于写信封**，绝不回传给模型
         const { events } = await readEvents(root)
         const { config } = await loadConfig(root)
-        const model = deriveSelf(events, { growthDays: config.growthDays })
+        const model = deriveSelfCached(events, { growthDays: config.growthDays })
         const stamp = { day: model.day, stage: model.stage }
 
         try {
