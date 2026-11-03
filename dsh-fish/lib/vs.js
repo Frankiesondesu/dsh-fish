@@ -131,6 +131,24 @@ export async function watchViaStoryboard(o = {}) {
   // 有预算：整段说明别把她淹了（36 格全展开能到七八千字），超了就停，告诉她后面还有。
   const SAY_MAX = 200
   const BUDGET = 1800
+  // ---- 哪几句是「听写和字幕对不上、按字幕改过」的（fork.33，2026-11-03） ----
+  //
+  // 她看完第一条视频后的原话：「台词像是机器听写下来的，错字不少……要说最想要的一样，
+  // 是『哪几句它拿不准，标出来』。」vs 的 `ocr.changes` 本来就记着每一次替换
+  // （{from, was, now, cover}），只是以前没人往下传。这里把它贴回对应的格子。
+  //
+  // 边界必须说清：**标了 = 确定改过；没标 ≠ 准确**——vs 只抽 16 条做字幕对照
+  // （OCR_MAX_ITEMS），没抽到的行我们根本不知道它准不准。所以措辞只说「改自」，
+  // 不说「已核对」。
+  const ocr = res.ocr && typeof res.ocr === 'object' ? res.ocr : null
+  const fixes = Array.isArray(ocr?.changes)
+    ? ocr.changes.filter((f) => f && Number.isFinite(Number(f.from)))
+    : []
+  const fixFor = (a, b) => fixes.find((f) => {
+    const t = Number(f.from)
+    // ASR 段起点常比真实开口早 0.3–1 秒（vs 的 pipeline 注释里量过），窗口放宽 1.5 秒
+    return t >= a - 1.5 && t <= b + 1.5
+  })
   const lines = []
   let cells = 0
   let used = 0
@@ -141,7 +159,10 @@ export async function watchViaStoryboard(o = {}) {
       const a = Number(c.t_start ?? c.t ?? 0) + winStart
       const b = Number(c.t_end ?? 0) + winStart
       const say = String(c.text ?? '').replace(/\s+/g, ' ').trim().slice(0, SAY_MAX)
-      const line = say ? `第${cells}格 ${mmss(a)}–${mmss(b)}｜${say}` : `第${cells}格 ${mmss(a)}–${mmss(b)}`
+      const fix = say ? fixFor(a, b) : null
+      const was = fix ? String(fix.was ?? '').replace(/\s+/g, ' ').trim().slice(0, 30) : ''
+      const mark = was ? `（改自「${was}」）` : ''
+      const line = say ? `第${cells}格 ${mmss(a)}–${mmss(b)}｜${say}${mark}` : `第${cells}格 ${mmss(a)}–${mmss(b)}`
       if (used + line.length > BUDGET) {
         dropped += 1
         continue
@@ -151,8 +172,14 @@ export async function watchViaStoryboard(o = {}) {
     }
   }
   const tr = res.transcript && typeof res.transcript === 'object' ? res.transcript : null
+  // 台词从哪来、有没有对照过，都得说——她上次就是靠猜「精准确V」本来想说什么。
+  const ocrBits = []
+  if (Number(ocr?.fixed) > 0) ocrBits.push(`其中 ${Number(ocr.fixed)} 处听写和画面字幕对不上、按字幕改过（后面标了「改自」）`)
+  else if (ocr?.status === 'skipped' && ocr?.reason === 'no-subtitle-band') ocrBits.push('这条没找到硬字幕，台词只有听写')
+  else if (ocr?.status === 'failed') ocrBits.push('字幕对照没跑成，台词只有听写')
+  if (ocr?.basedOn === 'low-res-copy') ocrBits.push('对照用的是低清副本，可信度要打折')
   const trNote = Number(tr?.chars) > 0
-    ? `（台词共 ${tr.chars} 字、${tr.segments ?? 0} 段，来源：${tr.source ?? '未知'}）`
+    ? `（台词共 ${tr.chars} 字、${tr.segments ?? 0} 段，来源：${tr.source ?? '未知'}${ocrBits.length ? `；${ocrBits.join('；')}` : ''}）`
     : '（这条没有字幕轨，也没有听写到台词）'
 
   const title = String(res.info?.title ?? '') || o.bvid
