@@ -121,9 +121,52 @@ export async function readJson(file, fallback = null) {
   }
 }
 
+/**
+ * 账本读取缓存（fork.26，2026-11-03）。
+ *
+ * 为什么：`readEvents` 有 ~60 个调用点，每次都把整个 events.jsonl 读进来重新
+ * JSON.parse 一遍。一次聊天回合至少 3 次全读（say/turns/derive），调度器每分钟
+ * 2–3 次，`appendEvent` 写 revise/narration 时还要在写路径里再读一次。
+ * 账本只增不改，读的结果只跟「文件内容」有关——这正是可以缓存的形状。
+ *
+ * 怎么认版本：events.jsonl 的 mtime+size 签名。追加会让 size 变，外部改写会让
+ * mtime 变，两种都能认出来。
+ *
+ * 命中返回**浅拷贝的数组**：事件对象本身共享。这是安全的，因为账本只增不改，
+ * 事件记录在内存里从不被改写（全仓 grep 过：没有任何地方给 e.text/e.ts/... 赋值，
+ * 也没有对 events 数组做 sort/push/splice）。数组本身必须拷贝——调用方可能
+ * 自己 filter/concat，个别地方还会 `events.push` 到自己的副本里。
+ *
+ * 失效：`appendEvent` 写成功后直接删缓存，下一次读重新解析一遍（追加是低频操作，
+ * 一次重读换「绝不会读到旧账本」是划算的）。
+ */
+const EVENTS_CACHE_MAX = 8
+const eventsCache = new Map() // root -> { key, events, skipped, legacy }
+
+async function eventsStamp(file) {
+  try {
+    const st = await fs.stat(file)
+    return `${st.mtimeMs}:${st.size}`
+  } catch {
+    return ''
+  }
+}
+
+/** 让某个 root 的账本缓存立刻失效（测试与外部改写用） */
+export function forgetEvents(root = rootDir()) {
+  eventsCache.delete(root)
+}
+
 /** 读全量事件流。坏行跳过但计数（不阻塞启动）。 */
 export async function readEvents(root = rootDir()) {
   const p = paths(root).events
+  const key = await eventsStamp(p)
+  if (key) {
+    const hit = eventsCache.get(root)
+    if (hit && hit.key === key) {
+      return { events: [...hit.events], skipped: hit.skipped, legacy: hit.legacy }
+    }
+  }
   let raw = ''
   try {
     raw = await fs.readFile(p, 'utf8')
@@ -153,7 +196,14 @@ export async function readEvents(root = rootDir()) {
     }
   }
   // legacy：这批事件里有多少条是「加版本号之前」写的。备份与自检会显示它。
-  return { events, skipped, legacy }
+  if (key) {
+    if (!eventsCache.has(root) && eventsCache.size >= EVENTS_CACHE_MAX) {
+      eventsCache.delete(eventsCache.keys().next().value)
+    }
+    eventsCache.set(root, { key, events, skipped, legacy })
+  }
+  // 首次解析也要给拷贝：缓存里那份数组不能被调用方掏空（它下次还要用）。
+  return { events: [...events], skipped, legacy }
 }
 
 /**
@@ -197,6 +247,8 @@ export async function appendEvent(raw, ctx = {}, root = rootDir()) {
   await ensureDir(p.root)
   try {
     await fs.appendFile(p.events, JSON.stringify(ev) + '\n', 'utf8')
+    // fork.26：账本变了，缓存立刻作废——下次读重新解析，绝不返回旧账本。
+    eventsCache.delete(root)
   } catch (err) {
     // 2026-10-29（用户 m02241）：写失败以前是**完全静默**的——磁盘满、权限、文件被独占，
     // 调用方普遍写成 `.catch(() => {})`，于是「她说了但没落盘」这种最典型的故障
