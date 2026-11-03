@@ -424,6 +424,11 @@ window.__ModuleLoader__.load({
       // 服务端不再因为一个「这台机器上没有的名字」把整张表拒掉，而是丢掉它、其余照存。
       // 丢掉的东西必须说出来——否则用户以为自己设的还在，实际悄悄少了一个。
       const [droppedTools, setDroppedTools] = useState([])
+      // 配置到底读出来没有（2026-11-03）。整表保存会把表单里每一项都写回去，
+      // 所以只要载入中途抛过异常、表单停在默认值，下一次保存就等于**用默认值覆盖**
+      // 用户原来的设置——`setVideoSubs is not defined` 那次真的把他的时段从
+      // 18:00 改回了 20:00。这里记一个标记，没读成功就不许存。
+      const cfgLoaded = useRef(false)
       const savedTimer = useRef(null)
       const flashSaved = () => {
         setAutoNote(`已保存 ${new Date().toTimeString().slice(0, 8)}`)
@@ -655,6 +660,9 @@ window.__ModuleLoader__.load({
           setBrowseFrom(b0[0]); setBrowseTo(b0[1])
           const c0 = Array.isArray(cfg.comment?.window) ? cfg.comment.window : ['20:00', '23:00']
           setCommentFrom(c0[0]); setCommentTo(c0[1])
+          // 走到这里说明配置的每一项都灌进表单了。上面任何一行抛异常，
+          // 这个标记就留 false —— save() 会拒绝整表提交（见 cfgLoaded 的注释）。
+          cfgLoaded.current = true
           // 说话状态：单独取，失败不影响其它卡片
           jget('/comment').then(setCm).catch(() => {})
           jget('/reset').then(setResetInfo).catch(() => {})
@@ -804,6 +812,12 @@ window.__ModuleLoader__.load({
       }
 
       const save = async (silent = false) => {
+        // 配置没读成功就别存：表单里现在是默认值，整表提交会把它写进 config.json。
+        // 宁可让他看到一句话，也不能悄悄改掉他的设置（2026-11-03 踩过）。
+        if (!cfgLoaded.current) {
+          setErr('配置没读出来，这一页显示的还是默认值——现在保存会覆盖你原来的设置。刷新页面重试，或先修掉上面的报错。')
+          return
+        }
         if (!silent) { setBusy('save'); setNote('') }
         try {
           await jpost('/config', buildConfig())
@@ -840,6 +854,9 @@ window.__ModuleLoader__.load({
       const cfgSig = JSON.stringify(buildConfig())
       useEffect(() => {
         if (!state) return
+        // 配置没读成功就绝不自动保存：表单里是默认值，一存就等于把它写进 config.json
+        // （2026-11-03：`setVideoSubs is not defined` 让他的唤醒时段从 18:00 变成 20:00）。
+        if (!cfgLoaded.current) return
         if (baselinePending.current) { baselinePending.current = false; lastSaved.current = cfgSig; return }
         if (cfgSig === lastSaved.current) return
         const bad = badNumber()
