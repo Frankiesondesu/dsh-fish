@@ -8,6 +8,7 @@
  *   3. **错误不静默**：配置坏了不覆盖，改名备份后用默认值，并在 status 里报出来。
  */
 
+import { promises as fs } from 'node:fs'
 import { readConfig, writeConfig, paths, readJson } from './store.js'
 // 请求节奏是 bili 客户端的模块级状态，由配置驱动（issue #5）。
 // 这里有 settings → bili 的单向依赖，bili.js 不反过来引 settings，不会成环。
@@ -454,8 +455,57 @@ export function sanitizeToolNames(input, known) {
   return { names, dropped: check.unknown, checked: check.checked }
 }
 
+/**
+ * 配置缓存（fork.25，2026-11-03）。
+ *
+ * 为什么：`loadConfig` 有 52 个调用点——调度器每分钟 2 次、每条消息 1 次、
+ * 每个工具调用 1 次——每次都是「读盘 + 解析 + 深拷贝 DEFAULTS + 重钳 30 个上限」。
+ * 而配置一天改不了几次。
+ *
+ * 怎么认版本：`config.json` 的 mtime+size 签名。签名变了就重读，没变就命中。
+ * **命中返回深拷贝**：今天每次调用都拿到一个全新对象，调用方改它不影响下一次读。
+ * 缓存里存的也是拷贝——不能把「刚发出去的那个对象」留在缓存里等调用方改坏。
+ *
+ * 为什么不缓存「文件不存在」：那种情况本来就少（默认值路径），而且文件一出现
+ * 签名就变了，缓存也没意义。不缓存更简单。
+ */
+const CONFIG_CACHE_MAX = 16
+const configCache = new Map() // root -> { key, res }
+
+async function configStamp(file) {
+  try {
+    const st = await fs.stat(file)
+    return `${st.mtimeMs}:${st.size}`
+  } catch {
+    return ''
+  }
+}
+
+function rememberConfig(root, key, res) {
+  if (!key) return
+  // 临时目录用完就删，缓存条目会积灰——按插入顺序淘汰最老的（够用了）
+  if (!configCache.has(root) && configCache.size >= CONFIG_CACHE_MAX) {
+    configCache.delete(configCache.keys().next().value)
+  }
+  configCache.set(root, { key, res: structuredClone(res) })
+}
+
+/** 让某个 root 的配置缓存立刻失效（测试与写穿用） */
+export function forgetConfig(root) {
+  configCache.delete(root)
+}
+
 /** 读配置（文件不存在时返回默认值，不写盘） */
 export async function loadConfig(root) {
+  const file = paths(root).config
+  const key = await configStamp(file)
+  if (key) {
+    const hit = configCache.get(root)
+    if (hit && hit.key === key) {
+      pushPacing(hit.res.config)
+      return structuredClone(hit.res)
+    }
+  }
   const raw = await readConfig(root)
   let res
   if (raw === null) {
@@ -469,14 +519,21 @@ export async function loadConfig(root) {
       res = { config: normalizeConfig({}), fresh: false, broken }
     }
   }
-  // 每次读配置都把节奏推给 bili 客户端：设置页保存后下一次请求就是新间隔，
-  // 不用重启插件。失败也不能连累读配置本身。
+  rememberConfig(root, key, res)
+  pushPacing(res.config)
+  return res
+}
+
+/**
+ * 每次读配置都把节奏推给 bili 客户端：设置页保存后下一次请求就是新间隔，
+ * 不用重启插件。失败也不能连累读配置本身。
+ */
+function pushPacing(config) {
   try {
-    setPacing(res.config?.bili)
+    setPacing(config?.bili)
   } catch {
     /* 节奏挂了不影响读配置 */
   }
-  return res
 }
 
 /** 合并式更新：只改你传的键，其余保持。传未知键会原样存下（向前兼容）。 */
@@ -485,6 +542,11 @@ export async function updateConfig(patch, root) {
   const merged = deepMerge(cur, patch && typeof patch === 'object' ? patch : {})
   const next = normalizeConfig(merged)
   await writeConfig(next, root)
+  // 写穿：立刻把新配置放进缓存，别让下一次 loadConfig 去读自己刚写的盘。
+  // 签名要重新取——writeConfig 走的是 tmp+rename，mtime 是新的。
+  const file = paths(root).config
+  rememberConfig(root, await configStamp(file), { config: next, fresh: false, broken: false })
+  pushPacing(next)
   return next
 }
 
