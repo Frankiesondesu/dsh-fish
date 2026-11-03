@@ -76,6 +76,14 @@ window.__ModuleLoader__.load({
       '.dfish button:hover:not(:disabled){border-color:var(--dsw-alias-state-business-primary);color:var(--dsw-alias-state-business-primary)}',
       '.dfish button:disabled{opacity:.5;cursor:default}',
       '.dfish textarea{width:100%;box-sizing:border-box;min-height:66px;resize:vertical;background:transparent;border:.5px solid var(--dsw-alias-border-l2);border-radius:8px;color:var(--dsw-alias-label-primary);font:inherit;font-size:13px;line-height:20px;padding:8px 10px;outline:none}',
+      // 卡片内的两格切换（扫码 / 粘贴 cookie，2026-11-02）。
+      // 刻意不复用页面顶部那套 .tabs/.tab：那是导航栏的类名，卡片里再套一层
+      // 会渲染成「多了一行页面页签」，而且下面 85~96 行同名定义会把它逐条覆盖掉。
+      '.dfish .seg{display:inline-flex;gap:2px;padding:2px;margin:0 0 10px;border:.5px solid var(--dsw-alias-border-l2);border-radius:8px;background:rgba(128,128,128,.06)}',
+      '.dfish .seg>button{height:24px;padding:0 11px;border:0;border-radius:6px;background:transparent;color:var(--dsw-alias-label-secondary,var(--dsw-alias-label-tertiary));font-size:12px}',
+      '.dfish .seg>button:hover:not(:disabled):not(.on){background:rgba(128,128,128,.12);color:var(--dsw-alias-label-primary);border:0}',
+      '.dfish .seg>button.on{background:rgba(128,128,128,.18);color:var(--dsw-alias-state-business-primary);font-weight:500}',
+      '.dfish .seg>button.on:hover{color:var(--dsw-alias-state-business-primary);background:rgba(128,128,128,.24)}',
       '.dfish .said{white-space:pre-wrap;word-break:break-word;font-size:13px;line-height:21px;border-left:2px solid var(--dsw-alias-border-l2);padding-left:10px;margin:6px 0}',
       '.dfish .badge{display:inline-block;min-width:16px;text-align:center;padding:0 5px;border-radius:999px;background:var(--dsw-alias-state-business-primary);color:var(--dsw-alias-label-primary-inverted,#fff);font-size:10.5px;line-height:16px;margin-left:6px}',
       '.dfish .tabs{display:flex;align-items:center;gap:6px;flex-wrap:wrap;border:.5px solid var(--dsw-alias-border-l2);border-radius:10px;padding:5px;background:rgba(128,128,128,.06)}',
@@ -139,6 +147,23 @@ window.__ModuleLoader__.load({
       '.dfish .faq-qa:last-child{border-bottom:0}',
       '.dfish .faq-q{font-size:13.5px;font-weight:600;line-height:1.7}',
       '.dfish .faq-a{margin:6px 0 0;font-size:13px;line-height:1.75;color:var(--dsw-alias-label-secondary)}',
+      // 扫码登录浮层（2026-11-02 按仓库配色重做）。
+      // 原版把卡片写成 #fff 底 + #111 字，深色主题下是一块刺眼白板；
+      // 强调色也用了 B 站蓝 #00aeec，和插件自己的强调色（state-business-primary）不同源。
+      // 现在卡片走主题层色、按钮走通用 button 样式 + .go 强调类。
+      // 唯一保留写死的白底是二维码本身：扫码要的是黑白高对比，跟着主题变成暗底反而扫不出来。
+      '.dfish .qrovl{position:fixed;inset:0;z-index:91;display:flex;align-items:center;justify-content:center;padding:18px;background:rgba(0,0,0,.62)}',
+      '.dfish .qrcard{width:min(340px,92vw);box-sizing:border-box;background:var(--dsw-alias-bg-layer-1,Canvas);color:var(--dsw-alias-label-primary,CanvasText);border:.5px solid var(--dsw-alias-border-l3);border-radius:14px;padding:18px 18px 14px;text-align:center;box-shadow:0 12px 40px rgba(0,0,0,.45)}',
+      '.dfish .qrcard h4{margin:0 0 12px;font-size:13.5px;font-weight:600;line-height:20px}',
+      '.dfish .qrpic{display:block;width:100%;max-width:252px;margin:0 auto;border-radius:8px;background:#fff}',
+      '.dfish .qrph{display:flex;align-items:center;justify-content:center;width:100%;max-width:252px;height:252px;margin:0 auto;box-sizing:border-box;border:.5px dashed var(--dsw-alias-border-l2);border-radius:8px;background:rgba(128,128,128,.06);color:var(--dsw-alias-label-tertiary);font-size:12.5px}',
+      '.dfish .qrwho{margin:4px 0 6px;font-size:14px;line-height:20px}',
+      '.dfish .qrstat{margin:10px 0 0;font-size:12px;line-height:18px;color:var(--dsw-alias-label-secondary,var(--dsw-alias-label-tertiary))}',
+      '.dfish .qrerr{margin:6px 0 0;font-size:12px;line-height:18px;color:#e5484d}',
+      '.dfish .qrbtns{display:flex;gap:8px;justify-content:center;margin-top:14px}',
+      '.dfish .qrbtns button{height:30px;padding:0 14px;font-size:13px;border-radius:8px}',
+      '.dfish .qrbtns button.go{background:var(--dsw-alias-state-business-primary);border-color:var(--dsw-alias-state-business-primary);color:var(--dsw-alias-label-primary-inverted,#fff)}',
+      '.dfish .qrbtns button.go:hover:not(:disabled){opacity:.9;color:var(--dsw-alias-label-primary-inverted,#fff);border-color:var(--dsw-alias-state-business-primary)}',
     ].join('\n')
 
     function useStyleOnce() {
@@ -235,7 +260,6 @@ window.__ModuleLoader__.load({
       useStyleOnce()
       const [state, setState] = useState(null)
       const [beliefs, setBeliefs] = useState(null)
-      const [events, setEvents] = useState([])
       const [diary, setDiary] = useState(null)
       const [browse, setBrowse] = useState(null)
       const [reports, setReports] = useState({ dates: [], date: null, md: '' })
@@ -374,6 +398,13 @@ window.__ModuleLoader__.load({
       const [owCookie, setOwCookie] = useState('')
       const [atOwner, setAtOwner] = useState(true)
       const [owNote, setOwNote] = useState('')
+      // 扫码登录（2026-11-01）：浮层里的这张码。
+      // qr 只在浮层开着的时候有值；关掉就 drop，宿主那边攥着的 cookie 一起忘掉。
+      const [owTab, setOwTab] = useState('qr')
+      const [qr, setQr] = useState(null)
+      const [qrBusy, setQrBusy] = useState(false)
+      const [qrNote, setQrNote] = useState('')
+      const [qrLeft, setQrLeft] = useState(0)
       // 数据文件夹的真路径。**只在内存里用，不上屏**（用户 m03440）。
       const [dataPaths, setDataPaths] = useState(null)
       // 头像（2026-10-24）：插件不自带任何图片，谁用谁自己传一张
@@ -453,6 +484,43 @@ window.__ModuleLoader__.load({
         return () => window.removeEventListener('keydown', onKey)
       }, [zoom])
 
+      // 扫码登录的轮询与倒计时（2026-11-01）。
+      // 只在这张码还"活着"的时候转：waiting / scanned。走到 confirmed 就停手——
+      // 后面要不要写盘由人决定，不该有东西在后台一直问。
+      useEffect(() => {
+        if (!qr || (qr.state !== 'waiting' && qr.state !== 'scanned')) return undefined
+        const key = qr.key
+        const tick = async () => {
+          try {
+            const r = await jget(`/bili/qr/status?key=${encodeURIComponent(key)}`)
+            if (!r?.state) return
+            setQr((prev) => {
+              if (!prev || prev.key !== key) return prev
+              const next = r.state === 'confirmed' ? 'confirmed' : r.state
+              if (next === prev.state && !r.why && !r.note) return prev
+              return {
+                ...prev,
+                state: next,
+                note: String(r.why || r.note || ''),
+                account: r.account ?? prev.account,
+                canWrite: r.canWrite ?? prev.canWrite,
+              }
+            })
+          } catch { /* 一次轮询失败不算数，下一次接着问 */ }
+        }
+        const id = setInterval(tick, 1_500)
+        return () => clearInterval(id)
+      }, [qr?.key, qr?.state])
+
+      // 倒计时：只在浮层开着时走，纯本地算，不打扰宿主。
+      useEffect(() => {
+        if (!qr || !qr.expiresAt) return undefined
+        const left = () => Math.max(0, Math.round((qr.expiresAt - Date.now()) / 1000))
+        setQrLeft(left())
+        const id = setInterval(() => setQrLeft(left()), 1_000)
+        return () => clearInterval(id)
+      }, [qr?.key, qr?.expiresAt])
+
       const load = useCallback(async () => {
         setErr('')
         // 重新读盘之后要重新记基线（撤销 / 刷新都走这里）。
@@ -480,9 +548,11 @@ window.__ModuleLoader__.load({
             setProactiveIdle(Number(pr.minIdleHours ?? 6))
           }
 
-          const [b, e, d, c, br, ib, hm, pth] = await Promise.all([
+          // 不再拉 /events（2026-11-02，用户 m00335）：这里取回来的 e.rows 只进了
+          // setEvents，全文件没有一处渲染它——每 30 秒白拉 25 条事件（九成是后台记账）。
+          // 想看账本原文去「数据」页，那里给的是路径，不靠这条轮询。
+          const [b, d, c, br, ib, hm, pth] = await Promise.all([
             jget('/beliefs'),
-            jget('/events?limit=25'),
             jget('/diary'),
             jget('/config'),
             jget('/browse'),
@@ -491,7 +561,6 @@ window.__ModuleLoader__.load({
             jget('/paths').catch(() => null),
           ])
           setBeliefs(b)
-          setEvents(e.rows || [])
           setDiary(d)
           // 首天正文随 /diary 一起回来了，先灌进翻页缓存（省一次往返）。
           for (const it of d?.items ?? []) diaryCache.current[it.date] = it.text
@@ -862,6 +931,84 @@ window.__ModuleLoader__.load({
           setOwNote(r.note || (r.ok ? '可以说话。' : '还不行。'))
           // 2026-10-27：测试只认「这份 cookie 登的是谁」，不再回填领养人输入框。
           // 以前这里会把 owMid / owName 改成小号，用户手填的大号当场被冲掉。
+          await load()
+        } catch (e) { setOwNote(e.message) } finally { setBusy('') }
+      }
+
+      /**
+       * 扫码登录（2026-11-01）。
+       * 码在宿主那边生成——passport 接口没有 CORS 头，页面里 fetch 会当场被挡。
+       * 这里拿到的只有一张 SVG 和一把 key；cookie 原文永远到不了页面。
+       *
+       * 2026-11-02：点下去之后**一定要有反馈**。以前生成失败时只往卡片里塞一行灰字，
+       * 浮层根本不弹，人看到的就是「点了没反应」。现在失败也把浮层打开，
+       * 里面写清为什么没有码（多半是宿主还跑着旧版插件，重启才好）。
+       */
+      const qrFail = (why) => {
+        const msg = String(why || '没生成出来，再点一次。')
+        setQrNote(msg)
+        setQr({
+          key: '', svg: '', expiresAt: 0,
+          state: 'error', note: msg, account: null, canWrite: false,
+        })
+      }
+      const startQr = async () => {
+        setQrBusy(true); setQrNote('')
+        try {
+          // 刷新＝换一张：旧的那张连它攥着的 cookie 一起丢掉，不留两把钥匙。
+          // 但 drop 失败要留痕（2026-11-02）：以前这里 .catch(() => {}) 把 404 也吃了，
+          // 宿主根本没装这个插件版本时，界面上一点线索都没有。
+          if (qr?.key) {
+            jpost('/bili/qr/drop', { key: qr.key })
+              .catch((e) => console.warn('[dsh-fish] 丢掉旧二维码失败：', e?.message || e))
+          }
+          const r = await jpost('/bili/qr', {})
+          if (!r?.ok) { qrFail(r?.why); return }
+          setQr({
+            key: r.key,
+            svg: r.svg,
+            expiresAt: Number(r.expiresAt ?? (Date.now() + (Number(ow?.qrTtlMs) || 180_000))),
+            state: 'waiting',
+            note: '',
+            account: null,
+            canWrite: false,
+          })
+        } catch (e) {
+          // 404/405 = 宿主还跑着旧版插件，新路由没注册上（405 是宿主对未注册前缀的默认应答）。
+          // 说人话，别让人对着「HTTP 405」猜要不要重启。
+          const m = String(e?.message || e)
+          qrFail(/HTTP (404|405)/.test(m)
+            ? '宿主还没加载这一版插件（多半是没重启）。完全退出 DSH 再打开，然后重新点一次。'
+            : m)
+        } finally { setQrBusy(false) }
+      }
+
+      /** 关浮层＝放弃这次登录：让宿主把那张码和攥着的 cookie 一起忘掉。 */
+      const closeQr = () => {
+        const key = qr?.key
+        setQr(null); setQrNote('')
+        if (key) jpost('/bili/qr/drop', { key }).catch(() => {})
+      }
+
+      /** 人点了「确认」才写盘——扫码成功只是把 cookie 攥在宿主内存里。 */
+      const saveQrLogin = async () => {
+        if (!qr?.key) return
+        setQrBusy(true); setQrNote('')
+        try {
+          const r = await jpost('/bili/qr/save', { key: qr.key })
+          if (!r?.ok) { setQrNote(r?.why || r?.error || '没存上。'); return }
+          setQr(null)
+          setOwNote(r.note || '存下了。')
+          await load()
+        } catch (e) { setQrNote(e.message) } finally { setQrBusy(false) }
+      }
+
+      /** 清除登录：cookie 与「登的是谁」一起清，别留一个会误导人的旧名字。 */
+      const clearLogin = async () => {
+        setBusy('owclear'); setOwNote('')
+        try {
+          const r = await jpost('/owner', { cookie: '' })
+          setOwNote(r.note || '清掉了。')
           await load()
         } catch (e) { setOwNote(e.message) } finally { setBusy('') }
       }
@@ -2104,27 +2251,58 @@ window.__ModuleLoader__.load({
               hint: '没填昵称就 @ 不出来——空的 @ 只是一串没人认领的字符。' }),
             Toggle({ label: '发评论时在最前面 @ 你', on: atOwner, onChange: setAtOwner,
               hint: '关掉就不 @，评论会显得更像自言自语。' }))),
-        group('B 站登录（cookie）',
-          '她刷视频、发评论用的账号，建议放一个小号。没存也能看视频，只是不能说话。cookie设置完毕后为隐私考虑，不会再次显示，即设置完毕该项也为空白。',
+        group('B 站登录',
+          '她刷视频、发评论用的账号，建议放一个小号。没存也能看视频，只是不能说话。',
+          // 两个入口：扫码是给人用的，粘贴是退路（扫码不顺利、或者想换个号）。
+          // 用 .seg 而不是页签那套 .tabs/.tab——卡片里的切换不该长得像导航栏（2026-11-02）。
+          h('div', { className: 'seg' },
+            h('button', { className: owTab === 'qr' ? 'on' : '', onClick: () => setOwTab('qr') }, '手机扫码'),
+            h('button', { className: owTab === 'cookie' ? 'on' : '', onClick: () => setOwTab('cookie') }, '粘贴 cookie')),
+
           h('div', { className: 'dim', style: { marginBottom: '8px' } },
             ow?.hasCookie
-              ? `已存${ow?.account?.name ? `，登录账号：${ow.account.name}${ow.account.mid ? `（uid ${ow.account.mid}）` : ''}` : '（点「测试能不能说话」认一下是哪个账号）'}${ow.hasCsrf ? '' : '，但少了 bili_jct（不能发评论）'}。换一份就重新贴。`
+              ? `已存${ow?.account?.name ? `，登录账号：${ow.account.name}${ow.account.mid ? `（uid ${ow.account.mid}）` : ''}` : '（点「测试能不能说话」认一下是哪个账号）'}${ow.hasCsrf ? '' : '，但少了 bili_jct（不能发评论）'}。换一份就重新登。`
               : '还没存。'),
-          h('textarea', {
-            rows: 3,
-            value: owCookie,
-            placeholder: 'SESSDATA=...; bili_jct=...',
-            onChange: (e) => setOwCookie(e.target.value),
-          }),
-          h('div', { className: 'hint', style: { whiteSpace: 'pre-wrap', marginTop: '6px' } },
-            String(ow?.hint ?? '').split('\\n').map((line, i) => h('div', { key: i }, line))),
+
+          owTab === 'qr'
+            ? h('div', null,
+              h('p', { className: 'hint', style: { margin: '0 0 8px' } },
+                '点按钮，用手机 B 站扫弹出的码。确认成功后先给你看一眼登的是谁——你点了「就是她」才写进磁盘，中途关掉就当没扫过。'),
+              h('div', { className: 'row' },
+                h('button', { onClick: startQr, disabled: qrBusy },
+                  qrBusy ? '生成中…' : qr ? '再换一张码' : '用手机扫码登录'),
+                h('span', { className: 'hint' }, '码 3 分钟内有效；过期了点浮层里的「刷新」。'),
+                // 生成失败时这一行是唯一能看见的原因（浮层会同时打开），别再写成灰色小字。
+                qrNote ? h('span', { className: 'qrerr', style: { margin: 0 } }, qrNote) : null))
+            : h('div', null,
+              h('p', { className: 'hint', style: { margin: '0 0 8px' } },
+                'cookie 存好之后为隐私起见不再回显，输入框永远是空的。'),
+              h('textarea', {
+                rows: 3,
+                value: owCookie,
+                placeholder: 'SESSDATA=...; bili_jct=...',
+                onChange: (e) => setOwCookie(e.target.value),
+              }),
+              h('div', { className: 'hint', style: { whiteSpace: 'pre-wrap', marginTop: '6px' } },
+                String(ow?.hint ?? '').split('\\n').map((line, i) => h('div', { key: i }, line))),
+              h('div', { className: 'row', style: { marginTop: '8px' } },
+                h('button', { onClick: saveOwnerCard, disabled: busy === 'owner' },
+                  busy === 'owner' ? '保存中…' : '保存'),
+                h('button', { onClick: testOwner, disabled: busy === 'owtest' },
+                  busy === 'owtest' ? '测试中…' : '测试 cookie 能不能说话'),
+                h('span', { className: 'hint' }, '只验下面那份 cookie，不保存、不动上面两格；两格要改就点「保存」。'))),
+
           h('div', { className: 'row', style: { marginTop: '8px' } },
-            h('button', { onClick: saveOwnerCard, disabled: busy === 'owner' },
-              busy === 'owner' ? '保存中…' : '保存'),
-            h('button', { onClick: testOwner, disabled: busy === 'owtest' },
-              busy === 'owtest' ? '测试中…' : '测试 cookie 能不能说话'),
-            h('span', { className: 'hint' }, '只验下面那份 cookie，不保存、不动上面两格；两格要改就点「保存」。'),
-            owNote ? h('span', { className: 'dim' }, owNote) : null)),
+            owNote ? h('span', { className: 'dim' }, owNote) : null,
+            ow?.hasCookie
+              ? h('button', {
+                disabled: busy === 'owclear',
+                onClick: () => {
+                  if (!window.confirm('清掉登录？之后她就不能发评论了，要重新登。')) return
+                  clearLogin()
+                },
+              }, busy === 'owclear' ? '清除中…' : '清除登录')
+              : null)),
 
         // ---- 以前看了什么（视频观看历史，分页） ----
         groupFull('看视频历史记录',
@@ -2403,6 +2581,63 @@ window.__ModuleLoader__.load({
             color: '#fff', opacity: .82, fontSize: '12px', pointerEvents: 'none',
           },
         }, `滚轮缩放 ${Math.round(zoom.scale * 100)}% · 按住拖动 · 双击复位 · Esc 或点空白处关闭`))
+        : null
+
+      // 扫码浮层（2026-11-01，2026-11-02 按仓库配色重做）。
+      // 点空白处或「关闭」都走 closeQr——放弃这次登录，宿主持着的那份 cookie 一起忘掉。
+      const qrDead = qr ? (qr.state === 'expired' || qr.state === 'gone') : false
+      const qrImg = qr?.svg && !qrDead && qr.state !== 'confirmed'
+        ? h('img', {
+          className: 'qrpic',
+          src: `data:image/svg+xml;charset=utf-8,${encodeURIComponent(qr.svg)}`,
+          alt: 'B 站登录二维码',
+        })
+        : null
+      const qrStatus = !qr ? '' : qr.state === 'confirmed'
+        ? ''
+        : qrDead
+          ? '码过期了，点「刷新」换一张。'
+          // error 的那句单独走下面的 qrerr，这里不再重复一遍（2026-11-02 试出来的双行）。
+          : qr.state === 'error'
+            ? ''
+            : qr.state === 'scanned'
+              ? '扫到了，在手机上点「确认登录」。'
+              : (qrLeft > 0 ? `还没扫。这张码 ${qrLeft} 秒后过期。` : '还没扫。')
+      // 出错的时候，浮层首行别再写「用手机 B 站扫码登录」——那个时刻根本没有码。
+      const qrTitle = !qr ? ''
+        : qr.state === 'confirmed' ? '扫到了，确认是这个号吗'
+          : qr.state === 'error' ? '没拿到二维码'
+            : '用手机 B 站扫码登录'
+      const qrOverlay = qr ? h('div', {
+        className: 'qrovl',
+        onClick: (e) => { if (e.target === e.currentTarget) closeQr() },
+      },
+        h('div', { className: 'qrcard' },
+          h('h4', null, qrTitle),
+          qr.state === 'confirmed'
+            ? h('div', null,
+              h('div', { className: 'qrwho' },
+                qr.account?.name
+                  ? `登的是 ${qr.account.name}${qr.account.mid ? `（uid ${qr.account.mid}）` : ''}`
+                  : '扫到了'),
+              h('div', { className: 'qrstat', style: { margin: 0 } },
+                qr.canWrite
+                  ? '存下来之后，就能用这个号发评论了。'
+                  : '这个号缺 bili_jct，能看但不能评论——换一个号重扫吧。'))
+            // 过期态不再是一张空白：给个占位框说明「这里本来是码」。
+            : (qrImg ?? h('div', { className: 'qrph' },
+              qrDead ? '码已过期' : (qr.state === 'error' ? '码没生成出来' : '码还没出来'))),
+          qrStatus ? h('div', { className: 'qrstat' }, qrStatus) : null,
+          qrNote ? h('div', { className: 'qrerr' }, qrNote) : null,
+          h('div', { className: 'qrbtns' },
+            qr.state === 'confirmed'
+              ? h('button', { className: 'go', onClick: saveQrLogin, disabled: qrBusy },
+                qrBusy ? '保存中…' : '就是这个号，保存')
+              : h('button', { onClick: startQr, disabled: qrBusy },
+                qrBusy ? '生成中…'
+                  : qr.state === 'error' ? '再试一次'
+                    : (qrDead ? '刷新' : '换一张')),
+            h('button', { onClick: closeQr }, qr.state === 'confirmed' ? '取消' : '关闭'))))
         : null
 
       // 开发者留言（2026-10-25 用户给的原文）：放在整页最下面收尾，署名居右。
@@ -2736,8 +2971,9 @@ window.__ModuleLoader__.load({
                 border: '0.5px solid var(--dsw-alias-border-l2)',
               },
             }),
+            // 2026-11-02：1 群满了，换成新建的 2 群（群号 781084960）。
             h('div', { className: 'hint', style: { margin: '10px 0 0' } },
-              '群号：615628177 —— 二维码扫不出来就搜这个号。'))))
+              '群号：781084960 —— 二维码扫不出来就搜这个号。'))))
 
       // 顺序是用户定的：①手上能用什么 ②为什么默认只放这几个 ③关于（版本 / 检查更新 / GitHub）。
       // 「关于」放最后——它是这个页的收尾，不是打开就要看的东西。
@@ -3585,7 +3821,7 @@ window.__ModuleLoader__.load({
       return h('div', { className: 'dfish', ref: (el) => { topEl = el } },
         h('h2', null, '大肥鱼'),
         h('p', { className: 'sub' },
-          s ? `第 ${s.day} / ${s.growthDays} 天 · ${s.stageName} · 事件 ${s.counts.total} 条` : '读取中…'),
+          s ? `第 ${s.day} / ${s.growthDays} 天 · ${s.stageName} · 她记下 ${s.counts.total} 条${s.counts.meta ? `，另有 ${s.counts.meta} 条系统记录` : ''}` : '读取中…'),
         err ? h('pre', { className: 'err' }, err) : null,
         note ? h('pre', { className: 'ok' }, note) : null,
         // 保存回执只是确认「存到了」，不占页签里的说明位（2026-10-29 用户）。
@@ -3638,6 +3874,10 @@ window.__ModuleLoader__.load({
         showTab('data') ? dataPage : null,
         showTab('feedback') ? feedbackPage : null,
         showTab('outing') ? outingPage : null,
+
+        // 扫码浮层挂在最外面（不塞进设置页）：切页签时它要么还开着、要么已经关了，
+        // 不能因为换了一页就留一张没人认领的码在宿主内存里。
+        qrOverlay,
       )
     }
 

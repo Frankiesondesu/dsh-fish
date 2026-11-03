@@ -15,6 +15,8 @@ import { loadConfig, updateConfig, configFileInfo, dateKey, validateToolNames, s
 import { deriveSelf, consistency, novelty } from './derive.js'
 // 记忆体检（0.7.6，2026-10-30 用户 m00342）：只读诊断，不算分、不写盘。
 import { examine } from './health.js'
+// 记账行与「她的事」的分界（2026-11-02，用户 m00335）：只决定怎么数、怎么展示，不删行。
+import { countEvents, isNoiseMeta } from './meta.js'
 // 「稳定」单独一个文件（2026-10-26）：它要同时看事件流与她的自我描述，
 // 依赖方向必须是 quality → derive + persona，不能反过来塞进 derive（会成环）。
 import { stability, stabilityBand } from './quality.js'
@@ -58,6 +60,10 @@ import { applyHandover, IMPORT_TEMPLATE } from './import.js'
 import { FAQ, FAQ_TITLE, renderFaqPage } from './faq.js'
 import { readHomeRecord, retireHomeSessions } from './retire.js'
 import { collectBackup, backupFileName, restoreBackup } from './backup.js'
+// 扫码登录（2026-11-01 用户定案）：二维码的生成与轮询都在宿主这儿做——
+// passport 那两条接口没有 CORS 头，页面里直接 fetch 会被浏览器挡死。
+// 同时这也是隐私边界：key 与换来的 cookie 只活在宿主内存里，页面拿不到原文。
+import { createQrLogin, QR_TTL_MS } from './biliqr.js'
 import { bootstrapHome, homeStatus, wakeIfBlank, talkSessionId } from './home.js'
 import { selfDocStatus } from './selfdoc.js'
 import { personaBudget, BELIEF_SHOWN, shownCount } from './persona.js'
@@ -170,6 +176,10 @@ export function registerObserve(ctx, deps = {}) {
     exe: process.execPath,
     ...runtimeBins({ exe: process.execPath }),
   })
+
+  // 扫码登录的那台小机器（2026-11-01）。待确认的 cookie 只躺在这里的内存里，
+  // 进程一结束就没了；deps.qrLogin 是留给单测的注入口。
+  const qrLogin = deps.qrLogin ?? createQrLogin({ log: (m) => console.log('[dsh-fish]', m) })
 
   // ---- 信任栅栏：失败即拒绝 ----
   function guarded(handler) {
@@ -321,13 +331,24 @@ export function registerObserve(ctx, deps = {}) {
         stanceCount: buildStances(m).length,
         stanceReady: gatesDone(m),
         // 刻意不返回 needs 数值：这是内部量，观测台也不给看（防"看数字调性格"的滑坡）
-        counts: {
-          utterance: events.filter((e) => e.type === 'utterance').length,
-          revise: events.filter((e) => e.type === 'revise').length,
-          refusal: events.filter((e) => e.type === 'refusal').length,
-          reunion: events.filter((e) => e.type === 'reunion').length,
-          total: events.length,
-        },
+        //
+        // total 的口径（2026-11-02，用户 m00335）：原来 `total: events.length`，而线上
+        // 443 行里 400 行是系统后台记账，界面于是说「事件 443 条」——看着像她记了 443 件
+        // 事，其实她自己记下的只有 43 条（其中 286 行连语义都没有，是 quiet:/家换了：
+        // 这种纯记账）。现在 total 只数「她的事」，整份文件多大另给 all。
+        counts: (() => {
+          const c = countEvents(events)
+          return {
+            utterance: events.filter((e) => e.type === 'utterance').length,
+            revise: events.filter((e) => e.type === 'revise').length,
+            refusal: events.filter((e) => e.type === 'refusal').length,
+            reunion: events.filter((e) => e.type === 'reunion').length,
+            total: c.real,
+            all: c.all,
+            meta: c.meta,
+            noise: c.noise,
+          }
+        })(),
         // 「判断漂移」三个诊断值。都不是 0–1 的评分，别让人拿它调性格。
         // 稳定（2026-10-26 换尺子）：抽掉 k 条她还在拿着的判断，重算一遍她的自我描述，
         //   看还是不是她。传的 shown / budget / withBans 与 writeSelfDoc 一致，
@@ -423,11 +444,17 @@ export function registerObserve(ctx, deps = {}) {
       const url = new URL(req.url, 'http://x')
       const limit = Math.min(500, Number(url.searchParams.get('limit') ?? 80) || 80)
       const type = url.searchParams.get('type')
+      // 纯记账行（quiet: / 家换了：）默认不返回（2026-11-02，用户 m00335）：
+      // 它们没有读取方需要逐条历史（quiet 已按天折叠、家换了无人读），
+      // 混在"事件原文"里只会让人以为她记了几百件事。要看原始文件就传 ?noise=1。
+      // 文件本身一行没动——这里只影响这一条 HTTP 的返回。
+      const withNoise = url.searchParams.get('noise') === '1'
       const rows = events
-        .filter((e) => !type || e.type === type)
+        .filter((e) => (!type || e.type === type) && (withNoise || !isNoiseMeta(e)))
         .slice(-limit)
         .reverse()
-      send(res, 200, { total: events.length, rows })
+      const c = countEvents(events)
+      send(res, 200, { total: c.real, all: c.all, meta: c.meta, noise: c.noise, rows })
     }],
 
     ['/beliefs', async (req, res) => {
@@ -626,6 +653,8 @@ export function registerObserve(ctx, deps = {}) {
           ...publicOwner(ow),
           atOwner: config?.comment?.atOwner !== false,
           hint: COOKIE_HINT,
+          // 二维码多久过期由宿主说了算（页面只负责倒计时），免得两边各写一个 180。
+          qrTtlMs: QR_TTL_MS,
         })
       }
       if (req.method === 'POST' || req.method === 'PUT') {
@@ -673,6 +702,45 @@ export function registerObserve(ctx, deps = {}) {
         return send(res, r.ok ? 200 : 400, r)
       }
       send(res, 405, { error: 'method not allowed' })
+    }],
+
+    // 扫码登录（2026-11-01，用户定案）：手动抓 cookie 的那一格保留为退路，扫码是默认。
+    //
+    // 四个动作挤在一条前缀路由里（start / status / save / drop），理由和 /cover 一样：
+    // webServer.register 只给前缀，子路径得自己分。
+    //
+    // 页面能拿到的只有「登的是谁」和「还能活多久」；cookie 原文一步都不出宿主。
+    ['/bili/qr', async (req, res) => {
+      const u = new URL(String(req.url ?? '/'), 'http://x')
+      const sub = u.pathname.replace(/^\/dsh-fish\/bili\/qr/, '').replace(/\/+$/, '')
+
+      if (!sub) {
+        if (req.method !== 'POST') return send(res, 405, { error: 'method not allowed' })
+        const r = await qrLogin.start()
+        return send(res, r.ok ? 200 : 502, r)
+      }
+
+      if (sub === '/status') {
+        if (req.method !== 'GET') return send(res, 405, { error: 'method not allowed' })
+        return send(res, 200, await qrLogin.poll(u.searchParams.get('key') ?? ''))
+      }
+
+      if (sub === '/save' || sub === '/drop') {
+        if (req.method !== 'POST') return send(res, 405, { error: 'method not allowed' })
+        let body = {}
+        try {
+          body = JSON.parse((await readBody(req, 20_000)) || '{}')
+        } catch {
+          return send(res, 400, { error: 'body 不是合法 JSON' })
+        }
+        const key = String(body.key ?? '')
+        if (!key) return send(res, 400, { error: '缺 key' })
+        if (sub === '/drop') return send(res, 200, qrLogin.drop(key))
+        const r = await qrLogin.save(key, root)
+        return send(res, r.ok ? 200 : 409, r)
+      }
+
+      send(res, 404, { error: 'no such route' })
     }],
 
     ['/browse', async (req, res) => {
@@ -1111,7 +1179,10 @@ export function registerObserve(ctx, deps = {}) {
           // 四道门走完才可能非零；没走完就是 0，不是"没长出来"，是"还没走到"。
           ...stanceSummary(buildStances(model)),
         },
-        events: events.length,
+        // 她的事有几条（2026-11-02，用户 m00335）：与 /state 的 counts.total 同一口径，
+        // 只数她的、不数后台记账。eventsAll 是文件实际行数，供需要"账本多大"的地方用。
+        events: countEvents(events).real,
+        eventsAll: countEvents(events).all,
         diaries: diary.length,
         session: { turns: h.turns, rotateAfter: Number(config?.chat?.rotateAfter ?? 0), rotatedAt: h.rotatedAt },
         sleep: {
@@ -2179,6 +2250,8 @@ export function registerObserve(ctx, deps = {}) {
 
   return {
     dispose() {
+      // 待确认的 cookie 不该比进程活得久：卸载/重载插件时当场抹掉。
+      try { qrLogin.clear() } catch { /* ignore */ }
       for (const d of disposers) { try { d() } catch { /* ignore */ } }
     },
   }
