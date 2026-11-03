@@ -638,10 +638,12 @@ window.__ModuleLoader__.load({
           setVideoOn(cfg.video?.enabled !== false)
           setVideoPerDay(Number(cfg.video?.perDay ?? 2))
           setVideoOffPeak(Number(cfg.video?.offPeakPerDay ?? 4))
-          setVideoSubs(cfg.video?.subs !== false)
-          setVideoAsr(cfg.video?.asr !== false)
-          setVideoEngine(String(cfg.video?.engine ?? 'vs'))
-          setVideoFrames(Number(cfg.video?.frames ?? 9))
+          // fork.22 删掉了四个控件（取几帧 / 看视频的方式 / 字幕 / 听写），
+          // 但这里的四个 setter 调用忘了删——它们在运行时是 undefined，
+          // 第一个就抛 ReferenceError，**后面所有设置项都不再执行**，
+          // 设置页顶上于是挂一行红的 `setVideoSubs is not defined`。
+          // 2026-11-03 修（fork.31）：删掉这四行，并加源码守卫
+          // test/client-setters.test.mjs 防止再犯。
           setAvoidMinDur(Number(cfg.avoid?.minDuration ?? 60))
           setAvoidMids(((cfg.avoid?.upMids) || []).join('，'))
           setSleepEvery(Number(cfg.memory?.sleepEveryDays ?? 7))
