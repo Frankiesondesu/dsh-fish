@@ -188,20 +188,12 @@ export function registerTurns(ctx, deps = {}) {
     }
     const text = cut(messageText(data))
     if (!text) return
-    // fork.6（2026-11-01）：他在场。
-    //
-    // 这条 meta 是冷落检测（absence.js）的唯一依据，但原来只有 /say 那条路写它
-    // （say.js 里 `await appendEvent({type:'meta', text:'seen:...'})`），
-    // 侧栏打字和 IM 网关都不写。结果是：天天在 QQ 里跟她聊天，她却记不到"有人来过"，
-    // 冷落检测一路返回 no-contact-yet。
-    //
-    // 这里能安全地写，是因为 onHuman 只对真人消息触发——定时唤醒（timer）不会进来。
-    // source 必须是 'system'：schema 只允许 tool 源写 HER_TYPES，meta 写成 tool 会被拒。
-    appendEvent(
-      { type: 'meta', text: `seen:${new Date().toISOString()}` },
-      { day: 0, stage: 1, source: 'system' },
-      root,
-    ).catch(() => null)
+    // fork.6（2026-11-01）曾在这里写 `seen:`（冷落检测 absence.js 的唯一依据）。
+    // v0.8.6 合并（2026-11-03）：上游 m01280 在**结账时**写了同一个标记，而且
+    // day/stage 用的是真实成长日、写失败会记日志——比这里的 day:0/stage:1 准。
+    // 两处都留会让「一轮只写一条」变成两条（test/turns.test.mjs 抓到了），
+    // 所以这里删掉，统一走上游那条（见本文件 onTurnEnd 里的 m01280 注释）。
+    // 唯一丢掉的场景：他发了消息但这一轮始终没结账——那种情况本来也没有"他来过"的结论。
     // 他递来一条视频（2026-10-28）：记一条事实 `hand:<日期> <bvid>`。
     // **不等于她看过**——评论闸门不认这一行，认的是 look:/watched:。
     // 只记 BV 号；短链在这一层不解析（要发网络请求，不该卡在她说话的路径上）。
