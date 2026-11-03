@@ -257,14 +257,36 @@ export function growthDay(events, now = Date.now()) {
   return Math.max(1, snap, live)
 }
 
-/** 字符二元组（含计数）。similarity 与 mentions 的倒排索引共用。 */
+/**
+ * 字符二元组（含计数）。similarity 与 mentions 的倒排索引共用。
+ *
+ * fork.28（2026-11-03）：加一层按文本的缓存。同一本账本反复算的时候，
+ * 每条判断、每条 utterance 的二元组完全一样，而重建一个 130 字的 Map
+ * 实测占 deriveSelf 总耗时的 ~27%。Map 只读，共享是安全的。
+ */
+const BIGRAM_CACHE_MAX = 2000
+const bigramCache = new Map()
+
 function bigrams(s) {
+  const key = String(s ?? '')
+  const hit = bigramCache.get(key)
+  if (hit) return hit
   const m = new Map()
-  for (let i = 0; i < s.length - 1; i++) {
-    const g = s.slice(i, i + 2)
+  for (let i = 0; i < key.length - 1; i++) {
+    const g = key.slice(i, i + 2)
     m.set(g, (m.get(g) || 0) + 1)
   }
+  // 先进先出：账本里的句子会一直重复出现，最老的那些（换掉的旧话）自然被挤出去
+  if (bigramCache.size >= BIGRAM_CACHE_MAX) bigramCache.delete(bigramCache.keys().next().value)
+  bigramCache.set(key, m)
   return m
+}
+
+/** 二元组总数（dice 的分母用它，别每次重算） */
+function gramTotal(g) {
+  let n = 0
+  for (const [, c] of g) n += c
+  return n
 }
 
 /** Dice 系数：2*交集 / (|A|+|B|)，按二元组计数。 */
@@ -277,6 +299,35 @@ function dice(ga, gb) {
   }
   for (const [, c] of gb) total += c
   return total === 0 ? 0 : (2 * inter) / total
+}
+
+/**
+ * 「Dice 够不够 min」——和 `dice(ga, gb) >= min` 等价，但**够不上就提前退**。
+ *
+ * 为什么需要：mentions 那一步是 O(判断 × 候选)，而绝大多数候选其实差得远，
+ * 只为问一句「够 0.6 吗」就把两张 Map 走完太亏。交集的上界是「剩下还没看过的
+ * 二元组总数」，一旦上界都不够就当场返回 false。
+ *
+ * totalA/totalB 由调用方预先算好（每条只算一次），省掉 dice 里两趟累加。
+ */
+function diceAtLeast(ga, gb, totalA, totalB, min) {
+  const T = totalA + totalB
+  if (T === 0) return false
+  // 走小的那张，剩下的上界才对得上
+  const smallFirst = ga.size <= gb.size
+  const small = smallFirst ? ga : gb
+  const large = smallFirst ? gb : ga
+  const totalSmall = smallFirst ? totalA : totalB
+  let inter = 0
+  let visited = 0
+  for (const [g, c] of small) {
+    visited += c
+    const d = large.get(g)
+    if (d) inter += Math.min(c, d)
+    // 剩下全中也到不了 min —— 提前退（写法与下面的返回值同形，避免浮点判定漂移）
+    if ((2 * (inter + (totalSmall - visited))) / T < min) return false
+  }
+  return (2 * inter) / T >= min
 }
 
 /** 字符二元组 Dice 相似度（跨情境一致与"新话"判定用） */
@@ -662,7 +713,9 @@ export function deriveSelf(events = [], opts = {}) {
       // ts 是给「固化掉档」用的：要知道这条判断最后一次被提起是什么时候。
       // 时间解析失败记 0，下游按「没有时间证据」处理，不会把它当成很久以前。
       const t = Date.parse(String(e.ts ?? ''))
-      return { id: e.id, text, norm, grams: bigrams(norm), ts: Number.isFinite(t) ? t : 0 }
+      const grams = bigrams(norm)
+      // fork.28：dice 的分母（二元组总数）每条只算一次，别在 O(判断×候选) 里重算。
+      return { id: e.id, text, norm, grams, total: gramTotal(grams), ts: Number.isFinite(t) ? t : 0 }
     })
   // 2026-10-27（issue #3）：倒排索引——相似度 ≥ 0.6 必然共享至少一个二元组
   // （sim = 2*inter/(|A|+|B|) ≥ 0.6 ⇒ inter ≥ 0.3*min(|A|,|B|) > 0），
@@ -681,6 +734,7 @@ export function deriveSelf(events = [], opts = {}) {
   const scored = active.map((b) => {
     const mine = stripNegation(b.text)
     const mg = bigrams(mine)
+    const totalMg = gramTotal(mg)
     // 最近一次「被提起」的时间。她自己的那句也算一次（下面的 mentions += 1），
     // 所以起点是这条判断自己被说出口的时间。
     const ownAt = Date.parse(String(b.since ?? '')) || idTime(b.id) || 0
@@ -705,7 +759,9 @@ export function deriveSelf(events = [], opts = {}) {
         const lo = Math.min(mg.size, o.grams.size)
         const hi = Math.max(mg.size, o.grams.size)
         if (hi > lo * MENTION_MAX_RATIO) continue
-        if (dice(mg, o.grams) < 0.6) continue
+        // fork.28：dice 仍要算，但只问「够不够 0.6」——够不上就提前退，
+        // 不用把两张 Map 走完。判定口径与 `dice(...) < 0.6` 完全等价。
+        if (!diceAtLeast(mg, o.grams, totalMg, o.total, 0.6)) continue
         mentions += 1
         if (o.ts > lastMentionAt) lastMentionAt = o.ts
       }
