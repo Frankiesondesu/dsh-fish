@@ -167,7 +167,37 @@ test('没有 ocr 字段（老版本外挂）：照常出说明，不报错', asy
     const r = await watchViaStoryboard({ bvid: 'BV1ED4y1Y7dc', root, impl: implWithOcr({}) })
     assert.equal(r.ok, true)
     assert.ok(!r.text.includes('改自'))
-    assert.match(r.text, /来源：asr/)
+    assert.match(r.text, /来源：我们自己听写的/)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+/**
+ * 台词的三种成色要分开说（2026-11-03 实测）：
+ *   site-cc:ai-zh = B 站自己生成的 AI 字幕（她看到的错字就是它）
+ *   site-cc:zh    = 上传者给的字幕
+ *   asr           = 我们自己听写
+ * 混成一句「来源：subtitle」她没法判断该不该信。
+ */
+test('台词来源要说清是 AI 字幕、人工字幕还是自己听写', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'fish-vs-ocr-'))
+  try {
+    const cases = [
+      ['site-cc:ai-zh', /B 站 AI 字幕，机器听写、可能有错字/],
+      ['site-cc:zh', /上传者给的字幕/],
+      ['paraformer', /我们自己听写的/],
+    ]
+    for (const [model, want] of cases) {
+      const impl = implWithOcr({})
+      const orig = impl.runStoryboard
+      impl.runStoryboard = async (o) => {
+        const res = await orig(o)
+        return { ...res, transcript: { ...res.transcript, source: model === 'paraformer' ? 'asr' : 'subtitle', model } }
+      }
+      const r = await watchViaStoryboard({ bvid: 'BV1ED4y1Y7dc', root, impl })
+      assert.match(r.text, want, `model=${model} 时说明不对：${r.text.split('\n').find((l) => l.includes('台词共'))}`)
+    }
   } finally {
     rmSync(root, { recursive: true, force: true })
   }

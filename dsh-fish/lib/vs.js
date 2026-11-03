@@ -26,6 +26,28 @@ export function vsSrcDefault() {
   return join(homedir(), '.dsh', 'profiles', 'desktop', 'node_modules', 'dsh-video-storyboard', 'src')
 }
 
+/**
+ * 入口文件的候选路径（2026-11-03，vs 0.6.5 挪了位置）。
+ *
+ * 0.6.4 及以前：`<src>/pipeline.js`
+ * 0.6.5 起：    `<src>/storyboard/pipeline.js`（package.json 的 `./pipeline` 子路径跟着改）
+ *
+ * 这条路径硬编码过一次，插件一升级就整条路断掉——而且断得很安静：
+ * 只报「没找到外挂」，她那边就是「这次没看成」。所以这里按版本列候选，
+ * 谁能导出 runStoryboard + saveStoryboards 就用谁。
+ * 另外也容忍 vsPath 指到**包根**而不是 src（用户手动配的时候两种都可能）。
+ */
+export function entryCandidates(base) {
+  const b = String(base ?? '').replace(/[\\/]+$/, '')
+  if (!b) return []
+  return [
+    join(b, 'pipeline.js'),                    // ≤0.6.4
+    join(b, 'storyboard', 'pipeline.js'),      // ≥0.6.5
+    join(b, 'src', 'pipeline.js'),             // vsPath 指到包根
+    join(b, 'src', 'storyboard', 'pipeline.js'),
+  ]
+}
+
 let modCache = null
 let lastWhy = ''
 
@@ -45,18 +67,22 @@ export async function loadStoryboard(vsPath) {
   // join('', 'pipeline.js') 于是变成相对路径 'pipeline.js'，从 vs.js 旁边找，
   // 必然找不到。结果：**默认配置下 vs 一次都没跑起来过**，每次都静默退回九帧。
   const raw = String(vsPath ?? '').trim()
-  const base = (raw || vsSrcDefault()).replace(/\/+$/, '')
+  const base = (raw || vsSrcDefault()).replace(/[\\/]+$/, '')
   if (modCache?.path === base) return modCache.mods
   let mods = null
-  let why = ''
-  try {
-    const mod = await import(pathToFileURL(join(base, 'pipeline.js')).href)
-    if (mod?.runStoryboard && mod?.saveStoryboards) mods = mod
-    else why = `导出了 ${Object.keys(mod ?? {}).slice(0, 6).join('/') || '（空）'}，但没有 runStoryboard/saveStoryboards`
-  } catch (err) {
-    why = String(err?.message ?? err)
+  const tried = []
+  for (const file of entryCandidates(base)) {
+    try {
+      const mod = await import(pathToFileURL(file).href)
+      if (mod?.runStoryboard && mod?.saveStoryboards) { mods = mod; break }
+      tried.push(`${file}：导出了 ${Object.keys(mod ?? {}).slice(0, 5).join('/') || '（空）'}，但没有 runStoryboard/saveStoryboards`)
+    } catch (err) {
+      tried.push(`${file}：${String(err?.message ?? err).slice(0, 120)}`)
+    }
   }
-  lastWhy = why
+  // 全失败时把**每条候选**的原因都留下来：插件升级挪位置是常态，
+  // 只报「没找到」的话，下一次还是得把这段代码重读一遍。
+  lastWhy = mods ? '' : tried.join(' ｜ ')
   modCache = { path: base, mods }
   return mods
 }
@@ -173,13 +199,27 @@ export async function watchViaStoryboard(o = {}) {
   }
   const tr = res.transcript && typeof res.transcript === 'object' ? res.transcript : null
   // 台词从哪来、有没有对照过，都得说——她上次就是靠猜「精准确V」本来想说什么。
+  //
+  // 2026-11-03（实测三条片子）：她的错字**不是**我们听写错了，是 B 站自己的
+  // AI 字幕（`site-cc:ai-zh`）就是机器听写。这跟 `site-cc:zh`（上传者给的字幕）
+  // 是两回事，跟 `asr`（我们自己听写）也是两回事——三种成色，必须分开说。
+  const src = String(tr?.source ?? '')
+  const model = String(tr?.model ?? '')
+  const isSiteCc = /site-cc/i.test(model)
+  const srcText = src === 'asr'
+    ? '我们自己听写的'
+    : isSiteCc && /ai/i.test(model)
+      ? 'B 站 AI 字幕，机器听写、可能有错字'
+      : isSiteCc
+        ? '上传者给的字幕'
+        : (src || '未知')
   const ocrBits = []
   if (Number(ocr?.fixed) > 0) ocrBits.push(`其中 ${Number(ocr.fixed)} 处听写和画面字幕对不上、按字幕改过（后面标了「改自」）`)
   else if (ocr?.status === 'skipped' && ocr?.reason === 'no-subtitle-band') ocrBits.push('这条没找到硬字幕，台词只有听写')
   else if (ocr?.status === 'failed') ocrBits.push('字幕对照没跑成，台词只有听写')
   if (ocr?.basedOn === 'low-res-copy') ocrBits.push('对照用的是低清副本，可信度要打折')
   const trNote = Number(tr?.chars) > 0
-    ? `（台词共 ${tr.chars} 字、${tr.segments ?? 0} 段，来源：${tr.source ?? '未知'}${ocrBits.length ? `；${ocrBits.join('；')}` : ''}）`
+    ? `（台词共 ${tr.chars} 字、${tr.segments ?? 0} 段，来源：${srcText}${ocrBits.length ? `；${ocrBits.join('；')}` : ''}）`
     : '（这条没有字幕轨，也没有听写到台词）'
 
   const title = String(res.info?.title ?? '') || o.bvid
