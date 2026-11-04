@@ -277,7 +277,16 @@ export function registerObserve(ctx, deps = {}) {
     }
 
     if (!text && !imagePath) return send(res, 400, { error: 'text 不能为空' })
-    const r = await sayToHer(ctx, text, { root, imagePath, log: (...a) => console.log('[dsh-fish]', ...a) })
+    const r = await sayToHer(ctx, text, {
+      root,
+      imagePath,
+      // 0.8.7：scene / channel / speaker 原样往下传：归一与兜底都在 say.js 里做，
+      // 这里不再判一遍（两处判据迟早会分叉）。不传时行为与以前一字不差。
+      scene: body.scene,
+      channel: body.channel,
+      speaker: body.speaker,
+      log: (...a) => console.log('[dsh-fish]', ...a),
+    })
     // 一律 200：请求本身是合法的，被拦下是**规则的结果**，不是接口出错。
     // 用 503 会让观测台的 jpost 抛异常，把「这句我没递给她」变成一句技术错误。
     send(res, 200, r)
@@ -1047,7 +1056,37 @@ export function registerObserve(ctx, deps = {}) {
     // 这是唯一一条"你说的话会进到她那里"的路由。POST { text }。
     // 返回她这一轮新写的话（可能一句都没有——允许她不回）。
     // 实现在上面的 handleSay()，与本地通路 /local/say 共用。
+    //
+    // 2026-11-03（0.8.7，一条鱼多间房）：多了三个**可选**字段，一个都不传时行为完全不变。
+    //   channel 外部渠道名（桥自己起名，如 'qq:123456' / 'qq-group:987654'）
+    //   scene   desk（默认）/ private / group
+    //   speaker 群聊里这句话是谁说的
+    // 桥只要 POST 到这两条路之一，**不需要自己建 DSH 会话、也不需要碰 instance.json**——
+    // 「同时养两条鱼」「两个实例抢一个家」这两个问题就是从这里消失的。
     ['/say', handleSay],
+
+    // ---- 桥启动前的探问（2026-11-03）----
+    // 为什么要有：桥以前只能靠"自己起一个 DSH 实例"来接入，于是两个进程抢一个数据目录，
+    // 被 instance.json 判成只读房客。有这条路之后，桥先问一句「家里有没有人在」：
+    // 在就直接走 HTTP 投递，不在再考虑别的。**这里只回答事实，不教桥怎么做。**
+    ['/whoami', async (req, res) => {
+      if (req.method !== 'GET') return send(res, 405, { error: 'method not allowed' })
+      const h = await homeStatus(root)
+      const tenant = deps.tenancy?.tenant ?? { ok: true }
+      send(res, 200, {
+        // 有这四个字段，桥就能判断"是不是同一个家"：root 是身份，sessionId 是房间。
+        ok: true,
+        plugin: 'dsh-fish',
+        version: deps.version ?? '',
+        root,
+        // 家建好没有。没建好也能投递（say 会自己去建），所以这不是"能不能用"的意思。
+        home: Boolean(h.sessionId),
+        // 她住的那条会话。/say 不带 channel 时，话就落在这儿。
+        sessionId: h.sessionId ?? '',
+        // 这个数据目录现在归不归本进程写。false = 别处也开着一份，写进去会混。
+        writable: tenant.ok !== false,
+      })
+    }],
 
     // ---- P3-2：信箱 ----
     ['/inbox', async (req, res) => {
@@ -1116,7 +1155,7 @@ export function registerObserve(ctx, deps = {}) {
       const model = deriveSelfCached(events, { growthDays: config.growthDays })
       const doc = await selfDocStatus(root)
       const h = await homeStatus(root)
-      const budget = Number(config?.memory?.docBudget ?? 1800)
+      const budget = Number(config?.memory?.docBudget ?? 2400)
       // 用「字」而不是「字节」算用量：中文一个字三字节，按字节算会永远显示撑满。
       // 摆几条判断由配置决定（1–8），身份文档和这里的数字必须同源
       const shownCap = shownCount(config?.memory?.beliefsShown ?? BELIEF_SHOWN)
