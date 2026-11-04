@@ -18,6 +18,7 @@
  */
 
 import { WebSocketServer } from 'ws'
+import { createServer } from 'node:http'
 import { execFileSync } from 'node:child_process'
 import { readFileSync, writeFileSync, unlinkSync, existsSync, appendFileSync, mkdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -685,6 +686,49 @@ const pusher = createPusher({
 // ---------------------------------------------------------------- WebSocket 服务
 
 const wss = new WebSocketServer({ host: cfg.wsHost, port: cfg.wsPort, path: cfg.wsPath })
+
+/**
+ * 调试口（2026-11-04）：只为验证「LLBot 能不能发某种消息」。
+ *
+ * 为什么要有：桥是 ws 服务端、LLBot 主动连进来，外面没有别的口子能发 action。
+ * 每试一个新消息类型（语音、视频、文件）都得改代码重启，太慢；而这类问题
+ * 只能靠「真发一条看 QQ 收到什么」才能确定。
+ *
+ * 三条自我约束：
+ *   1. 只监听 127.0.0.1，外部网络够不到
+ *   2. 只能发给 ownerIds 里的第一个人，发不了别人
+ *   3. 只做 send_private_msg，不收消息、不改配置、不碰账本
+ * 不要就设 FISH_BRIDGE_DEBUG=0 关掉。
+ */
+if (process.env.FISH_BRIDGE_DEBUG !== '0') {
+  const dbgPort = Number(process.env.FISH_BRIDGE_DEBUG_PORT || 6198)
+  const dbg = createServer(async (req, res) => {
+    const u = new URL(req.url || '/', 'http://127.0.0.1')
+    if (u.pathname !== '/debug/send') {
+      res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' })
+      return res.end('只有 /debug/send')
+    }
+    const to = Number(u.searchParams.get('to') || (cfg.ownerIds ?? [])[0] || 0)
+    if (!(cfg.ownerIds ?? []).map(Number).includes(to)) {
+      res.writeHead(403, { 'content-type': 'text/plain; charset=utf-8' })
+      return res.end('只发给 ownerIds 里的人')
+    }
+    const type = String(u.searchParams.get('type') || 'text')
+    const file = String(u.searchParams.get('file') || '')
+    const text = String(u.searchParams.get('text') || '')
+    const seg = type === 'text' ? { type: 'text', data: { text } } : { type, data: { file } }
+    try {
+      const r = await sendAction('send_private_msg', { user_id: to, message: [seg] })
+      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' })
+      res.end(JSON.stringify({ ok: true, sent: seg, result: r }))
+    } catch (err) {
+      res.writeHead(500, { 'content-type': 'application/json; charset=utf-8' })
+      res.end(JSON.stringify({ ok: false, error: String(err?.message ?? err) }))
+    }
+  })
+  dbg.on('error', (e) => log('调试口没开起来：', e.message))
+  dbg.listen(dbgPort, '127.0.0.1', () => log(`调试口：http://127.0.0.1:${dbgPort}/debug/send`))
+}
 
 wss.on('listening', () => {
   log(`等 LLOneBot 连进来：ws://${cfg.wsHost}:${cfg.wsPort}${cfg.wsPath}`)
