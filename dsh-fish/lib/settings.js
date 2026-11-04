@@ -87,6 +87,9 @@ export const DEFAULTS = {
     gainPerHour: 0.05,    // 超过 minIdleHours 之后，每多一小时加多少
     maxChance: 0.6,       // 概率上限
     cooldownHours: 4,     // 两次之间至少隔多久
+    // fork.41：每小时最多掷几次。2 = 每 30 分钟一次（原来的写死值）。
+    // 调大只是「多叫醒她几次」，不代表她会说话——说不说由她在那一轮自己定。
+    rollsPerHour: 2,
   },
 
   // 她"不想看"的东西（可追加，用户说以后还会加）

@@ -203,8 +203,13 @@ export function startScheduler(ctx, deps = {}) {
       }
       return false
     }
-    // 每 30 分钟最多掷一次：tick 每分钟跑一次，逐 tick 掷等于必然触发。
-    if (now - lastProbe < 30 * 60_000) return false
+    // fork.41（2026-11-04）：间隔从写死的 30 分钟改成可配。
+    // 用户要的是「尽量多叫醒她，但说不说由她」——提示词里本来就写着
+    // 「不想说，就这一轮什么都别做，不算失败」，所以这里只动频率。
+    // rollsPerHour 是"每小时最多掷几次"，间隔取 60/N 分钟并留 25% 抖动，
+    // 免得每次都卡在整点/半点。
+    const rollsPerHour = Math.max(1, Math.min(12, Number(config?.proactive?.rollsPerHour ?? 2)))
+    if (now - lastProbe < ((60 * 60_000) / rollsPerHour) * 0.75) return false
     lastProbe = now
     if (Math.random() > st.chance) {
       log('proactive roll', `${st.chance.toFixed(2)} 没摇上`)
