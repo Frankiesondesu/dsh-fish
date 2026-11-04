@@ -26,8 +26,19 @@ export function registerHelp(ctx, deps = {}) {
           description: '工具名，比如 her_alarm。不传就列全部。',
         },
       }),
-      render: (_args, out) =>
-        [{ type: 'text', text: out.ok ? out.text : `[没有这个：${out.note}]` }],
+      output: {
+        schema: {
+          type: 'object',
+          properties: {
+            ok: { type: 'boolean' },
+            text: { type: 'string' },
+            note: { type: 'string' },
+          },
+          required: ['ok', 'text'],
+        },
+        render: (_args, out) =>
+          [{ type: 'text', text: out.ok ? out.text : `[没有这个：${out.note}]` }],
+      },
       async execute(args) {
         const name = String(args?.name ?? '').trim()
         if (!name) {

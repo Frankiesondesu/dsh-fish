@@ -112,8 +112,19 @@ export function registerAlarm(ctx, deps = {}) {
           description: '为什么定这个点。一句话，写给你自己看的。',
         },
       }),
-      render: (_args, out) =>
-        [{ type: 'text', text: out.ok ? `[定了 ${out.at}]` : `[没定上：${out.note}]` }],
+      output: {
+        schema: {
+          type: 'object',
+          properties: {
+            ok: { type: 'boolean' },
+            at: { type: 'string' },
+            note: { type: 'string' },
+          },
+          required: ['ok', 'at', 'note'],
+        },
+        render: (_args, out) =>
+          [{ type: 'text', text: out.ok ? `[定了 ${out.at}]` : `[没定上：${out.note}]` }],
+      },
       async execute(args, exec) {
         const who = guardWrite(deps.tenant, exec, 'her_alarm')
         if (!who.ok) return { ok: false, at: '', note: who.note }
