@@ -260,7 +260,10 @@ function render(){
           '<div class="kv"><div class="k">第几天</div><div class="v">'+m.day+'</div></div>'+
           '<div class="kv"><div class="k">阶段</div><div class="v">'+m.stage+' · '+esc(m.stageName||'')+'</div></div>'+
           '<div class="kv"><div class="k">判断</div><div class="v">'+(m.beliefs||[]).length+'</div></div>'+
-          '<div class="kv"><div class="k">拒绝</div><div class="v">'+(m.refusals||[]).length+'</div></div>'+
+          '<div class="kv"><div class="k">拒绝</div><div class="v">'+
+            (m.facts?.refused ?? (m.refusals||[]).length)+
+            ((m.facts?.wont??0)>0 ? '<span class="dim" style="font-size:11px"> 口头'+(m.facts.wont)+'</span>' : '')+
+          '</div></div>'+
           '<div class="kv"><div class="k">改口</div><div class="v">'+(m.corrected||0)+'</div></div>'+
           '<div class="kv"><div class="k">会话轮数</div><div class="v">'+(D.home.turns??0)+'</div></div>'+
         '</div></div>'+
@@ -268,8 +271,11 @@ function render(){
           '<div class="kv"><div class="k">自主</div><div class="v">'+(needs.autonomy??0)+'</div></div>'+
           '<div class="kv"><div class="k">胜任</div><div class="v">'+(needs.competence??0)+'</div></div>'+
           '<div class="kv"><div class="k">关联</div><div class="v">'+(needs.relatedness??0)+'</div></div>'+
-          '<div class="kv"><div class="k">阶段门</div><div class="v" style="font-size:13px">'+esc((m.stageGate&&m.stageGate.pending)||'—')+'</div></div>'+
-        '</div></div>'+
+          '<div class="kv"><div class="k">阶段门</div><div class="v" style="font-size:13px">'+
+            ((m.stageGate&&m.stageGate.pending)
+              ? '待 '+esc(m.stageGate.pending)
+              : '全过 '+((m.stageGate&&m.stageGate.passed||[]).length)+'/3')+
+          '</div></div>'+
         '<div class="card"><div class="k">她对自己的说法（narrative）</div><div style="margin-top:6px">'+
           esc((m.narrative&&m.narrative.text)||'（还没有）')+'</div></div>'+
         '<div class="card"><div class="k">她的判断（'+ (m.beliefs||[]).length +' 条，只增不改）</div>'+
