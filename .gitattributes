@@ -1,0 +1,4 @@
+# Windows 批处理必须是 CRLF：用 LF 时 cmd.exe 会把 `cd /d "%~dp0"` 解析成 `~dp0`，
+# 目录切不过去，然后在 System32 里找 node 脚本——11-04 晚上就是这么炸的。
+*.cmd text eol=crlf
+*.bat text eol=crlf
