@@ -24,6 +24,7 @@ import { registerLetter } from './letter.js'
 import { registerBringBack } from './keep.js'
 import { registerAsk } from './ask.js'
 import { registerAlarm } from './alarm.js'
+import { registerHelp } from './help.js'
 import { registerDream } from './dream.js'
 import { registerProactive } from './proactive.js'
 import { devModeSync } from './devmode.js'
@@ -374,6 +375,8 @@ export function apply(ctx, baseConfig = {}) {
         // fork.43（2026-11-04）：她自己定一个时刻。到点叫醒她一次，说不说由她；
         // 不占 proactive 的配额、不限次数，只能落在作息窗口内（见 lib/alarm.js）。
         () => registerAlarm(ctx, { root, tenant: tenancy }),
+        // fork.44（2026-11-04）：查工具说明。说明书不常驻上下文，按需取（lib/toolguide.js）。
+        () => registerHelp(ctx, { root }),
         // 0.8.1 本机实验（2026-10-30 m02837）：梦 A 案——醒来记一句。
         // **只在 .dev 存在时注册**：公开版里她既没有这个工具，也不该在身份里读到它。
         ...(devModeSync(root) ? [() => registerDream(ctx, { root, tenant: tenancy })] : []),
