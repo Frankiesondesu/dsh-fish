@@ -83,6 +83,39 @@ export const RECALL_OLD_DAYS = 30
  */
 export const RECALL_MIN_CUE = 0.45
 
+/**
+ * 「今天状态」的抖动（fork.37，2026-11-04）。
+ *
+ * fork.36 之后她「想不起来」还是确定的：同一个词、同一天，问一百次答案一样。
+ * 人的回忆不是这样——话到嘴边，今天出得来，明天可能就卡住。
+ *
+ * 但不能每次调用都掷骰子：那会让她以为工具坏了，出了问题也没法复现。
+ * 所以用**北京时间的日序号 + 事件 id** 哈希出 0~1：
+ *   - 同一天、同一条事件 → 永远是同一个数（稳定、可复现、可测）
+ *   - 换一天 → 边缘那一批换一批
+ *
+ * 抖动只乘在**门槛**上，所以：
+ *   确定想得起来的（线索很具体）→ r 怎么变都过
+ *   确定想不起来的（线索是泛词）→ r 怎么变都过不去
+ *   只有卡在门槛附近的那批 → 今天行、明天不行
+ *
+ * 0 = 关掉（退回 fork.36 的确定性行为）。
+ */
+export const RECALL_JITTER = 0.2
+
+/**
+ * 确定性伪随机：FNV-1a 哈希后归一到 [0,1)。
+ * 不用 Math.random —— 同一天问两次必须给出同一个答案。
+ */
+function hash01(s) {
+  let h = 2166136261
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i)
+    h = Math.imul(h, 16777619)
+  }
+  return ((h >>> 0) % 1000003) / 1000003
+}
+
 /** 记忆强度的下限：衰减到底也留这么多，永远不归零（fork.11 定的） */
 const DECAY_FLOOR = 0.35
 
@@ -252,6 +285,13 @@ export function searchEvents(events, query, o = {}) {
   const num = (v, d) => (v === undefined || v === null || !Number.isFinite(Number(v)) ? d : Number(v))
   const oldDays = num(o.oldDays, RECALL_OLD_DAYS)
   const minCue = num(o.minCue, RECALL_MIN_CUE)
+  // fork.37：今天的"状态"。同一天内固定，跨天换一批——见 RECALL_JITTER。
+  const jitterAmt = Math.max(0, num(o.jitter, RECALL_JITTER))
+  const dayKey = Math.floor((now + 8 * 3600e3) / DAY_MS) // 北京时间日序号
+  const jitterOf = (id) => {
+    if (!jitterAmt) return 1
+    return 1 + jitterAmt * (2 * hash01(`${dayKey}:${id}`) - 1)
+  }
 
   // ---- 先过一遍筛，把候选挑出来（后面算稀有度要用整批当分母） ----
   const cand = []
@@ -328,7 +368,7 @@ export function searchEvents(events, query, o = {}) {
     const decay = DECAY_FLOOR + (1 - DECAY_FLOOR) * Math.pow(0.5, ageDays / half)
     // fork.36：越老越需要具体的线索。刚过 oldDays 时要求低（几乎不挡），
     // 压到底时要求最高（= minCue）。这样"淡出"是连续的，不是到点一刀切。
-    const needCue = minCue * (1 - decay) / (1 - DECAY_FLOOR)
+    // fork.37：再乘一个今天的"状态"——只有门槛附近的那批会随日子变。
 
     let rank = score * decay
     if (weigh) {
@@ -338,7 +378,10 @@ export function searchEvents(events, query, o = {}) {
     // fork.36：可及性门槛。线索不够就是**想不起来**，不是"没有这条"——
     // 账本里它还在，只是她这次没把它调出来。人也是这样。
     // 只对「早期」生效：账本才三天，最老的字也就三天，凭什么忘。
-    if (ageDays > oldDays && cue < needCue) continue
+    if (ageDays > oldDays) {
+      const needCue = minCue * (1 - decay) / (1 - DECAY_FLOOR) * jitterOf(ev.id)
+      if (cue < needCue) continue
+    }
     scored.push({ rank, score, ts, ev, text })
   }
 
@@ -444,6 +487,8 @@ export function registerRecall(ctx, deps = {}) {
             // fork.36：可及性门槛的两个旋钮（settings.recall）。不传就是默认值。
             oldDays: deps.reach?.oldDays,
             minCue: deps.reach?.minCue,
+            // fork.37：今天的"状态"浮动幅度
+            jitter: deps.reach?.jitter,
             // 截断放在 searchEvents 里：这样 rows 本身就是短的，
             // 渲染层不必再按栏位切一刀（两处口径会打架）。
             snippet: brief ? RECALL_BRIEF_SNIPPET : RECALL_SNIPPET,

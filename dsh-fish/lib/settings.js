@@ -48,10 +48,13 @@ export const DEFAULTS = {
   //   只对 oldDays 天以前的事生效
   //   调大 minCue：忘得更狠（要更具体的词才想得起来）
   //   调小 oldDays：更早开始忘
+  //   jitter：门槛的"今天状态"浮动幅度（fork.37）。0.2 = 上下浮动 20%，
+  //           同一天内固定、跨天换一批；设 0 就是完全确定（fork.36 的行为）。
   // 设成 minCue=0 就退回 fork.35 的行为（什么都翻得到）。
   recall: {
     oldDays: 30,
     minCue: 0.45,
+    jitter: 0.2,
   },
 
   // 她的工具面（2026-10-24 用户批准）
