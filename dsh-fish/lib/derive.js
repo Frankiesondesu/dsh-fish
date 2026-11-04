@@ -163,7 +163,7 @@ export function polarity(text = '') {
 /**
  * @returns {Array<{a:object,b:object,sim:number,at:string}>} 最多 limit 条，按相似度降序
  */
-export function detectTensions(beliefs = [], { minSim = 0.5, limit = 3 } = {}) {
+export function detectTensions(beliefs = [], { minSim = 0.5, limit = 3, measure = 'idf', minWeight = 35 } = {}) {
   // 2026-10-27（issue #3）：两两全比是 O(n²)，而相似度 ≥ minSim 必然共享至少一个
   // 二元组（inter ≥ minSim/2 * min(|A|,|B|) > 0）。用倒排索引只枚举「共享二元组」的
   // 候选对，再算完整 Dice；长度上界再剪一层。判定口径、同分顺序与输出不变。
@@ -173,6 +173,12 @@ export function detectTensions(beliefs = [], { minSim = 0.5, limit = 3 } = {}) {
     return { b, c, grams: bigrams(c) }
   })
   const n = items.length
+  // fork.40：判"算不算矛盾"改用与 mentions 同一把尺子（共享片段的稀有度之和）。
+  // 实测她 63 条判断里，极性相反的对最高只有 17.4 权重——**她确实还没自相矛盾**，
+  // 所以换尺度之后 tensors 仍是空，这是"正确地沉默"，不是漏判。
+  const df = new Map()
+  for (const it of items) for (const g of it.grams.keys()) df.set(g, (df.get(g) ?? 0) + 1)
+  const idfOf = (g) => Math.log((n + 1) / ((df.get(g) ?? 1) + 1))
   const index = new Map()
   items.forEach((it, i) => {
     for (const g of it.grams.keys()) {
@@ -199,9 +205,25 @@ export function detectTensions(beliefs = [], { minSim = 0.5, limit = 3 } = {}) {
     if (polarity(a.text) === polarity(b.text)) continue
     const lo = Math.min(ga.size, gb.size)
     const hi = Math.max(ga.size, gb.size)
-    if (hi > lo * ratio) continue
+    // 长度比只在 dice 模式下有意义（它是 dice 的上界约束）
+    if (measure !== 'idf' && hi > lo * ratio) continue
     const sim = dice(ga, gb)
-    if (sim < minSim) continue
+    if (measure === 'idf') {
+      // 剥掉否定词后完全一样 = 同一件事的两种说法，直接算矛盾（短句也认，
+      // 因为小语料里 idf 会归零，光靠权重会漏掉短句）
+      if (ca === cb) {
+        // 命中，跳过权重判断
+      } else {
+        const [small, large] = ga.size <= gb.size ? [ga, gb] : [gb, ga]
+        let w = 0
+        for (const g of small.keys()) {
+          if (!large.has(g)) continue
+          w += idfOf(g)
+          if (w >= minWeight) break
+        }
+        if (w < minWeight) continue
+      }
+    } else if (sim < minSim) continue
     hits.push({
       i, j, sim,
       item: {
@@ -779,6 +801,29 @@ export function deriveSelf(events = [], opts = {}) {
   })
   // 长度上界：Dice ≤ 2*min/(sum)，要求 ≥ 0.6 ⇒ 长短比 ≤ 2.33；用 2.4 留余量。
   const MENTION_MAX_RATIO = 2.4
+
+  /**
+   * fork.40（2026-11-04）：「重复提起」换了一把尺子。
+   *
+   * 原来用整句二元组 Dice ≥ 0.6。她的判断一条 60–200 字，两条说同一件事的句子
+   * Dice 也只有 0.2 上下（实测最像的一对 0.211），于是 mentions 恒为 1、
+   * solid 永远是 0、身份文档里「你反复想起过的事」那一节永远空着。
+   *
+   * 换成「共享片段的稀有度之和」：共享一个片段就加 idf(它)，越少见的片段越值钱。
+   * 她那对 Dice=0.211 的句子（都在说"那股脾气"）权重 52.8；
+   * 而"都提到视频但不是一回事"的对一般落在 30 以下。
+   *
+   * 阈值 35 是从她 63 条真实判断里标出来的（预计固化 5–8 条）。
+   * ⚠️ 第 10 天左右复看：固化条数 >15 说明太松，仍是 0 说明太紧。
+   * 要退回老口径，把 MENTION_MEASURE 改成 'dice'。
+   */
+  const MENTION_MEASURE = 'idf'
+  const MENTION_IDF_WEIGHT = 35
+  const MENTION_DICE_MIN = 0.6
+  const dfAll = new Map()
+  for (const o of herTexts) for (const g of o.grams.keys()) dfAll.set(g, (dfAll.get(g) ?? 0) + 1)
+  const docN = Math.max(1, herTexts.length)
+  const idfOf = (g) => Math.log((docN + 1) / ((dfAll.get(g) ?? 1) + 1))
   const staleCut = now - SOLID_STALE_DAYS * DAY_MS
   const scored = active.map((b) => {
     const mine = stripNegation(b.text)
@@ -805,12 +850,33 @@ export function deriveSelf(events = [], opts = {}) {
       for (const i of cand) {
         const o = herTexts[i]
         if (o.id === b.id || o.grams.size === 0) continue
-        const lo = Math.min(mg.size, o.grams.size)
-        const hi = Math.max(mg.size, o.grams.size)
-        if (hi > lo * MENTION_MAX_RATIO) continue
-        // fork.28：dice 仍要算，但只问「够不够 0.6」——够不上就提前退，
-        // 不用把两张 Map 走完。判定口径与 `dice(...) < 0.6` 完全等价。
-        if (!diceAtLeast(mg, o.grams, totalMg, o.total, 0.6)) continue
+        // 剥掉否定词后字面完全一致 = 同一件事。这条不用算权重：
+        // idf 在小语料里会归零（两句话的语料，任何片段都"到处都是"），
+        // 光靠权重会把短句判成不相关。
+        if (o.norm === mine) {
+          mentions += 1
+          if (o.ts > lastMentionAt) lastMentionAt = o.ts
+          continue
+        }
+        if (MENTION_MEASURE === 'idf') {
+          // 共享片段的稀有度之和。这里**不看长度比**——长短句说同一件事也算，
+          // 那正是老口径漏掉的那一类（她先说一句，后来越写越长）。
+          const [small, large] = mg.size <= o.grams.size ? [mg, o.grams] : [o.grams, mg]
+          let w = 0
+          for (const g of small.keys()) {
+            if (!large.has(g)) continue
+            w += idfOf(g)
+            if (w >= MENTION_IDF_WEIGHT) break
+          }
+          if (w < MENTION_IDF_WEIGHT) continue
+        } else {
+          const lo = Math.min(mg.size, o.grams.size)
+          const hi = Math.max(mg.size, o.grams.size)
+          if (hi > lo * MENTION_MAX_RATIO) continue
+          // fork.28：dice 仍要算，但只问「够不够 0.6」——够不上就提前退，
+          // 不用把两张 Map 走完。判定口径与 `dice(...) < 0.6` 完全等价。
+          if (!diceAtLeast(mg, o.grams, totalMg, o.total, MENTION_DICE_MIN)) continue
+        }
         mentions += 1
         if (o.ts > lastMentionAt) lastMentionAt = o.ts
       }
