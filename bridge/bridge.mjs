@@ -54,7 +54,10 @@ const DEFAULTS = {
   // 她主动说的话（her_say）推到 QQ：桥盯账本增量，见 push.mjs
   push: true,
   pushPollMs: 1500,
-  pushMaxAgeMs: 300000, // 5 分钟还没推出去就不补发了
+  // 2026-11-04：5 分钟太短。她 18:00 主动说的那句，桥 18:06 才连上 QQ，
+  // 只差一分钟就被判“放了太久，不补发”——她那边看到“说出去了”，用户那边什么都没有。
+  // 这类“正是断线期间说的话”恰恰最该补，所以放宽到 30 分钟。
+  pushMaxAgeMs: 1800000,
 }
 
 function loadConfig() {
@@ -688,7 +691,7 @@ const pusher = createPusher({
   file: join(cfg.fishRoot, 'events.jsonl'),
   statePath: PUSH_STATE,
   pollMs: Number(cfg.pushPollMs) || 1500,
-  maxAgeMs: Number(cfg.pushMaxAgeMs) || 300000,
+  maxAgeMs: Number(cfg.pushMaxAgeMs) || 1800000,
   deliver: pushDeliver,
   log,
 })
