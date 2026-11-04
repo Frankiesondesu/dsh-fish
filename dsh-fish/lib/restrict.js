@@ -44,7 +44,7 @@
 
 import { resolve } from 'node:path'
 
-/** 插件自己注册的十个工具。顺序无意义，但**必须全部真实存在**（名字错会抛错）。 */
+/** 插件自己注册的工具。顺序无意义，但**必须全部真实存在**（名字错会抛错）。 */
 export const FISH_TOOLS = Object.freeze([
   'growth_commit', // 记下自己的想法（唯一的写入口）
   'her_recall', // 翻自己的旧事
@@ -55,6 +55,7 @@ export const FISH_TOOLS = Object.freeze([
   'bili_zoom', // 把某一格放大重看（fork.35）
   'bili_speak', // 在评论区说话
   'ask_owner', // 有事想征得同意（请求事件，2026-10-30 m01274）
+  'her_alarm', // 自己定一个时刻（fork.43，2026-11-04）
   'her_dream', // 醒来记一句梦（本机实验 A 案，2026-10-30 m02837）
 ])
 

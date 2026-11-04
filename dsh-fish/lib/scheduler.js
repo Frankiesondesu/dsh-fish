@@ -38,6 +38,7 @@ import { setWakeSection, clearWakeSection, liveAgentOf } from './identity.js'
 import { awayNow, awayLine } from './outing.js'
 import { askInChat, picked } from './askinchat.js'
 import { restedToday, settleStaleAsks } from './ask.js'
+import { takeDueAlarm, markAlarmFired } from './alarm.js'
 import { devModeSync } from './devmode.js'
 import { proactiveState, proactiveSection, recentMaterial, looseEnds, hideTrigger, sweepTriggers, flushPendingHides, PROACTIVE_TRIGGER } from './proactive.js'
 import { logLine } from './log.js'
@@ -177,7 +178,7 @@ export function startScheduler(ctx, deps = {}) {
   // 每次启动补扫一遍历史里的遗留触发语（修好之前触发的那几轮还留在对话里）。
   let sweptSession = ''
 
-  async function maybeProactive({ events, config, dk, now }) {
+  async function maybeProactive({ events, config, dk, now, forced = false }) {
     if (!devModeSync(root)) return false
     // 2026-11-02：这一路原来是全静默的，真机上「一条日志都没有」既可能是
     // 没进函数、也可能是卡在下面某个 return，分不清。进门记一次就够了。
@@ -195,7 +196,12 @@ export function startScheduler(ctx, deps = {}) {
         }
       } catch {}
     }
-    const st = proactiveState({ config, events, now })
+    // forced = 她自己定的闹钟（fork.43）：只可能来自 takeDueAlarm，
+    // 时间点已经由工具保证在作息窗口内，所以这里不再走 proactiveState 的闸门
+    // ——配额、冷却、空闲时长都不看，那是"系统给的机会"，不是她自己的约定。
+    const st = forced
+      ? { ok: true, chance: 1, why: '', idleHours: 0, dk }
+      : proactiveState({ config, events, now })
     if (!st.ok) {
       if (st.why && st.why !== proactiveSkip) {
         proactiveSkip = st.why
@@ -208,12 +214,15 @@ export function startScheduler(ctx, deps = {}) {
     // 「不想说，就这一轮什么都别做，不算失败」，所以这里只动频率。
     // rollsPerHour 是"每小时最多掷几次"，间隔取 60/N 分钟并留 25% 抖动，
     // 免得每次都卡在整点/半点。
-    const rollsPerHour = Math.max(1, Math.min(12, Number(config?.proactive?.rollsPerHour ?? 2)))
-    if (now - lastProbe < ((60 * 60_000) / rollsPerHour) * 0.75) return false
-    lastProbe = now
-    if (Math.random() > st.chance) {
-      log('proactive roll', `${st.chance.toFixed(2)} 没摇上`)
-      return false
+    // forced（她自己定的闹钟）不看这个，也不掷骰子——到点就是到点。
+    if (!forced) {
+      const rollsPerHour = Math.max(1, Math.min(12, Number(config?.proactive?.rollsPerHour ?? 2)))
+      if (now - lastProbe < ((60 * 60_000) / rollsPerHour) * 0.75) return false
+      lastProbe = now
+      if (Math.random() > st.chance) {
+        log('proactive roll', `${st.chance.toFixed(2)} 没摇上`)
+        return false
+      }
     }
     const sc = ctx.sessionController
     if (!sc?.prompt) {
@@ -282,7 +291,7 @@ export function startScheduler(ctx, deps = {}) {
         { day: model.day, stage: model.stage, source: 'timer' },
         root,
       ).catch(() => {})
-      log('proactive', `开了一次空手回合（概率 ${st.chance.toFixed(2)}）`)
+      log('proactive', forced ? '按她定的点开了一次空手回合' : `开了一次空手回合（概率 ${st.chance.toFixed(2)}）`)
       return true
     } catch (err) {
       // 没送进去就没有这一轮：处境和窗口当场收掉，监听也摘掉，
@@ -343,6 +352,19 @@ export function startScheduler(ctx, deps = {}) {
       // 请求事件（0.7.6，2026-10-30 m01274）：超过 24 小时没人答的，记成「以后再说」。
       // 放在 tick 里而不是专用定时器：这里本来就在读事件流，省一次闹钟。
       try { await settleStaleAsks(root, { now }) } catch { /* 结算失败不影响叫醒 */ }
+
+      // fork.43（2026-11-04）：她自己定的时刻到点了。
+      // 放在「今天请假」之前——请假是"今天别打扰我"，闹钟是"这个点我想醒"，
+      // 后者是她更具体的意思，以它为准。不占 proactive 的配额（见 lib/alarm.js）。
+      const due = takeDueAlarm(events, now)
+      if (due) {
+        try {
+          await markAlarmFired(root, due, deriveSelfCached(events, { growthDays: config.growthDays }))
+          if (await maybeProactive({ events, config, dk, now, forced: true })) return
+        } catch (err) {
+          log('alarm failed', err?.message ?? String(err))
+        }
+      }
 
       // 她今天主动请了假（kind=rest 被同意 → meta `rest:<dk>`）→ 今天不叫她。
       // 「不许连续两天」落在她那边（ask.js 的配额与她的判断），这里只读结论。
