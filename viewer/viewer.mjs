@@ -287,30 +287,92 @@ const PAGE = String.raw`<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8">
 <title>她 · 查看器</title>
 <style>
-  :root{--bg:#16181d;--panel:#1e2129;--line:#2c313c;--fg:#e6e8ee;--dim:#8b93a7;--acc:#7fb4ff;--warn:#ffbe5c;--ok:#63d297}
+:root{--bg:#0e1014;--panel:#171a21;--line:rgba(255,255,255,.07);--fg:#e9ebf2;--dim:#8b93a7;--dim2:#666e82;--acc:#8aa4ff;--acc2:#a78bfa;--ok:#5fd39a;--warn:#f5bd62;--bad:#f0788a;--radius:14px}
   *{box-sizing:border-box}
-  body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.65 "Microsoft YaHei",system-ui,sans-serif}
-  header{position:sticky;top:0;background:rgba(22,24,29,.94);backdrop-filter:blur(8px);border-bottom:1px solid var(--line);padding:12px 20px;z-index:9}
-  h1{font-size:15px;margin:0 0 8px;font-weight:600;letter-spacing:.5px}
-  .tabs{display:flex;gap:6px;flex-wrap:wrap}
-  .tabs button{background:var(--panel);border:1px solid var(--line);color:var(--dim);padding:5px 12px;border-radius:6px;cursor:pointer;font-size:13px}
-  .tabs button.on{color:var(--fg);border-color:var(--acc);background:#1c2634}
-  main{padding:18px 20px 60px;max-width:1000px}
-  .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px 16px;margin-bottom:12px}
-  .row{display:flex;gap:14px;flex-wrap:wrap}
-  .kv{min-width:130px}
-  .k{color:var(--dim);font-size:12px}
-  .v{font-size:18px;font-weight:600}
-  .item{border-left:2px solid var(--line);padding:2px 0 2px 12px;margin:10px 0}
-  .item .meta{color:var(--dim);font-size:12px;margin-bottom:2px}
-  .item.said{border-color:var(--acc)}
-  .item.mine{border-color:#7a6cff}
-  .item.act{border-color:var(--ok)}
-  code{background:#11131a;padding:1px 5px;border-radius:4px;font-size:12px;color:var(--warn)}
-  pre{background:#11131a;border:1px solid var(--line);border-radius:6px;padding:8px;overflow:auto;font-size:12px;color:#b9c0d4;margin:6px 0 0}
+  html{scroll-behavior:smooth}
+  body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.65 Inter,-apple-system,BlinkMacSystemFont,"Segoe UI Variable Text","Segoe UI","Microsoft YaHei UI",system-ui,sans-serif;-webkit-font-smoothing:antialiased}
+  body:before{content:'';position:fixed;inset:0;pointer-events:none;z-index:0;background:radial-gradient(900px 500px at 12% -8%,rgba(138,164,255,.07),transparent 60%),radial-gradient(700px 400px at 88% 0%,rgba(167,139,250,.05),transparent 60%)}
+  header{position:sticky;top:0;z-index:9;background:rgba(14,16,20,.82);backdrop-filter:blur(18px) saturate(1.4);border-bottom:1px solid var(--line);padding:0 24px}
+  .hd{display:flex;align-items:center;gap:14px;height:60px}
+  .brand{display:flex;align-items:center;gap:10px;font-weight:650;font-size:15px;letter-spacing:.2px;white-space:nowrap}
+  .brand .mark{width:26px;height:26px;border-radius:9px;background:linear-gradient(140deg,var(--acc),var(--acc2));box-shadow:0 3px 14px rgba(138,164,255,.32);display:grid;place-items:center;color:#0e1014;font-size:14px;font-weight:800}
+  .brand small{font-weight:400;color:var(--dim2);font-size:11.5px;margin-left:2px}
+  .hd .spacer{flex:1}
+  .live{display:inline-flex;align-items:center;gap:6px;font-size:11.5px;color:var(--dim);border:1px solid var(--line);background:var(--panel);border-radius:999px;padding:4px 10px;white-space:nowrap}
+  .live i{width:6px;height:6px;border-radius:50%;background:var(--ok);box-shadow:0 0 0 3px rgba(95,211,154,.14)}
+  .tabs{display:flex;gap:2px;overflow-x:auto;scrollbar-width:none}
+  .tabs::-webkit-scrollbar{display:none}
+  .tabs button{position:relative;background:none;border:0;color:var(--dim);padding:14px 14px 15px;font-size:13.5px;cursor:pointer;white-space:nowrap;transition:color .15s;font-weight:500}
+  .tabs button:hover{color:var(--fg)}
+  .tabs button.on{color:var(--fg);font-weight:600}
+  .tabs button.on:after{content:'';position:absolute;left:14px;right:14px;bottom:0;height:2px;background:linear-gradient(90deg,var(--acc),var(--acc2));border-radius:2px 2px 0 0}
+  main{position:relative;z-index:1;max-width:1120px;margin:0 auto;padding:26px 24px 100px}
+  .sec{margin:22px 0 10px;display:flex;align-items:center;gap:8px;font-size:11.5px;color:var(--dim2);font-weight:650;letter-spacing:.1em;text-transform:uppercase}
+  .sec:first-child{margin-top:0}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:18px 20px;box-shadow:0 1px 2px rgba(0,0,0,.2)}
+  .hero{position:relative;overflow:hidden;background:linear-gradient(120deg,#1a1f2d,#171a21 55%,#1b1826);border:1px solid rgba(138,164,255,.16);border-radius:18px;padding:22px 24px}
+  .hero:after{content:'';position:absolute;right:-60px;top:-90px;width:280px;height:280px;border-radius:50%;background:radial-gradient(circle,rgba(138,164,255,.14),transparent 70%)}
+  .hero .top{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;position:relative;z-index:1;flex-wrap:wrap}
+  .hero .day{font-size:34px;font-weight:680;line-height:1.15;letter-spacing:-.02em;font-variant-numeric:tabular-nums}
+  .hero .day span{font-size:13px;font-weight:450;color:var(--dim);margin-left:8px;letter-spacing:0}
+  .hero .sub{color:var(--dim);font-size:12.5px;margin-top:5px}
+  .badge{display:inline-flex;align-items:center;gap:6px;padding:5px 11px;border-radius:999px;background:rgba(138,164,255,.12);border:1px solid rgba(138,164,255,.25);color:#b9c8ff;font-size:12px;font-weight:550;white-space:nowrap}
+  .badge.ok{background:rgba(95,211,154,.1);border-color:rgba(95,211,154,.25);color:#8fe2b8}
+  .badge.warn{background:rgba(245,189,98,.1);border-color:rgba(245,189,98,.25);color:#f3cd91}
+  .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(126px,1fr));gap:10px;margin-top:20px;position:relative;z-index:1}
+  .stat{background:rgba(255,255,255,.028);border:1px solid rgba(255,255,255,.055);border-radius:11px;padding:11px 13px}
+  .stat .k{font-size:11px;color:var(--dim2);letter-spacing:.03em}
+  .stat .v{font-size:22px;font-weight:640;font-variant-numeric:tabular-nums;line-height:1.3;margin-top:2px}
+  .stat .v small{font-size:11px;color:var(--dim);font-weight:400;margin-left:4px}
+  .needs{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:20px}
+  .need .nh{display:flex;justify-content:space-between;align-items:baseline;font-size:12.5px;margin-bottom:8px}
+  .need .nh b{font-weight:600}
+  .need .nh span{color:var(--dim);font-variant-numeric:tabular-nums}
+  .bar{height:6px;border-radius:6px;background:#232833;overflow:hidden}
+  .bar i{display:block;height:100%;border-radius:6px;transition:width .5s}
+  .bar.a i{background:linear-gradient(90deg,#5fd39a,#8aa4ff)}
+  .bar.b i{background:linear-gradient(90deg,#8aa4ff,#a78bfa)}
+  .bar.c i{background:linear-gradient(90deg,#f5bd62,#f0788a)}
+  .quote{position:relative;padding:16px 18px 16px 22px;border-radius:12px;background:linear-gradient(90deg,rgba(138,164,255,.07),transparent);border:1px solid rgba(138,164,255,.12);font-size:14px;line-height:1.85;color:#d7dced;white-space:pre-wrap}
+  .quote:before{content:'';position:absolute;left:0;top:14px;bottom:14px;width:2px;border-radius:2px;background:linear-gradient(var(--acc),var(--acc2))}
+  .quote.empty{color:var(--dim2);font-style:italic}
+  .beliefs{display:flex;flex-direction:column;gap:2px;max-height:540px;overflow:auto}
+  .beliefs::-webkit-scrollbar{width:6px}
+  .beliefs::-webkit-scrollbar-thumb{background:#2c313c;border-radius:6px}
+  .belief{display:flex;gap:12px;padding:10px 8px;border-radius:9px;transition:background .15s;font-size:13.5px;line-height:1.7}
+  .belief:hover{background:rgba(255,255,255,.03)}
+  .belief .idx{color:var(--dim2);font-variant-numeric:tabular-nums;font-size:11.5px;min-width:28px;padding-top:3px;text-align:right;flex:none}
+  .belief .txt{flex:1;color:#cfd5e4}
+  .belief .tag{flex:none;align-self:flex-start;font-size:10px;padding:1px 7px;border-radius:5px;background:rgba(95,211,154,.1);border:1px solid rgba(95,211,154,.2);color:#8fe2b8;margin-top:2px}
+  .timeline{position:relative;padding-left:22px}
+  .timeline:before{content:'';position:absolute;left:6px;top:8px;bottom:8px;width:1px;background:var(--line)}
+  .tl-item{position:relative;margin-bottom:12px}
+  .tl-item:before{content:'';position:absolute;left:-19px;top:16px;width:7px;height:7px;border-radius:50%;background:var(--acc);box-shadow:0 0 0 3px rgba(138,164,255,.13)}
+  .tl-item.mine:before{background:var(--acc2);box-shadow:0 0 0 3px rgba(167,139,250,.13)}
+  .tl-item.ev:before{background:#3d4557;box-shadow:0 0 0 3px rgba(255,255,255,.03)}
+  .bubble{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:12px 15px;font-size:13.5px;line-height:1.78;color:#d5dae8;word-break:break-word}
+  .tl-item.mine .bubble{background:rgba(167,139,250,.055);border-color:rgba(167,139,250,.14)}
+  .tl-meta{display:flex;align-items:center;gap:8px;flex-wrap:wrap;color:var(--dim2);font-size:11.5px;margin-bottom:6px;font-variant-numeric:tabular-nums}
+  .pill{display:inline-block;padding:1px 7px;border-radius:5px;background:rgba(255,255,255,.05);border:1px solid var(--line);color:var(--dim);font-size:10.5px;letter-spacing:.02em}
+  .pill.said{color:#9fb6ff;background:rgba(138,164,255,.1);border-color:rgba(138,164,255,.18)}
+  .pill.mine{color:#c9b3ff;background:rgba(167,139,250,.1);border-color:rgba(167,139,250,.18)}
+  .pill.act{color:#8fe2b8;background:rgba(95,211,154,.09);border-color:rgba(95,211,154,.18)}
+  .act-card{background:var(--panel);border:1px solid var(--line);border-radius:12px;margin-bottom:9px;overflow:hidden}
+  .act-hd{display:flex;align-items:center;gap:10px;padding:11px 15px;cursor:pointer;user-select:none}
+  .act-hd:hover{background:rgba(255,255,255,.02)}
+  .act-hd .nm{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12.5px;color:#a8baff}
+  .act-hd .tm{margin-left:auto;color:var(--dim2);font-size:11.5px;font-variant-numeric:tabular-nums}
+  .act-hd .chev{color:var(--dim2);font-size:10px;transition:transform .2s}
+  .act-card.open .chev{transform:rotate(90deg)}
+  .act-body{display:none;border-top:1px solid var(--line);padding:12px 15px}
+  .act-card.open .act-body{display:block}
+  pre{background:#101319;border:1px solid var(--line);border-radius:9px;padding:11px 13px;overflow:auto;font:12px/1.6 ui-monospace,SFMono-Regular,Menlo,monospace;color:#b9c0d4;margin:0 0 8px;max-height:320px;white-space:pre-wrap;word-break:break-word}
+  pre.res{color:#8fe2b8}
+  .empty-state{text-align:center;padding:56px 20px;color:var(--dim2);border:1px dashed var(--line);border-radius:14px}
+  .empty-state .ic{font-size:26px;opacity:.4;margin-bottom:10px}
   .dim{color:var(--dim)}
-  .err{color:#ff8f8f}
-
+  .err{color:#ff9aa8}
+  @media(max-width:640px){header{padding:0 14px}.hd{height:auto;flex-wrap:wrap;gap:8px;padding:10px 0}main{padding:18px 14px 90px}.hero{padding:18px}.tabs button{padding:12px 11px 13px}}
   /* ---- 设置页（2026-11-04，现代布局）---- */
   .st-wrap{display:grid;grid-template-columns:190px minmax(0,1fr);gap:20px;align-items:start}
   .st-nav{position:sticky;top:78px;display:flex;flex-direction:column;gap:2px}
@@ -357,7 +419,9 @@ const PAGE = String.raw`<!doctype html>
   @media(max-width:720px){.st-wrap{grid-template-columns:1fr}.st-nav{position:static;flex-direction:row;overflow:auto}.st-field{grid-template-columns:1fr}.st-ctl{justify-self:start}}
 </style></head><body>
 <header>
-  <h1>她 · 查看器 <span class="dim" id="sub"></span></h1>
+  <div class="hd"><div class="brand"><span class="mark">她</span> 她 · 查看器</div>
+    <div class="spacer"></div>
+    <div class="live"><i></i><span id="sub">读取中</span></div></div>
   <div class="tabs" id="tabs"></div>
 </header>
 <main id="main"><p class="dim">读数据中…</p></main>
@@ -367,68 +431,116 @@ const TABS = [['profile','人格数据'],['said','她说的话'],['mine','你说
 const esc = s => String(s??'').replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
 const t = ms => { if(!ms) return ''; const d=new Date(ms); return String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0'); };
 
+// ---------------- 通用组件 ----------------
+const sec = txt => '<div class="sec">'+esc(txt)+'</div>';
+const stat = (k,v,unit,note) =>
+  '<div class="stat"><div class="k">'+esc(k)+'</div><div class="v">'+esc(String(v))+
+  (unit?'<small>'+esc(unit)+'</small>':'')+'</div>'+(note?'<div class="k" style="margin-top:2px">'+esc(note)+'</div>':'')+'</div>';
+const need = (name,val,cls) => {
+  const v = Number(val)||0, pct = Math.max(0,Math.min(100,Math.round(v*100)));
+  return '<div class="need"><div class="nh"><b>'+esc(name)+'</b><span>'+v.toFixed(2)+'</span></div>'+
+    '<div class="bar '+cls+'"><i style="width:'+pct+'%"></i></div></div>';
+};
+const emptyBox = txt => '<div class="empty-state"><div class="ic">◌</div>'+esc(txt)+'</div>';
+const nl = s => esc(s).replace(/\n/g,'<br>');
+const badge = (cls,txt) => '<span class="badge '+cls+'">'+esc(txt)+'</span>';
+
 function render(){
   document.getElementById('tabs').innerHTML = TABS.map(([k,n])=>
     '<button data-tab="'+k+'" class="'+(k===tab?'on':'')+'">'+n+'</button>').join('');
   const m = D.model || {};
   const el = document.getElementById('main');
   if(tab==='settings'){ renderSettings(el); return }
+
   if(tab==='profile'){
-    if(m.__error) el.innerHTML = '<p class="err">取模型失败：'+esc(m.__error)+'</p>';
+    if(m.__error){ el.innerHTML = '<div class="card err">取模型失败：'+esc(m.__error)+'</div>'; }
     else {
       const needs = m.needs || {};
+      const beliefs = m.beliefs || [];
+      const solid = new Set((m.solid||[]).map(b=>String(b.id??b.text??'')));
+      const wont = Number(m.facts?.wont||0);
+      const refused = m.facts?.refused ?? (m.refusals||[]).length;
+      const gate = (m.stageGate && m.stageGate.pending)
+        ? badge('warn','阶段门 · 待 '+m.stageGate.pending)
+        : badge('ok','阶段门 · 全过 '+((m.stageGate&&m.stageGate.passed||[]).length)+'/3');
+      const nar = (m.narrative&&m.narrative.text)||'';
       el.innerHTML =
-        '<div class="card"><div class="row">'+
-          '<div class="kv"><div class="k">第几天</div><div class="v">'+m.day+'</div></div>'+
-          '<div class="kv"><div class="k">阶段</div><div class="v">'+m.stage+' · '+esc(m.stageName||'')+'</div></div>'+
-          '<div class="kv"><div class="k">判断</div><div class="v">'+(m.beliefs||[]).length+'</div></div>'+
-          '<div class="kv"><div class="k">拒绝</div><div class="v">'+
-            (m.facts?.refused ?? (m.refusals||[]).length)+
-            ((m.facts?.wont??0)>0 ? '<span class="dim" style="font-size:11px"> 口头'+(m.facts.wont)+'</span>' : '')+
+        '<div class="hero"><div class="top">'+
+          '<div><div class="day">第 '+m.day+' 天<span>成长中</span></div>'+
+          '<div class="sub">阶段 '+m.stage+' · '+esc(m.stageName||'')+' &nbsp;·&nbsp; '+D.events.length+' 条事件 &nbsp;·&nbsp; '+D.actions.length+' 次工具调用 &nbsp;·&nbsp; '+(D.home.turns??0)+' 轮会话</div></div>'+
+          gate+'</div>'+
+          '<div class="stats">'+
+            stat('判断', beliefs.length, '条')+
+            stat('拒绝', refused, '次', wont?('口头 '+wont+' 次'):'')+
+            stat('改口', m.corrected||0, '次')+
+            stat('固化', (m.solid||[]).length, '条', '反复想起的')+
+            stat('张力', (m.tensions||[]).length, '条')+
+            stat('会话轮数', D.home.turns??0, '轮')+
           '</div></div>'+
-          '<div class="kv"><div class="k">改口</div><div class="v">'+(m.corrected||0)+'</div></div>'+
-          '<div class="kv"><div class="k">会话轮数</div><div class="v">'+(D.home.turns??0)+'</div></div>'+
-        '</div></div>'+
-        '<div class="card"><div class="k">三种需要（还没长出来的就是 0）</div><div class="row" style="margin-top:6px">'+
-          '<div class="kv"><div class="k">自主</div><div class="v">'+(needs.autonomy??0)+'</div></div>'+
-          '<div class="kv"><div class="k">胜任</div><div class="v">'+(needs.competence??0)+'</div></div>'+
-          '<div class="kv"><div class="k">关联</div><div class="v">'+(needs.relatedness??0)+'</div></div>'+
-          '<div class="kv"><div class="k">阶段门</div><div class="v" style="font-size:13px">'+
-            ((m.stageGate&&m.stageGate.pending)
-              ? '待 '+esc(m.stageGate.pending)
-              : '全过 '+((m.stageGate&&m.stageGate.passed||[]).length)+'/3')+
-          '</div></div>'+
-        '<div class="card"><div class="k">她对自己的说法（narrative）</div><div style="margin-top:6px">'+
-          esc((m.narrative&&m.narrative.text)||'（还没有）')+'</div></div>'+
-        '<div class="card"><div class="k">她的判断（'+ (m.beliefs||[]).length +' 条，只增不改）</div>'+
-          (m.beliefs||[]).map((b,i)=>'<div class="item said"><div class="meta">#'+(i+1)+'</div>'+esc(b.text||'')+'</div>').join('')+
-        '</div>';
+        sec('三种需要')+
+        '<div class="card needs">'+need('自主',needs.autonomy,'a')+need('胜任',needs.competence,'b')+need('关联',needs.relatedness,'c')+'</div>'+
+        sec('她对自己的说法')+
+        '<div class="quote'+(nar?'':' empty')+'">'+esc(nar||'还没有')+'</div>'+
+        sec('她的判断 · '+beliefs.length+' 条 · 只增不改')+
+        (beliefs.length
+          ? '<div class="card"><div class="beliefs">'+beliefs.map((b,i)=>
+              '<div class="belief"><span class="idx">'+String(i+1).padStart(2,'0')+'</span>'+
+              '<span class="txt">'+esc(b.text||'')+'</span>'+
+              (solid.has(String(b.id??b.text??''))?'<span class="tag">常想起</span>':'')+'</div>').join('')+'</div></div>'
+          : emptyBox('还没有判断'));
     }
   }
-  if(tab==='said'){
-    el.innerHTML = (D.spoken.slice().reverse()).map(s=>
-      '<div class="item said"><div class="meta">turn '+s.turn+' · '+t(s.at)+'</div>'+esc(s.text).replace(/\n/g,'<br>')+'</div>').join('') || '<p class="dim">这条会话里她还没说过话</p>';
-  }
-  if(tab==='mine'){
-    el.innerHTML = (D.userSaid.slice().reverse()).map(s=>
-      '<div class="item mine"><div class="meta">'+t(s.at)+'</div>'+esc(s.text).replace(/\n/g,'<br>')+'</div>').join('') || '<p class="dim">还没有</p>';
-  }
-  if(tab==='acts'){
-    el.innerHTML = '<p class="dim" style="margin-top:0">这是她在当前会话里**实际调用过的工具**（参数与结果都来自会话日志）。</p>'+
-      (D.actions.slice().reverse()).map(a=>
-      '<div class="item act"><div class="meta">'+t(a.at)+' · turn '+a.turn+'.'+a.step+' · <code>'+esc(a.name)+'</code></div>'+
-      '<pre>'+esc(a.args).slice(0,800)+'</pre>'+
-      (a.result?'<pre style="color:#8fbf9f">'+esc(a.result).slice(0,600)+'</pre>':'')+'</div>').join('');
-  }
-  if(tab==='events'){
-    el.innerHTML = (D.events.slice().reverse()).map(e=>
-      '<div class="item"><div class="meta">'+esc(e.ts||'')+' · '+esc(e.type)+' · day '+e.day+' · '+esc(e.source)+'</div>'+
-      esc(String(e.text||'').slice(0,400)).replace(/\n/g,'<br>')+'</div>').join('');
-  }
-  document.getElementById('sub').textContent = '第'+m.day+'天 · '+D.actions.length+' 次工具调用 · '+D.events.length+' 条事件'
-    + (pulledAt ? ' · 更新于 '+new Date(pulledAt).toLocaleTimeString('zh-CN',{hour12:false}) : '')
-}
 
+  if(tab==='said'){
+    const a = (D.spoken||[]).slice().reverse();
+    el.innerHTML = sec('她说的话 · '+a.length+' 条') + (a.length
+      ? '<div class="timeline">'+a.map(s=>
+          '<div class="tl-item"><div class="tl-meta"><span class="pill said">她</span>'+
+          'turn '+esc(s.turn)+' · '+esc(t(s.at))+'</div>'+
+          '<div class="bubble">'+nl(s.text||'')+'</div></div>').join('')+'</div>'
+      : emptyBox('这条会话里她还没说过话'));
+  }
+
+  if(tab==='mine'){
+    const a = (D.userSaid||[]).slice().reverse();
+    el.innerHTML = sec('你说的话 · '+a.length+' 条') + (a.length
+      ? '<div class="timeline">'+a.map(s=>
+          '<div class="tl-item mine"><div class="tl-meta"><span class="pill mine">你</span>'+esc(t(s.at))+'</div>'+
+          '<div class="bubble">'+nl(s.text||'')+'</div></div>').join('')+'</div>'
+      : emptyBox('还没有'));
+  }
+
+  if(tab==='acts'){
+    const a = (D.actions||[]).slice().reverse();
+    el.innerHTML = sec('她做过的事 · '+a.length+' 次工具调用') +
+      '<div class="dim" style="font-size:12px;margin:0 0 12px">参数与结果都来自会话日志，点开一条看细节。</div>'+
+      (a.length ? a.map(x=>
+        '<div class="act-card" data-act><div class="act-hd"><span class="pill act">TOOL</span>'+
+        '<span class="nm">'+esc(x.name)+'</span>'+
+        '<span class="tm">turn '+esc(x.turn)+'.'+esc(x.step)+' · '+esc(t(x.at))+'</span>'+
+        '<span class="chev">▶</span></div>'+
+        '<div class="act-body"><pre>'+esc(x.args||'').slice(0,1600)+'</pre>'+
+        (x.result?'<pre class="res">'+esc(x.result).slice(0,1200)+'</pre>':'')+'</div></div>').join('')
+      : emptyBox('这个会话里她还没调用过工具'));
+    el.onclick = (ev)=>{ const c = ev.target.closest('[data-act]'); if(c) c.classList.toggle('open'); };
+  } else {
+    el.onclick = null;
+  }
+
+  if(tab==='events'){
+    const a = (D.events||[]).slice().reverse();
+    el.innerHTML = sec('事件流 · '+a.length+' 条 · 只增不改') + (a.length
+      ? '<div class="timeline">'+a.map(e=>
+          '<div class="tl-item ev"><div class="tl-meta"><span class="pill">'+esc(e.type)+'</span>'+
+          esc(e.ts||'')+' · day '+esc(e.day)+' · '+esc(e.source)+'</div>'+
+          '<div class="bubble">'+nl(String(e.text||'').slice(0,400))+'</div></div>').join('')+'</div>'
+      : emptyBox('账本还是空的'));
+  }
+
+  document.getElementById('sub').textContent = pulledAt
+    ? '更新于 '+new Date(pulledAt).toLocaleTimeString('zh-CN',{hour12:false})
+    : '读取中';
+}
 
 // ---------------- 设置页（2026-11-04，现代布局）----------------
 // 这段跑在模板字符串里，不能写美元花括号插值，全部用字符串拼接。
