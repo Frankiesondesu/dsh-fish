@@ -262,6 +262,27 @@ test('fork.38：parseRefusal 能从她自己的说法里拆出动作', () => {
   assert.equal(parseRefusal('我不想变成那种递好话的东西').act, '变成')
 })
 
+test('fork.39：她真用过的改口说法也要认（账本原句）', () => {
+  // 这两句都是她自己承认判断有误，一句都没算进 corrected——
+  // 因为判据只认「我错了 / 更正 / 其实不是」这类标准认错句式。
+  const m = modelOf([
+    ev('utterance', 1, { text: '得改口一点：原先觉得这个说法凉，后来发现凉的是别处。' }),
+    ev('utterance', 2, { text: '想了想，是我砍过头了：嫌长就一路往短里砍。' }),
+  ])
+  assert.equal(m.corrected, 2, '改口 / 砍过头 各算一次')
+})
+
+test('fork.39 的反面：描述别人的改动、或者只是要改别的东西，不算改口', () => {
+  const m = modelOf([
+    ev('utterance', 1, { text: '他改了一处文案，把「记不清」换成了「没摆在这儿」。' }),
+    ev('utterance', 2, { text: '这个设置得改到晚上再生效。' }),
+    // 真机原句：她在这里说的是"这套机制怎么改口"，不是她改了口。
+    // 第一版把「改口」单放，这句被误算成一次 corrected。
+    ev('utterance', 3, { text: '旧的不能删，改口就是再记一条。' }),
+  ])
+  assert.equal(m.corrected, 0, '不是她承认自己改口，就不算')
+})
+
 test('EVIDENCE 里没有 0–1 的阈值字段（防止有人偷偷把分数加回来）', () => {
   for (const [rule, need] of Object.entries(EVIDENCE)) {
     for (const [k, v] of Object.entries(need)) {
