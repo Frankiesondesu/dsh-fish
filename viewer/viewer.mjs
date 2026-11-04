@@ -155,6 +155,82 @@ function userSaidOf(recs) {
 
 // ---------------------------------------------------------------- 组装
 
+/**
+ * 设置页的字段清单（2026-11-04，用户要求「能改的都放进查看器」）。
+ *
+ * 只描述「怎么显示、怎么校验」，不复制默认值——默认值从插件的 DEFAULTS 现读，
+ * 免得两边各写一份、哪天对不上。
+ *
+ * kind：
+ *   num    数字（min/max/step）
+ *   bool   开关
+ *   window 两个 HH:MM
+ *   list   逗号分隔的字符串数组
+ * danger=true 的项，改了会明显改变她的世界，前端会多问一句。
+ */
+const SETTINGS = [
+  { group: '成长节奏', key: 'growthDays', label: '成长天数', kind: 'num', min: 7, max: 180, step: 1, hint: '走完四个阶段用多少天' },
+  { group: '成长节奏', key: 'wakesPerDay', label: '每天醒来几次', kind: 'num', min: 0, max: 4, step: 1, hint: '0 = 只在你找她的时候才在' },
+  { group: '成长节奏', key: 'window', label: '她醒着的时间', kind: 'window', hint: '之外不叫她、不主动说话' },
+
+  { group: '每日配额', key: 'daily.events', label: '每天推几条成长事件', kind: 'num', min: 0, max: 10, step: 1 },
+  { group: '每日配额', key: 'daily.questions', label: '其中她向你提问几条', kind: 'num', min: 0, max: 5, step: 1, hint: '防退化成问答机器' },
+
+  { group: '她主动说话', key: 'proactive.enabled', label: '开着', kind: 'bool', hint: '关掉她就只在被叫醒时才能开口' },
+  { group: '她主动说话', key: 'proactive.maxPerDay', label: '一天最多开几次空手回合', kind: 'num', min: 0, max: 20, step: 1 },
+  { group: '她主动说话', key: 'proactive.minIdleHours', label: '多久没人说话才够格', kind: 'num', min: 0, max: 48, step: 0.5, hint: '小时' },
+  { group: '她主动说话', key: 'proactive.baseChance', label: '每次掷骰的基础概率', kind: 'num', min: 0, max: 1, step: 0.01 },
+  { group: '她主动说话', key: 'proactive.gainPerHour', label: '每多等一小时加多少', kind: 'num', min: 0, max: 0.5, step: 0.01 },
+  { group: '她主动说话', key: 'proactive.maxChance', label: '概率上限', kind: 'num', min: 0, max: 1, step: 0.01 },
+  { group: '她主动说话', key: 'proactive.cooldownHours', label: '两次之间至少隔多久', kind: 'num', min: 0, max: 48, step: 0.5, hint: '小时' },
+  { group: '她主动说话', key: 'proactive.rollsPerHour', label: '每小时最多掷几次', kind: 'num', min: 1, max: 12, step: 1, hint: '只决定多叫她几次，说不说仍由她' },
+
+  { group: '日记', key: 'diary.enabled', label: '她每天写日记', kind: 'bool' },
+  { group: '日记', key: 'diary.visible', label: '日记给你看', kind: 'bool', hint: '默认关——这是她的本子' },
+  { group: '日记', key: 'diary.keepDays', label: '保留多少天', kind: 'num', min: 0, max: 365, step: 1, hint: '0 = 永久' },
+
+  { group: '回忆与遗忘', key: 'recall.oldDays', label: '多久以前的事开始忘', kind: 'num', min: 0, max: 365, step: 1, hint: '天；0 = 不设门槛' },
+  { group: '回忆与遗忘', key: 'recall.minCue', label: '要多具体的线索才想得起来', kind: 'num', min: 0, max: 1, step: 0.05, hint: '0 = 什么都翻得到，调大忘得更狠' },
+  { group: '回忆与遗忘', key: 'recall.jitter', label: '门槛的「今天状态」浮动', kind: 'num', min: 0, max: 1, step: 0.05, hint: '0 = 完全确定；0.2 = 上下浮 20%' },
+
+  { group: '冷落', key: 'absenceAfterDays', label: '你多久不出现算冷落', kind: 'num', min: 1, max: 30, step: 1, hint: '天' },
+
+  { group: '刷站', key: 'browse.enabled', label: '她能上网', kind: 'bool' },
+  { group: '刷站', key: 'browse.perDay', label: '每天刷几次', kind: 'num', min: 0, max: 10, step: 1 },
+  { group: '刷站', key: 'browse.topN', label: '一次看几条', kind: 'num', min: 1, max: 10, step: 1 },
+  { group: '刷站', key: 'browse.window', label: '什么时候能上网', kind: 'window', hint: '醒着不一定要上网，上网只在醒着时发生' },
+  { group: '刷站', key: 'browse.voices', label: '让她读评论区', kind: 'bool', hint: '关掉也能上网，只是她再也读不到别人的说法' },
+
+  { group: '避雷', key: 'avoid.keywords', label: '不想看的关键词', kind: 'list', hint: '逗号分隔' },
+  { group: '避雷', key: 'avoid.minDuration', label: '太短的不看（秒）', kind: 'num', min: 0, max: 3600, step: 10 },
+
+  { group: '请求节奏', key: 'bili.minIntervalMs', label: '两次 B 站请求至少间隔', kind: 'num', min: 0, max: 10000, step: 100, hint: '毫秒；机房 IP 要放慢' },
+  { group: '请求节奏', key: 'bili.jitterMs', label: '在间隔上再随机多等', kind: 'num', min: 0, max: 5000, step: 100, hint: '毫秒' },
+
+  { group: '高级', key: 'tools.restrict', label: '工具面收窄', kind: 'bool', danger: true, hint: '关掉她会看到全部 37 个工具，会开始做很多她本来不做的事' },
+]
+
+/** 按 "a.b" 取/设嵌套值 */
+function getPath(obj, path) {
+  return path.split('.').reduce((o, k) => (o == null ? undefined : o[k]), obj)
+}
+function setPath(obj, path, val) {
+  const keys = path.split('.')
+  const last = keys.pop()
+  const t = keys.reduce((o, k) => (o[k] ?? (o[k] = {})), obj)
+  t[last] = val
+}
+
+/** 从插件读默认值；读不到就用空对象（页面会显示「读不到默认值」）。 */
+async function readDefaults() {
+  try {
+    const m = await import('file:///' + join(FISH, 'lib', 'settings.js').replace(/\\/g, '/'))
+    return m?.DEFAULTS ?? {}
+  } catch {
+    return {}
+  }
+}
+
 async function buildData() {
   const events = readEvents()
   const home = readJson(join(ROOT, 'home.json'), {})
@@ -242,7 +318,7 @@ const PAGE = String.raw`<!doctype html>
 <main id="main"><p class="dim">读数据中…</p></main>
 <script>
 let D = null, tab = 'profile';
-const TABS = [['profile','人格数据'],['said','她说的话'],['mine','你说的话'],['acts','她做过的事'],['events','事件流']];
+const TABS = [['profile','人格数据'],['said','她说的话'],['mine','你说的话'],['acts','她做过的事'],['events','事件流'],['settings','设置']];
 const esc = s => String(s??'').replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
 const t = ms => { if(!ms) return ''; const d=new Date(ms); return String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0'); };
 
@@ -251,6 +327,7 @@ function render(){
     '<button data-tab="'+k+'" class="'+(k===tab?'on':'')+'">'+n+'</button>').join('');
   const m = D.model || {};
   const el = document.getElementById('main');
+  if(tab==='settings'){ renderSettings(el); return }
   if(tab==='profile'){
     if(m.__error) el.innerHTML = '<p class="err">取模型失败：'+esc(m.__error)+'</p>';
     else {
@@ -307,6 +384,107 @@ function render(){
     + (pulledAt ? ' · 更新于 '+new Date(pulledAt).toLocaleTimeString('zh-CN',{hour12:false}) : '')
 }
 
+
+// ---------------- 设置页（2026-11-04）----------------
+// 说明：这段跑在模板字符串里，所以不能写美元花括号插值，
+// 全部用字符串拼接。schema 从后端 /api/config 拿，这里只管渲染和提交。
+let SCHEMA=null, CFG=null, DEFS=null;
+const fid = k => 'f_'+k.replace(/[^a-zA-Z0-9]/g,'_');
+const getIn = (o,p) => p.split('.').reduce((a,k)=>(a==null?undefined:a[k]),o);
+const setIn = (o,p,v) => { const ks=p.split('.'); const last=ks.pop(); let t=o; for(const k of ks){ if(!t[k]) t[k]={}; t=t[k] } t[last]=v };
+
+function fieldHTML(s){
+  const cur = getIn(CFG, s.key);
+  const dflt = getIn(DEFS, s.key);
+  const id = fid(s.key);
+  const label = '<div class="k">'+esc(s.label)+(s.danger?' <span style="color:#e07979">· 危险</span>':'')+'</div>';
+  const hint = s.hint ? '<div class="dim" style="font-size:11px;margin-top:2px">'+esc(s.hint)+'</div>' : '';
+  let inp = '';
+  if(s.kind==='bool'){
+    inp = '<label style="display:flex;gap:6px;align-items:center"><input type="checkbox" id="'+id+'"'+(cur?' checked':'')+'> <span>'+(cur?'开着':'关着')+'</span></label>';
+  } else if(s.kind==='window'){
+    const a=(cur&&cur[0])||'', b=(cur&&cur[1])||'';
+    inp = '<div style="display:flex;gap:6px;align-items:center">'+
+          '<input type="time" id="'+id+'_0" value="'+a+'" style="width:110px">'+
+          '<span class="dim">到</span>'+
+          '<input type="time" id="'+id+'_1" value="'+b+'" style="width:110px"></div>';
+  } else if(s.kind==='list'){
+    inp = '<input id="'+id+'" value="'+esc((cur||[]).join('，'))+'" style="width:100%">';
+  } else {
+    inp = '<input type="number" id="'+id+'" value="'+(cur==null?'':cur)+'"'+
+          (s.min!=null?' min="'+s.min+'"':'')+(s.max!=null?' max="'+s.max+'"':'')+
+          (s.step!=null?' step="'+s.step+'"':'')+' style="width:110px">';
+  }
+  const d = (dflt!=null && String(dflt)!==String(cur)) ? ' <span class="dim" style="font-size:11px">默认 '+esc(JSON.stringify(dflt))+'</span>' : '';
+  return '<div style="padding:8px 0;border-bottom:1px solid var(--line)">'+label+inp+d+hint+'</div>';
+}
+
+async function renderSettings(el){
+  el.innerHTML = '<p class="dim">读配置中…</p>';
+  try{
+    if(!SCHEMA){
+      const r = await fetch('/api/config', {cache:'no-store'});
+      const d = await r.json();
+      SCHEMA = d.schema || []; CFG = d.config || {}; DEFS = d.defaults || {};
+    }
+  }catch(e){
+    el.innerHTML = '<p class="err">读不到配置：'+esc(e.message)+'</p>'; return;
+  }
+  const groups = [];
+  for(const s of SCHEMA) if(!groups.includes(s.group)) groups.push(s.group);
+  const openFirst = ['成长节奏','她主动说话'];
+  el.innerHTML = groups.map(g=>{
+    const rows = SCHEMA.filter(s=>s.group===g).map(fieldHTML).join('');
+    return '<details class="card"'+(openFirst.includes(g)?' open':'')+'><summary style="cursor:pointer;font-weight:600">'+esc(g)+
+           ' <span class="dim" style="font-weight:400;font-size:12px">'+SCHEMA.filter(s=>s.group===g).length+' 项</span></summary>'+
+           '<div style="margin-top:6px">'+rows+'</div></details>';
+  }).join('') +
+  '<div style="margin:14px 0;display:flex;gap:10px;align-items:center">'+
+    '<button id="cfgsave" style="padding:7px 18px">保存</button>'+
+    '<span id="cfgtip" class="dim"></span></div>'+
+  '<p class="dim" style="font-size:12px">改完立刻写进 config.json。多数项下一分钟就生效；'+
+  '「她醒着的时间」「成长天数」这类要等她下一次醒来才对得上。</p>';
+  document.getElementById('cfgsave').onclick = saveConfig;
+}
+
+async function saveConfig(){
+  const tip = document.getElementById('cfgtip');
+  const patch = {};
+  const dangers = [];
+  for(const s of SCHEMA){
+    const id = fid(s.key);
+    let v;
+    if(s.kind==='bool'){
+      const cb = document.getElementById(id); if(!cb) continue; v = cb.checked;
+    } else if(s.kind==='window'){
+      const a = document.getElementById(id+'_0'), b = document.getElementById(id+'_1');
+      if(!a||!b) continue; v = [a.value, b.value]; if(!v[0]||!v[1]) continue;
+    } else if(s.kind==='list'){
+      const inp = document.getElementById(id); if(!inp) continue;
+      v = inp.value.split(/[，,]/).map(x=>x.trim()).filter(Boolean);
+    } else {
+      const inp = document.getElementById(id); if(!inp) continue;
+      v = Number(inp.value); if(!Number.isFinite(v)) continue;
+    }
+    if(s.danger && v !== getIn(DEFS, s.key)) dangers.push(s.label);
+    setIn(patch, s.key, v);
+  }
+  if(dangers.length){
+    if(!confirm('这几项改了会明显改变她：'+dangers.join('、')+'\n确定吗？')) return;
+  }
+  tip.textContent = '保存中…';
+  try{
+    const r = await fetch('/api/config', {method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify(patch)});
+    const d = await r.json();
+    if(!d.ok) throw new Error(d.error||'写不进去');
+    CFG = d.config;
+    tip.textContent = '已保存 · '+new Date().toLocaleTimeString('zh-CN',{hour12:false});
+  }catch(e){
+    tip.textContent = '没存上：'+e.message;
+    tip.className = 'err';
+  }
+}
+
 document.getElementById('tabs').addEventListener('click', ev => {
   const b = ev.target.closest('button'); if(!b) return;
   tab = b.dataset.tab; render();
@@ -350,6 +528,35 @@ createServer(async (req, res) => {
       const data = await buildData()
       res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
       return res.end(JSON.stringify(data))
+    }
+    if (req.url === '/api/config' && req.method === 'GET') {
+      const config = readJson(join(ROOT, 'config.json'), {})
+      const defaults = await readDefaults()
+      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
+      return res.end(JSON.stringify({ config, defaults, schema: SETTINGS }))
+    }
+    // 写配置：走插件自己的 updateConfig（合并 + 归一化 + 写盘 + 清缓存），
+    // 不自己拼 JSON——那边已经有一整套上下限夹紧，重复实现只会两边不一致。
+    if (req.url === '/api/config' && req.method === 'POST') {
+      let body = ''
+      for await (const chunk of req) {
+        body += chunk
+        if (body.length > 200_000) { res.writeHead(413); return res.end('too large') }
+      }
+      let patch
+      try { patch = JSON.parse(body || '{}') } catch {
+        res.writeHead(400, { 'content-type': 'text/plain; charset=utf-8' })
+        return res.end('不是合法的 JSON')
+      }
+      try {
+        const m = await import('file:///' + join(FISH, 'lib', 'settings.js').replace(/\\/g, '/'))
+        const next = await m.updateConfig(patch, ROOT)
+        res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
+        return res.end(JSON.stringify({ ok: true, config: next }))
+      } catch (err) {
+        res.writeHead(500, { 'content-type': 'application/json; charset=utf-8' })
+        return res.end(JSON.stringify({ ok: false, error: String(err?.message ?? err) }))
+      }
     }
     res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' })
     res.end(PAGE)
