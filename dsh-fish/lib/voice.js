@@ -15,6 +15,9 @@
  * 为什么写 meta 不写 utterance：utterance 会进 beliefs，而"我说出声"和
  * "我判断了什么"是两件事。声音不该改变她有多少条判断。
  *
+ * ⚠️ 返回文案不能写「说出去了」——her_say 用的就是那句，她分不清是哪个工具回的。
+ *   实测 19:47 她就以为是语音，其实是 her_say 的文字。
+ *
  * 音色（2026-11-04 她听完十条选的）：zh-CN-YunxiNeural，rate -14%、pitch -8Hz。
  * 这是十个候选里最不"播音"的一个——她要的就是那个。改音色只动 VOICE 那三行。
  */
@@ -84,7 +87,7 @@ export function registerVoice(ctx, deps = {}) {
           required: ['ok', 'note'],
         },
         render: (_args, out) =>
-          [{ type: 'text', text: out.ok ? '[说出去了]' : `[没说成：${out.note}]` }],
+          [{ type: 'text', text: out.ok ? '[说成声音了]' : `[没说成：${out.note}]` }],
       },
       async execute(args, exec) {
         const who = guardWrite(deps.tenant, exec, 'her_voice')
