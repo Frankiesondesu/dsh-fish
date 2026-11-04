@@ -310,6 +310,51 @@ const PAGE = String.raw`<!doctype html>
   pre{background:#11131a;border:1px solid var(--line);border-radius:6px;padding:8px;overflow:auto;font-size:12px;color:#b9c0d4;margin:6px 0 0}
   .dim{color:var(--dim)}
   .err{color:#ff8f8f}
+
+  /* ---- 设置页（2026-11-04，现代布局）---- */
+  .st-wrap{display:grid;grid-template-columns:190px minmax(0,1fr);gap:20px;align-items:start}
+  .st-nav{position:sticky;top:78px;display:flex;flex-direction:column;gap:2px}
+  .st-nav a{display:flex;justify-content:space-between;align-items:center;padding:8px 10px;border-radius:8px;color:var(--dim);text-decoration:none;font-size:13px;border:1px solid transparent;cursor:pointer}
+  .st-nav a:hover{background:var(--panel);color:var(--fg)}
+  .st-nav a.on{background:#1c2634;color:var(--fg);border-color:rgba(127,180,255,.35)}
+  .st-nav a .n{font-size:11px;opacity:.65}
+  .st-head{margin:2px 0 16px}
+  .st-head h2{font-size:18px;margin:0 0 4px;font-weight:600}
+  .st-head p{margin:0;color:var(--dim);font-size:13px}
+  .st-group{background:var(--panel);border:1px solid var(--line);border-radius:12px;margin-bottom:14px;overflow:hidden}
+  .st-group>h3{font-size:13px;margin:0;padding:12px 16px;border-bottom:1px solid var(--line);font-weight:600;letter-spacing:.3px}
+  .st-group>h3 small{font-weight:400;color:var(--dim);margin-left:8px}
+  .st-field{display:grid;grid-template-columns:minmax(0,1fr) 232px;gap:16px;padding:12px 16px;border-bottom:1px solid rgba(44,49,60,.55);align-items:center}
+  .st-field:last-child{border-bottom:0}
+  .st-field:hover{background:rgba(255,255,255,.015)}
+  .st-field.danger{border-left:2px solid #e07979}
+  .st-field.danger .st-label{color:#ffb4b4}
+  .st-label{font-size:13px;display:flex;align-items:center;gap:7px}
+  .st-hint{color:var(--dim);font-size:11.5px;margin-top:3px;line-height:1.5}
+  .st-def{color:var(--dim);font-size:11px;margin-left:6px}
+  .st-ctl{justify-self:end;display:flex;align-items:center;gap:8px}
+  .st-dot{width:6px;height:6px;border-radius:50%;background:var(--warn);flex:none;visibility:hidden}
+  .st-field.dirty .st-dot{visibility:visible}
+  .st-in{background:#151820;border:1px solid var(--line);color:var(--fg);border-radius:7px;padding:6px 9px;font:13px system-ui;outline:none;width:100%}
+  .st-in:focus{border-color:var(--acc);box-shadow:0 0 0 3px rgba(127,180,255,.12)}
+  input.st-num{width:104px;text-align:right}
+  .st-unit{color:var(--dim);font-size:12px;white-space:nowrap}
+  .st-win{display:flex;align-items:center;gap:7px}
+  .st-win input{width:98px}
+  .st-sw{position:relative;width:38px;height:22px;flex:none}
+  .st-sw input{opacity:0;width:0;height:0}
+  .st-sw i{position:absolute;inset:0;background:#333a48;border-radius:22px;transition:.18s;cursor:pointer}
+  .st-sw i:before{content:'';position:absolute;width:16px;height:16px;left:3px;top:3px;background:#c9cedb;border-radius:50%;transition:.18s}
+  .st-sw input:checked + i{background:var(--acc)}
+  .st-sw input:checked + i:before{transform:translateX(16px);background:#fff}
+  .st-bar{position:sticky;bottom:0;margin-top:18px;background:rgba(22,24,29,.95);backdrop-filter:blur(10px);border:1px solid var(--line);border-radius:12px;padding:10px 14px;display:flex;align-items:center;gap:12px;z-index:5}
+  .st-bar .st-msg{flex:1;color:var(--dim);font-size:12.5px}
+  .st-btn{background:var(--acc);color:#10151f;border:0;border-radius:8px;padding:8px 20px;font-weight:600;cursor:pointer;font-size:13px}
+  .st-btn:disabled{opacity:.4;cursor:default}
+  .st-btn.ghost{background:transparent;color:var(--dim);border:1px solid var(--line);font-weight:400}
+  .st-btn.ghost:hover{color:var(--fg)}
+  .st-toast{position:fixed;right:22px;bottom:22px;background:#1c2634;border:1px solid var(--acc);color:var(--fg);padding:10px 16px;border-radius:10px;box-shadow:0 8px 30px rgba(0,0,0,.45);font-size:13px;z-index:20}
+  @media(max-width:720px){.st-wrap{grid-template-columns:1fr}.st-nav{position:static;flex-direction:row;overflow:auto}.st-field{grid-template-columns:1fr}.st-ctl{justify-self:start}}
 </style></head><body>
 <header>
   <h1>她 · 查看器 <span class="dim" id="sub"></span></h1>
@@ -385,38 +430,77 @@ function render(){
 }
 
 
-// ---------------- 设置页（2026-11-04）----------------
-// 说明：这段跑在模板字符串里，所以不能写美元花括号插值，
-// 全部用字符串拼接。schema 从后端 /api/config 拿，这里只管渲染和提交。
-let SCHEMA=null, CFG=null, DEFS=null;
+// ---------------- 设置页（2026-11-04，现代布局）----------------
+// 这段跑在模板字符串里，不能写美元花括号插值，全部用字符串拼接。
+let SCHEMA=null, CFG=null, DEFS=null, SAVED='{}';
 const fid = k => 'f_'+k.replace(/[^a-zA-Z0-9]/g,'_');
 const getIn = (o,p) => p.split('.').reduce((a,k)=>(a==null?undefined:a[k]),o);
 const setIn = (o,p,v) => { const ks=p.split('.'); const last=ks.pop(); let t=o; for(const k of ks){ if(!t[k]) t[k]={}; t=t[k] } t[last]=v };
+const UNIT = {
+  'growthDays':'天','wakesPerDay':'次','daily.events':'条','daily.questions':'条',
+  'diary.keepDays':'天','recall.oldDays':'天','absenceAfterDays':'天',
+  'proactive.maxPerDay':'次','proactive.minIdleHours':'小时','proactive.cooldownHours':'小时',
+  'proactive.rollsPerHour':'次','browse.perDay':'次','browse.topN':'条',
+  'avoid.minDuration':'秒','bili.minIntervalMs':'ms','bili.jitterMs':'ms'
+};
 
 function fieldHTML(s){
-  const cur = getIn(CFG, s.key);
-  const dflt = getIn(DEFS, s.key);
-  const id = fid(s.key);
-  const label = '<div class="k">'+esc(s.label)+(s.danger?' <span style="color:#e07979">· 危险</span>':'')+'</div>';
-  const hint = s.hint ? '<div class="dim" style="font-size:11px;margin-top:2px">'+esc(s.hint)+'</div>' : '';
-  let inp = '';
+  const cur = getIn(CFG, s.key), dflt = getIn(DEFS, s.key);
+  const key = esc(s.key), id = fid(s.key);
+  let ctl = '';
   if(s.kind==='bool'){
-    inp = '<label style="display:flex;gap:6px;align-items:center"><input type="checkbox" id="'+id+'"'+(cur?' checked':'')+'> <span>'+(cur?'开着':'关着')+'</span></label>';
+    ctl = '<label class="st-sw"><input type="checkbox" id="'+id+'" data-key="'+key+'" data-kind="bool"'+(cur?' checked':'')+'><i></i></label>';
   } else if(s.kind==='window'){
-    const a=(cur&&cur[0])||'', b=(cur&&cur[1])||'';
-    inp = '<div style="display:flex;gap:6px;align-items:center">'+
-          '<input type="time" id="'+id+'_0" value="'+a+'" style="width:110px">'+
-          '<span class="dim">到</span>'+
-          '<input type="time" id="'+id+'_1" value="'+b+'" style="width:110px"></div>';
+    const a=(cur&&cur[0])||'', z=(cur&&cur[1])||'';
+    ctl = '<div class="st-win"><input type="time" class="st-in" data-key="'+key+'" data-kind="win" value="'+a+'">'+
+          '<span>→</span><input type="time" class="st-in" data-key="'+key+'" data-kind="win" value="'+z+'"></div>';
   } else if(s.kind==='list'){
-    inp = '<input id="'+id+'" value="'+esc((cur||[]).join('，'))+'" style="width:100%">';
+    ctl = '<input class="st-in st-list" id="'+id+'" data-key="'+key+'" data-kind="list" value="'+esc((cur||[]).join('，'))+'">';
   } else {
-    inp = '<input type="number" id="'+id+'" value="'+(cur==null?'':cur)+'"'+
+    ctl = '<input type="number" class="st-in st-num" id="'+id+'" data-key="'+key+'" data-kind="num" value="'+(cur==null?'':cur)+'"'+
           (s.min!=null?' min="'+s.min+'"':'')+(s.max!=null?' max="'+s.max+'"':'')+
-          (s.step!=null?' step="'+s.step+'"':'')+' style="width:110px">';
+          (s.step!=null?' step="'+s.step+'"':'')+'>'+
+          (UNIT[s.key]?'<span class="st-unit">'+UNIT[s.key]+'</span>':'');
   }
-  const d = (dflt!=null && String(dflt)!==String(cur)) ? ' <span class="dim" style="font-size:11px">默认 '+esc(JSON.stringify(dflt))+'</span>' : '';
-  return '<div style="padding:8px 0;border-bottom:1px solid var(--line)">'+label+inp+d+hint+'</div>';
+  const def = (dflt!=null && String(dflt)!==String(cur)) ? '<span class="st-def">默认 '+esc(JSON.stringify(dflt))+'</span>' : '';
+  return '<div class="st-field'+(s.danger?' danger':'')+'" data-field="'+key+'">'+
+    '<div><div class="st-label"><span class="st-dot"></span>'+esc(s.label)+def+'</div>'+
+    (s.hint?'<div class="st-hint">'+esc(s.hint)+'</div>':'')+'</div>'+
+    '<div class="st-ctl">'+ctl+'</div></div>';
+}
+
+/** 收集表单 → patch；同时算出哪些字段被改过。 */
+function collect(){
+  const patch={}, dirty=[], changed={};
+  for(const s of SCHEMA){
+    const ns = Array.prototype.slice.call(document.querySelectorAll('[data-key="'+s.key+'"]'));
+    if(!ns.length) continue;
+    let v;
+    if(s.kind==='bool') v = ns[0].checked;
+    else if(s.kind==='window') v = [ns[0].value, ns[1].value];
+    else if(s.kind==='list') v = ns[0].value.split(/[，,]/).map(x=>x.trim()).filter(Boolean);
+    else v = Number(ns[0].value);
+    if(v==null || (Array.isArray(v) && (!v[0]||!v[1])) || (typeof v==='number' && !Number.isFinite(v))) continue;
+    setIn(patch, s.key, v);
+    if(JSON.stringify(v)!==JSON.stringify(getIn(CFG,s.key))){ dirty.push(s.key); changed[s.key]=s; }
+  }
+  return { patch, dirty, changed };
+}
+
+function markDirty(){
+  const r = collect();
+  const set = new Set(r.dirty);
+  document.querySelectorAll('.st-field').forEach(f=>f.classList.toggle('dirty', set.has(f.dataset.field)));
+  const msg = document.getElementById('stmsg');
+  const btn = document.getElementById('cfgsave');
+  if(msg) msg.textContent = r.dirty.length ? r.dirty.length+' 项改动未保存' : '当前没有改动';
+  if(btn) btn.disabled = !r.dirty.length;
+}
+
+function toast(text){
+  const d = document.createElement('div'); d.className='st-toast'; d.textContent=text;
+  document.body.appendChild(d);
+  setTimeout(()=>{ try{ d.remove() }catch(e){} }, 2600);
 }
 
 async function renderSettings(el){
@@ -425,63 +509,56 @@ async function renderSettings(el){
     if(!SCHEMA){
       const r = await fetch('/api/config', {cache:'no-store'});
       const d = await r.json();
-      SCHEMA = d.schema || []; CFG = d.config || {}; DEFS = d.defaults || {};
+      SCHEMA=d.schema||[]; CFG=d.config||{}; DEFS=d.defaults||{};
     }
-  }catch(e){
-    el.innerHTML = '<p class="err">读不到配置：'+esc(e.message)+'</p>'; return;
-  }
-  const groups = [];
+  }catch(e){ el.innerHTML='<p class="err">读不到配置：'+esc(e.message)+'</p>'; return }
+  SAVED = JSON.stringify(CFG);
+  const groups=[];
   for(const s of SCHEMA) if(!groups.includes(s.group)) groups.push(s.group);
-  const openFirst = ['成长节奏','她主动说话'];
-  el.innerHTML = groups.map(g=>{
-    const rows = SCHEMA.filter(s=>s.group===g).map(fieldHTML).join('');
-    return '<details class="card"'+(openFirst.includes(g)?' open':'')+'><summary style="cursor:pointer;font-weight:600">'+esc(g)+
-           ' <span class="dim" style="font-weight:400;font-size:12px">'+SCHEMA.filter(s=>s.group===g).length+' 项</span></summary>'+
-           '<div style="margin-top:6px">'+rows+'</div></details>';
-  }).join('') +
-  '<div style="margin:14px 0;display:flex;gap:10px;align-items:center">'+
-    '<button id="cfgsave" style="padding:7px 18px">保存</button>'+
-    '<span id="cfgtip" class="dim"></span></div>'+
-  '<p class="dim" style="font-size:12px">改完立刻写进 config.json。多数项下一分钟就生效；'+
-  '「她醒着的时间」「成长天数」这类要等她下一次醒来才对得上。</p>';
+  const gid = g => 'g_'+groups.indexOf(g);
+  const nav = groups.map((g,i)=>'<a data-go="'+gid(g)+'" class="'+(i===0?'on':'')+'">'+esc(g)+'<span class="n">'+SCHEMA.filter(s=>s.group===g).length+'</span></a>').join('');
+  const cards = groups.map(g=>
+    '<section class="st-group" id="'+gid(g)+'"><h3>'+esc(g)+'<small>'+SCHEMA.filter(s=>s.group===g).length+' 项</small></h3>'+
+    SCHEMA.filter(s=>s.group===g).map(fieldHTML).join('')+'</section>').join('');
+  el.innerHTML =
+    '<div class="st-head"><h2>设置</h2><p>改完立刻写进 config.json。多数项下一分钟生效，不用重启。</p></div>'+
+    '<div class="st-wrap"><nav class="st-nav" id="stnav">'+nav+'</nav><div>'+cards+
+      '<div class="st-bar"><span class="st-msg" id="stmsg">当前没有改动</span>'+
+      '<button class="st-btn ghost" id="cfgreset">放弃改动</button>'+
+      '<button class="st-btn" id="cfgsave" disabled>保存</button></div>'+
+    '</div></div>';
+  // 用 on* 覆盖而不是 addEventListener：#main 是常驻节点，
+  // 每次切回设置页若用 addEventListener 会累积监听器，改一格算 N 次。
+  el.oninput = markDirty;
+  el.onchange = markDirty;
   document.getElementById('cfgsave').onclick = saveConfig;
+  document.getElementById('cfgreset').onclick = ()=>{ CFG=JSON.parse(SAVED); renderSettings(el) };
+  document.getElementById('stnav').onclick = (ev)=>{
+    const a = ev.target.closest('a[data-go]'); if(!a) return;
+    document.querySelectorAll('#stnav a').forEach(x=>x.classList.remove('on'));
+    a.classList.add('on');
+    const box = document.getElementById(a.dataset.go);
+    if(box) box.scrollIntoView({behavior:'smooth', block:'start'});
+  };
 }
 
 async function saveConfig(){
-  const tip = document.getElementById('cfgtip');
-  const patch = {};
-  const dangers = [];
-  for(const s of SCHEMA){
-    const id = fid(s.key);
-    let v;
-    if(s.kind==='bool'){
-      const cb = document.getElementById(id); if(!cb) continue; v = cb.checked;
-    } else if(s.kind==='window'){
-      const a = document.getElementById(id+'_0'), b = document.getElementById(id+'_1');
-      if(!a||!b) continue; v = [a.value, b.value]; if(!v[0]||!v[1]) continue;
-    } else if(s.kind==='list'){
-      const inp = document.getElementById(id); if(!inp) continue;
-      v = inp.value.split(/[，,]/).map(x=>x.trim()).filter(Boolean);
-    } else {
-      const inp = document.getElementById(id); if(!inp) continue;
-      v = Number(inp.value); if(!Number.isFinite(v)) continue;
-    }
-    if(s.danger && v !== getIn(DEFS, s.key)) dangers.push(s.label);
-    setIn(patch, s.key, v);
-  }
-  if(dangers.length){
-    if(!confirm('这几项改了会明显改变她：'+dangers.join('、')+'\n确定吗？')) return;
-  }
-  tip.textContent = '保存中…';
+  const r = collect();
+  if(!r.dirty.length) return;
+  const dangers = Object.keys(r.changed).filter(k=>r.changed[k].danger).map(k=>r.changed[k].label);
+  if(dangers.length && !confirm('这几项改了会明显改变她：'+dangers.join('、')+'\n确定吗？')) return;
+  const btn = document.getElementById('cfgsave');
+  btn.disabled = true; btn.textContent = '保存中…';
   try{
-    const r = await fetch('/api/config', {method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify(patch)});
-    const d = await r.json();
+    const res = await fetch('/api/config', {method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify(r.patch)});
+    const d = await res.json();
     if(!d.ok) throw new Error(d.error||'写不进去');
     CFG = d.config;
-    tip.textContent = '已保存 · '+new Date().toLocaleTimeString('zh-CN',{hour12:false});
+    renderSettings(document.getElementById('main'));
+    toast('已保存 · '+new Date().toLocaleTimeString('zh-CN',{hour12:false}));
   }catch(e){
-    tip.textContent = '没存上：'+e.message;
-    tip.className = 'err';
+    btn.disabled=false; btn.textContent='保存';
+    toast('没存上：'+e.message);
   }
 }
 
