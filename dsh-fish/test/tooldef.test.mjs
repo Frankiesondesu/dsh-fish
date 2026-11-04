@@ -16,6 +16,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { registerAlarm } from '../lib/alarm.js'
 import { registerHelp } from '../lib/help.js'
+import { registerVoice } from '../lib/voice.js'
 
 function capture(reg, deps = { root: '/tmp/fish-test-root' }) {
   const out = []
@@ -27,6 +28,7 @@ function capture(reg, deps = { root: '/tmp/fish-test-root' }) {
 const CASES = [
   ['her_alarm', registerAlarm],
   ['her_help', registerHelp],
+  ['her_voice', registerVoice],
 ]
 
 for (const [name, reg] of CASES) {
