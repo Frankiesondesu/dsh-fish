@@ -1,0 +1,13 @@
+{
+  "name": "fish-qq-bridge",
+  "private": true,
+  "type": "module",
+  "description": "OneBot(LLOneBot/LuckyLillia) → dsh-fish 本地通路 的桥",
+  "scripts": {
+    "start": "node bridge.mjs",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "ws": "^8.22.1"
+  }
+}
