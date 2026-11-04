@@ -54,7 +54,19 @@ export function parsePushLine(line) {
   } catch {
     return null
   }
-  if (!ev || ev.type !== 'utterance' || ev.source !== 'tool') return null
+  if (!ev) return null
+  // 语音（2026-11-04）：她调 her_voice 时落一条 meta `voice:<音频路径>|<她说的那句>`
+  // 用 meta 不用 utterance —— utterance 会进 beliefs，而"她说出声"不是"她判断了什么"。
+  if (ev.type === 'meta') {
+    const raw = String(ev.text ?? '')
+    if (!raw.startsWith('voice:')) return null
+    const rest = raw.slice('voice:'.length)
+    const bar = rest.indexOf('|')
+    const file = (bar >= 0 ? rest.slice(0, bar) : rest).trim()
+    if (!file) return null
+    return { id: String(ev.id ?? ''), kind: 'voice', text: file, ts: String(ev.ts ?? '') }
+  }
+  if (ev.type !== 'utterance' || ev.source !== 'tool') return null
   const raw = String(ev.text ?? '')
   for (const m of PUSH_MARKERS) {
     if (!raw.startsWith(m.tag)) continue

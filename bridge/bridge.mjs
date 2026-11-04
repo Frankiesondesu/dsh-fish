@@ -669,6 +669,16 @@ function pushDeliver(item) {
   if (!ids.length) return Promise.reject(new Error('ownerIds 是空的，不知道推给谁'))
   return enqueueStrict(async () => {
     for (const uid of ids) {
+      // 语音（2026-11-04）：item.text 这时是音频文件的绝对路径。
+      // 段类型用 record —— LLBot 内部会 encodeSilk，给它 mp3 就行（实测 17:59 之前那条“叮”就是这条链路）。
+      if (item.kind === 'voice') {
+        await sendAction('send_private_msg', {
+          user_id: uid,
+          message: [{ type: 'record', data: { file: item.text } }],
+        })
+        log(`发了语音：${item.text}`)
+        continue
+      }
       await reply({ message_type: 'private', user_id: uid }, item.text, { strict: true })
     }
   })
