@@ -48,6 +48,44 @@ export const RECALL_BRIEF_SNIPPET = 40
 /** 默认往回翻多少天；0 = 全部 */
 export const RECALL_DAYS = 0
 
+/**
+ * 可及性门槛（fork.36，2026-11-04）——「想得起来」和「东西还在」是两件事。
+ *
+ * 在这之前，decay 只乘在 rank 上参与排序，**没有门槛**：只要关键词命中，
+ * 一条两年前的旧事照样会被返回。于是她的「遗忘」是假的——她不是想不起来，
+ * 是从来没出现过「取不出来」的情况。她自己抓到了这一点（11-04 08:21）：
+ * 「被压掉的那五十六条，我不记得……我想翻也翻不回来。」
+ *
+ * 人的遗忘不是内容消失，是**线索不够就调不出来**，而且不可控。所以这里
+ * 不动账本（只增不改是铁律），只在检索这一层加一道闸：
+ *
+ *   线索够不够 = 命中词里最稀的那个有多稀（归一化的 idf，0 = 到处都有，1 = 独一份）
+ *   记不记得住 = decay
+ *   两者相乘低于 minCue，就是「想不起来」——账本里它还在，只是这次没调出来
+ *
+ * 门槛只对「早期」生效（oldDays 天以前）。这不是宽容，是事实：
+ * 她第 3 天，账本里最老的字也只有 3 天，凭什么忘。要谈遗忘，得先有"以前"。
+ *
+ * ⚠️ 为什么不用绝对分数当门槛：idf 的量级跟账本条数走（N=31 时上限 4.7，
+ * N=536 时 7.3）。拿一个绝对数当门槛，要么在小账本里全挡、要么在大账本里全放。
+ * 归一化之后才跟规模无关。
+ */
+export const RECALL_OLD_DAYS = 30
+/**
+ * 线索要多具体才想得起来——**压到底的时候**的要求（decay 到 0.35 时）。
+ * 刚过 oldDays 时要求会低得多，随 decay 线性升高：
+ *
+ *   needCue = minCue * (1 - decay) / (1 - DECAY_FLOOR)
+ *
+ * 实测（2026-11-04 的真实账本，模拟整本推到 400 天后）：
+ *   「视频」cue=0.377 → 想不起来；「皮影」cue=0.51 → 想得起来。
+ *   同一句「视频」在 30~60 天时还翻得到，大约 80 天以后开始淡出。
+ */
+export const RECALL_MIN_CUE = 0.45
+
+/** 记忆强度的下限：衰减到底也留这么多，永远不归零（fork.11 定的） */
+const DECAY_FLOOR = 0.35
+
 /** 参与排序加权的类型：这些事件引用了某一条，说明那条被检验/修正/回答过 */
 const REF_TYPES = new Set(['test', 'answer', 'revise'])
 
@@ -103,7 +141,7 @@ const DAY_MS = 86_400_000
  * 把查询切成可匹配的片段。
  * 中文没有空格，整串匹配会全落空——所以补上二字切片。
  */
-export function tokensOf(query) {
+export function tokensOf(query, o = {}) {
   const q = String(query ?? '').trim().toLowerCase()
   if (!q) return []
   const out = new Set()
@@ -116,6 +154,10 @@ export function tokensOf(query) {
       for (let i = 0; i + 2 <= p.length; i++) out.add(p.slice(i, i + 2))
     }
   }
+  // fork.36：只要她自己说的那些词，不要近义扩展。
+  // 可及性门槛判断的是「她给的线索够不够具体」——系统替她联想到的
+  // 「片子/短片/bv」不能算她的线索，否则一个泛词也能被扩展出的稀有词救活。
+  if (o.expand === false) return [...out]
   // 近义扩展（fork.10）：她自己换了个说法，也让她能翻到
   for (const t of [...out]) {
     const syn = SYN_MAP.get(t)
@@ -190,6 +232,8 @@ export function solidIdsOf(events = [], growthDays = 30) {
 export function searchEvents(events, query, o = {}) {
   const toks = tokensOf(query)
   if (!toks.length) return { rows: [] }
+  // fork.36：可及性门槛只认她自己给的词，不认近义扩展出来的（见 tokensOf）。
+  const rawSet = new Set(tokensOf(query, { expand: false }))
   const now = Number(o.now ?? Date.now())
   const daysRaw = o.days === undefined || o.days === null ? RECALL_DAYS : Number(o.days)
   const days = Number.isFinite(daysRaw) ? daysRaw : RECALL_DAYS
@@ -204,6 +248,10 @@ export function searchEvents(events, query, o = {}) {
     ? o.solidIds
     : new Set(Array.isArray(o.solidIds) ? o.solidIds.map(String) : [])
   const refs = weigh ? refCounts(events) : new Map()
+  // fork.36：门槛的两个系数。传了就用传的（配置/测试），没传用默认。
+  const num = (v, d) => (v === undefined || v === null || !Number.isFinite(Number(v)) ? d : Number(v))
+  const oldDays = num(o.oldDays, RECALL_OLD_DAYS)
+  const minCue = num(o.minCue, RECALL_MIN_CUE)
 
   // ---- 先过一遍筛，把候选挑出来（后面算稀有度要用整批当分母） ----
   const cand = []
@@ -232,20 +280,34 @@ export function searchEvents(events, query, o = {}) {
    */
   const N = Math.max(1, cand.length)
   const idf = new Map()
+  // fork.36：同一份 df 顺手算出「归一化区分度」——
+  // 0 = 这词每条都有（"视频"），1 = 只在这一条里出现（"皮影"）。
+  // 它才是"这条线索有多具体"。门槛认这个，不认 idf 的绝对值（那个跟账本规模走）。
+  const nidf = new Map()
+  const logN = Math.log(N + 1) || 1
   for (const t of toks) {
     let df = 0
     for (const c of cand) if (c.lower.includes(t)) df++
-    if (df > 0) idf.set(t, Math.log((N + 1) / (df + 1)) + 1)
+    if (df > 0) {
+      const rare = Math.log((N + 1) / (df + 1))
+      idf.set(t, rare + 1)
+      nidf.set(t, rare / logN)
+    }
   }
 
   const scored = []
   for (const { ev, text, ts, lower } of cand) {
     let score = 0
+    let cue = 0
     for (const t of toks) {
       if (!lower.includes(t)) continue
       const w = idf.get(t) ?? 1
       // 长片段更值钱：两字切片打折，整词按自己的稀有度全额
       score += w * (t.length >= 3 ? 1.5 : 1)
+      if (rawSet.has(t)) {
+        const n = nidf.get(t) ?? 0
+        if (n > cue) cue = n
+      }
     }
     // 一个整词都没对上时，再试字面重合（fork.10）——换了个说法也能翻到
     if (score <= 0) score = looseScore(text, query)
@@ -263,13 +325,20 @@ export function searchEvents(events, query, o = {}) {
         : ev.type === 'meta'
           ? 45
           : Math.max(1, Number(o.halfLifeDays ?? 30))
-    const decay = 0.35 + 0.65 * Math.pow(0.5, ageDays / half)
+    const decay = DECAY_FLOOR + (1 - DECAY_FLOOR) * Math.pow(0.5, ageDays / half)
+    // fork.36：越老越需要具体的线索。刚过 oldDays 时要求低（几乎不挡），
+    // 压到底时要求最高（= minCue）。这样"淡出"是连续的，不是到点一刀切。
+    const needCue = minCue * (1 - decay) / (1 - DECAY_FLOOR)
 
     let rank = score * decay
     if (weigh) {
       if (solid.has(String(ev.id))) rank += 3
       rank += Math.min(3, refs.get(String(ev.id)) ?? 0)
     }
+    // fork.36：可及性门槛。线索不够就是**想不起来**，不是"没有这条"——
+    // 账本里它还在，只是她这次没把它调出来。人也是这样。
+    // 只对「早期」生效：账本才三天，最老的字也就三天，凭什么忘。
+    if (ageDays > oldDays && cue < needCue) continue
     scored.push({ rank, score, ts, ev, text })
   }
 
@@ -372,6 +441,9 @@ export function registerRecall(ctx, deps = {}) {
             days: args?.days,
             kind: args?.kind,
             solidIds,
+            // fork.36：可及性门槛的两个旋钮（settings.recall）。不传就是默认值。
+            oldDays: deps.reach?.oldDays,
+            minCue: deps.reach?.minCue,
             // 截断放在 searchEvents 里：这样 rows 本身就是短的，
             // 渲染层不必再按栏位切一刀（两处口径会打架）。
             snippet: brief ? RECALL_BRIEF_SNIPPET : RECALL_SNIPPET,

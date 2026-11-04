@@ -144,11 +144,15 @@ test('旁听：她翻到时看到的是「他说：」，不是自己的口吻',
   assert.match(out, /（ev_1）/)
 })
 
-test('回忆：默认翻全部时间，一个月以前的也翻得到', () => {
+test('回忆：默认时间窗是全部——看得见多早，和翻不翻得到是两件事', () => {
   assert.equal(RECALL_DAYS, 0, '0 = 全部')
   const now = Date.now()
   const events = [{ id: 'old', type: 'utterance', ts: at(200), text: '很久以前的评论' }]
-  const { rows } = searchEvents(events, '评论', { now })
+  // fork.36：时间窗不挡它，但能不能取出来由「线索强度 × 记忆强度」定。
+  // 单条账本算不出区分度（nidf=0），所以这一条会「想不起来」。
+  assert.equal(searchEvents(events, '评论', { now }).rows.length, 0, '200 天前的泛词调不出来')
+  // 时间窗确实是开着的：门槛一关就翻得到，ago 也如实
+  const { rows } = searchEvents(events, '评论', { now, minCue: 0 })
   assert.equal(rows.length, 1)
   assert.equal(rows[0].id, 'old')
   assert.ok(rows[0].ago >= 199)

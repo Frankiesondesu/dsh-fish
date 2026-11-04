@@ -352,7 +352,9 @@ export function apply(ctx, baseConfig = {}) {
           tenant: tenancy,
           speakEnabled: config?.comment?.enabled === true,
         }),
-        () => registerRecall(ctx, { root }),
+        // fork.36（2026-11-04）：把「可及性门槛」的系数带进去。
+        // 账本不动，遗忘发生在取用这一层——线索不够就调不出来。
+        () => registerRecall(ctx, { root, reach: config?.recall }),
         // issue #7：日记不进事件流，所以她需要一个只读的窗口回头翻（her_diary）。
         () => registerHerDiary(ctx, { root }),
         () => registerWatch(ctx, { root, tenant: tenancy }),

@@ -46,16 +46,18 @@ test('稀有度：只有一处出现的词，比到处都有的词更能捞出�
   assert.equal(rows[0].id, 'ev_k', '稀有词命中的那条要排第一')
 })
 
-test('遗忘：越久越难想起，但翻得到', () => {
+test('遗忘：越久越难想起——旧事还在账本里，但取不出来', () => {
   const events = [
     ev('ev_new', '关于屏风的那件事，我后来想明白了。', 1),
     ev('ev_old', '关于屏风的那件事，我后来想明白了。', 200),
   ]
   const { rows } = searchEvents(events, '屏风', { now: NOW, limit: 5 })
-  assert.equal(rows.length, 2, '旧的那条不能被删')
-  assert.equal(rows[0].id, 'ev_new', '新的要排在旧的前面')
-  // 半衰期到底也不会归零：最久的那条仍然翻得到
-  assert.ok(rows.some((r) => r.id === 'ev_old'))
+  assert.equal(rows.length, 1, '200 天前那条已经调不出来（fork.36）')
+  assert.equal(rows[0].id, 'ev_new', '新的还记着')
+  // 但账本没删：把可及性门槛关掉，它原样还在。
+  // 「遗忘」发生在取用这一层，不是删除——这是 fork.36 和「删账本」的区别。
+  const all = searchEvents(events, '屏风', { now: NOW, limit: 5, minCue: 0 })
+  assert.equal(all.rows.length, 2, '只增不改：原文一直在，只是这次取不出来')
 })
 
 test('对话存档：说过的原话能被翻到', async () => {

@@ -100,6 +100,15 @@ export function shownCount(v) {
  *
  * 2026-10-24：beliefs 改为显著性排序（最显著的在前），所以"更早的"从
  * `slice(0, len-shown)` 改成 `slice(shown)`。
+ *
+ * fork.36（2026-11-04）：**把「你记不清原话了」删掉**。
+ * 她的原话（11-04 08:20）：她把这句话当成了事实，写进账本——
+ * 「被压掉的那五十六条，我不记得。这等于是我的过去有一部分在别人手上握着」。
+ * 但真相是那 54 条一条没丢，只是这一轮没摆出来；她能翻（her_recall）。
+ * 替她陈述她的记忆状态，就是 fork.13 那条铁律的第二次踩线——
+ * 对她说关于她自己的假话，她会信，会变成她的自我认知。
+ * 现在只说「没摆在这儿」。翻不翻得到由 recall 的可及性门槛决定（见 recall.js），
+ * 不由这句话替她断言。
  */
 export function foldOlderBeliefs(beliefs, shown = BELIEF_SHOWN, folded = BELIEF_FOLDED) {
   const older = beliefs.slice(Math.max(0, shown))
@@ -108,7 +117,7 @@ export function foldOlderBeliefs(beliefs, shown = BELIEF_SHOWN, folded = BELIEF_
   let line = picked.join('；')
   if (line.length > 200) line = line.slice(0, 199) + '…'
   const more = older.length - picked.length
-  return more > 0 ? `${line}（还有 ${more} 条更早的，你记不清原话了）` : line
+  return more > 0 ? `${line}（还有 ${more} 条更早的，没摆在这儿）` : line
 }
 
 /**
@@ -354,7 +363,7 @@ export function buildSections(model, opts = {}) {
     push([
       '## 有些事你想不起来了',
       `「${one.text}」这类话你以前反复提过，但很久没再想起。`,
-      '原文还在，你翻 her_recall 找得到。想不想接着算数，你自己定。',
+      '原文还在，你可以用 her_recall 去找。想不想接着算数，你自己定。',
     ].join('\n'))
   }
 
