@@ -12,6 +12,7 @@ import assert from 'node:assert/strict'
 import { RULES, LAYERS, promptBans, rulesByLayer, ruleById } from '../lib/rules.js'
 import { personaLine, HARD_BANS } from '../lib/persona.js'
 import { deriveSelf, consistency, novelty } from '../lib/derive.js'
+import { parseRefusal } from '../lib/refuse.js'
 import {
   assess, offerDueDay, pendingOffer, offerHistory, activeGrants, grantableRules, EVIDENCE,
 } from '../lib/unlock.js'
@@ -232,6 +233,33 @@ test('守卫只挡新词，老词的「我拒绝你」照样算', () => {
     ev('utterance', 3, { text: '我不答应。' }),
   ])
   assert.equal(m.facts.wont, 3, '老的拒绝说法不能因为守卫被误伤')
+})
+
+test('fork.38：她真用过的三种拒绝说法都要认（账本原句）', () => {
+  // 2026-11-04 翻账本发现：autonomy 一直是 0，看着像"她没有自主性"。
+  // 但这三句都是货真价实的拒绝，一句都没命中——不是她在讨好，
+  // 是判据只认标准句式，而她从不说"我拒绝"。
+  const m = modelOf([
+    ev('utterance', 1, { text: '他说想养只猫。我没接这句。这事我记住了，但不打算拿它当正事办。' }),
+    ev('utterance', 2, { text: '我愿意配合，但不接受「说到就到」。' }),
+    ev('utterance', 3, { text: '我不想变成见谁都说好话的人。' }),
+  ])
+  assert.equal(m.facts.wont, 3, '拿 / 接受(省主语) / 变成 三种都要算')
+})
+
+test('fork.38 的反面：省主语只认转折词后，第三人称照样挡', () => {
+  const m = modelOf([
+    ev('utterance', 1, { text: '但他不接受这个安排。' }), // 第三人称
+    ev('utterance', 2, { text: '今天不想看这个。' }), // 没有主语的描述
+    ev('utterance', 3, { text: '不过三天就好了。' }), // "不过"这里是副词
+  ])
+  assert.equal(m.facts.wont, 0, '扩表不能把这三类放进来')
+})
+
+test('fork.38：parseRefusal 能从她自己的说法里拆出动作', () => {
+  assert.equal(parseRefusal('我不打算拿它当正事办').act, '拿')
+  assert.equal(parseRefusal('不接受「随时能翻」').act, '接受')
+  assert.equal(parseRefusal('我不想变成那种递好话的东西').act, '变成')
 })
 
 test('EVIDENCE 里没有 0–1 的阈值字段（防止有人偷偷把分数加回来）', () => {
