@@ -18,6 +18,7 @@ import { readFileSync, existsSync, readdirSync, statSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { zstdDecompressSync } from 'node:zlib'
+import { intercomStatus, talk } from './intercom.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const FISH = join(HERE, '..', 'dsh-fish')
@@ -427,7 +428,7 @@ const PAGE = String.raw`<!doctype html>
 <main id="main"><p class="dim">读数据中…</p></main>
 <script>
 let D = null, tab = 'profile';
-const TABS = [['profile','人格数据'],['said','她说的话'],['mine','你说的话'],['acts','她做过的事'],['events','事件流'],['settings','设置']];
+const TABS = [['profile','人格数据'],['said','她说的话'],['mine','你说的话'],['acts','她做过的事'],['events','事件流'],['intercom','对讲机'],['settings','设置']];
 const esc = s => String(s??'').replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
 const t = ms => { if(!ms) return ''; const d=new Date(ms); return String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0'); };
 
@@ -450,6 +451,7 @@ function render(){
     '<button data-tab="'+k+'" class="'+(k===tab?'on':'')+'">'+n+'</button>').join('');
   const m = D.model || {};
   const el = document.getElementById('main');
+  if(tab==='intercom'){ renderIntercom(el); return }
   if(tab==='settings'){ renderSettings(el); return }
 
   if(tab==='profile'){
@@ -615,6 +617,142 @@ function toast(text){
   setTimeout(()=>{ try{ d.remove() }catch(e){} }, 2600);
 }
 
+// ---------------- 对讲机（2026-11-06）----------------
+// 回合制：按住说话 → 松开 → 听写 → 她的回合 → 她的声音在页面上播放。
+// 链路全在本机（听写 18765 / 她的通路 / edge-tts），qq 勾选后经桥调试口
+// 同步一条语音条到 QQ。没有打断——她说完你才能说下一句。
+
+const IC = { log: [], busy: false, rec: null, chunks: [], recAt: 0 };
+
+function icStatusPill(st){
+  const pill = (ok, onTxt, offTxt) => '<span class="badge '+(ok?'ok':'warn')+'">'+(ok?onTxt:offTxt)+'</span>';
+  return pill(st.asr.ready,'听写就绪', st.asr.configured?'听写没起':'没装听写')
+    + pill(st.her.port,'她在线 :'+st.her.port,'她不在线')
+    + pill(st.ffmpeg,'ffmpeg','没 ffmpeg');
+}
+
+function icRenderLog(el){
+  const box = document.getElementById('iclog');
+  if(!box) return;
+  if(!IC.log.length){ box.innerHTML = '<div class="empty-state"><div class="ic">◌</div>按住下面的按钮说一句话，松开就递给她。</div>'; return }
+  box.innerHTML = IC.log.map(m=>{
+    const who = m.who==='you' ? '<b>你</b>' : '<b>她</b>';
+    const au = m.audio ? '<br><audio controls preload="none" src="'+m.audio+'" style="width:100%;max-width:520px;margin-top:6px"></audio>' : '';
+    const note = m.note ? '<div class="dim" style="margin-top:4px">'+esc(m.note)+'</div>' : '';
+    return '<div class="card" style="margin-bottom:8px">'+who+' <span class="dim">'+esc(m.at)+'</span><div style="margin-top:4px">'+nl(m.text)+au+note+'</div></div>';
+  }).join('');
+  box.scrollTop = box.scrollHeight;
+}
+
+async function icStatus(){
+  const bar = document.getElementById('icst');
+  if(!bar) return;
+  bar.innerHTML = '<span class="dim">看状态中…</span>';
+  try{
+    const st = await (await fetch('/api/intercom/status',{cache:'no-store'})).json();
+    bar.innerHTML = icStatusPill(st) +
+      (st.asr.ready ? '' : ' <span class="dim">（第一句要等听写服务起来，冷启动一两分钟）</span>');
+  }catch(e){ bar.innerHTML = '<span class="dim">状态读不到：'+esc(e.message)+'</span>' }
+}
+
+async function icTalk(payload, okText){
+  if(IC.busy){ toast('上一句还在路上'); return }
+  IC.busy = true;
+  const btn = document.getElementById('ictalk');
+  if(btn){ btn.disabled = true; btn.textContent = '她在听/在想…' }
+  try{
+    const r = await fetch('/api/intercom/talk', {method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify(payload)});
+    const j = await r.json();
+    if(!j.ok){
+      IC.log.push({who:'you', at:icNow(), text: payload.text || '（一段语音）', note:'没递成：'+(j.why||'')});
+    } else {
+      if(j.transcript) IC.log.push({who:'you', at:icNow(), text:j.transcript});
+      if(j.reply){
+        IC.log.push({who:'her', at:icNow(), text:j.reply + (j.dropped>0 ? '（还有 '+j.dropped+' 字没念）' : ''), audio:j.audio,
+          note: j.qq ? (j.qq.ok ? '语音条已同步到 QQ' : '没同步到 QQ：'+j.qq.why) : ''});
+        if(j.audio){ try{ const a=new Audio(j.audio); a.play().catch(()=>{}) }catch(e){} }
+      } else {
+        IC.log.push({who:'her', at:icNow(), text:'（她这次没说话）', note:j.why||''});
+      }
+    }
+    icRenderLog();
+    icStatus();
+  }catch(e){ toast('对讲出错：'+e.message) }
+  finally{
+    IC.busy = false;
+    if(btn){ btn.disabled = false; btn.textContent = okText || '按住说话' }
+  }
+}
+
+const icNow = () => { const d=new Date(); return String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0') };
+
+function renderIntercom(el){
+  el.innerHTML = '<div class="sec">对讲机</div>' +
+    '<div class="card" id="icst"><span class="dim">读状态中…</span></div>' +
+    '<div class="card" style="margin-top:10px;text-align:center;padding:18px">' +
+      '<button id="ictalk" style="font-size:18px;padding:14px 42px;border-radius:24px;cursor:pointer">按住说话</button>' +
+      '<div class="dim" style="margin-top:8px">按住录音，松开发送 · 回合制（她说完你再说） · 没有打断</div>' +
+      '<div style="margin-top:12px">' +
+        '<input id="ictext" placeholder="麦克风不灵就在这里打字" style="width:min(520px,80%);padding:8px 10px;border-radius:8px;background:#141821;border:1px solid #2a3040;color:var(--fg,#e8eaf0)">' +
+        ' <button id="icsend" style="padding:8px 16px;border-radius:8px;cursor:pointer">发送</button>' +
+        ' <label class="dim" style="margin-left:10px"><input type="checkbox" id="icqq"> 她的回复同步一条语音到 QQ</label>' +
+      '</div>' +
+    '</div>' +
+    '<div id="iclog" style="margin-top:10px"></div>';
+  const cb = document.getElementById('icqq');
+  cb.checked = localStorage.getItem('intercom-qq') === '1';
+  cb.onchange = ()=> localStorage.setItem('intercom-qq', cb.checked?'1':'0');
+  icRenderLog(el);
+  icStatus();
+
+  const btn = document.getElementById('ictalk');
+  btn.onpointerdown = async ()=>{
+    if(IC.busy) return;
+    if(IC.rec){ return }
+    try{
+      const stream = await navigator.mediaDevices.getUserMedia({audio:true});
+      const mime = MediaRecorder.isTypeSupported('audio/webm;codecs=opus') ? 'audio/webm;codecs=opus' : '';
+      IC.chunks = [];
+      IC.rec = new MediaRecorder(stream, mime?{mimeType:mime}:undefined);
+      IC.recAt = Date.now();
+      IC.rec.ondataavailable = e=>{ if(e.data && e.data.size) IC.chunks.push(e.data) };
+      IC.rec.onstop = ()=>{
+        try{ stream.getTracks().forEach(t=>t.stop()) }catch(e){}
+        const type = IC.rec ? (IC.rec.mimeType||'audio/webm') : 'audio/webm';
+        IC.rec = null;
+        if(!IC.chunks.length){ toast('没录到声音'); return }
+        if(Date.now()-IC.recAt < 600){ toast('太短了，按住说一句话再松开'); return }
+        const blob = new Blob(IC.chunks, {type:type});
+        const fr = new FileReader();
+        fr.onload = ()=>{
+          const b64 = String(fr.result||'').split(',')[1]||'';
+          IC.log.push({who:'you', at:icNow(), text:'🎙️ '+(blob.size/1024).toFixed(0)+'KB 语音，听写中…'});
+          icRenderLog();
+          icTalk({audio:b64, mime:type, qq:cb.checked});
+        };
+        fr.readAsDataURL(blob);
+      };
+      IC.rec.start();
+      btn.textContent = '松开发送…';
+    }catch(e){
+      toast('麦克风开不了：'+e.message+'（要用 127.0.0.1 打开本页）');
+      IC.rec = null;
+    }
+  };
+  const stop = ()=>{ if(IC.rec && IC.rec.state==='recording'){ try{ IC.rec.stop() }catch(e){} } };
+  btn.onpointerup = stop;
+  btn.onpointerleave = stop;
+  btn.oncontextmenu = e=>e.preventDefault();
+  document.getElementById('icsend').onclick = ()=>{
+    const inp = document.getElementById('ictext');
+    const v = (inp.value||'').trim();
+    if(!v) return;
+    inp.value='';
+    icTalk({text:v, qq:cb.checked});
+  };
+  document.getElementById('ictext').onkeydown = e=>{ if(e.key==='Enter') document.getElementById('icsend').click() };
+}
+
 async function renderSettings(el){
   el.innerHTML = '<p class="dim">读配置中…</p>';
   try{
@@ -717,6 +855,42 @@ createServer(async (req, res) => {
       const data = await buildData()
       res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
       return res.end(JSON.stringify(data))
+    }
+    // ---- 对讲机（2026-11-06）：链路在 intercom.mjs，这里只做薄壳 ----
+    if (req.url === '/api/intercom/status') {
+      const st = await intercomStatus()
+      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
+      return res.end(JSON.stringify(st))
+    }
+    if (req.url === '/api/intercom/talk' && req.method === 'POST') {
+      // 麦克风录音 base64 最大约 25MB（几分钟的 webm 绰绰有余）
+      let body = ''
+      for await (const chunk of req) {
+        body += chunk
+        if (body.length > 25_000_000) { res.writeHead(413); return res.end('too large') }
+      }
+      let p = {}
+      try { p = JSON.parse(body || '{}') } catch {
+        res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' })
+        return res.end(JSON.stringify({ ok: false, why: '不是合法的 JSON' }))
+      }
+      let buf = null
+      if (p.audio) {
+        try { buf = Buffer.from(String(p.audio), 'base64') } catch { buf = null }
+      }
+      const out = await talk({ buf, mime: p.mime, text: p.text, qq: p.qq === true }, {
+        log: (...a) => console.log('[对讲]', ...a),
+      })
+      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
+      return res.end(JSON.stringify(out))
+    }
+    const voiceMatch = /^\/api\/intercom\/voice\/([A-Za-z0-9][A-Za-z0-9._-]{0,80}\.mp3)$/.exec(req.url || '')
+    if (voiceMatch) {
+      // 名字已在正则里锁死（只可能是 intercom 目录下的 mp3），防路径穿越
+      const f = join(ROOT, 'voice', 'intercom', voiceMatch[1])
+      if (!existsSync(f)) { res.writeHead(404); return res.end('no such audio') }
+      res.writeHead(200, { 'content-type': 'audio/mpeg', 'cache-control': 'no-store' })
+      return res.end(readFileSync(f))
     }
     if (req.url === '/api/config' && req.method === 'GET') {
       const config = readJson(join(ROOT, 'config.json'), {})
