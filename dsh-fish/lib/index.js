@@ -49,6 +49,7 @@ import { clearWakeSection, registerIdentity } from './identity.js'
 import { registerPossession } from './possess.js'
 
 import { checkUpgrade } from './upgrade.js'
+import { sweepCaches } from './sweep.js'
 import { checkHost, readHostVersion } from './hostver.js'
 import { logBoot, makeLogger } from './log.js'
 
@@ -90,6 +91,7 @@ export function apply(ctx, baseConfig = {}) {
   // 写进 inject 的代价是「缺了就整个插件不装」——而缺的那个服务只关掉一条功能。
   const compat = { checked: false, userQuestions: false }
   let heartbeat = null
+  let sweepTimer = null
 
   async function boot() {
     logBoot(root, `${VERSION} · ${process.version} · ${process.platform}`)
@@ -164,6 +166,22 @@ export function apply(ctx, baseConfig = {}) {
     }
 
     const { events } = await readEvents(root)
+
+    // ---- 缓存清理（fork.52，2026-11-05）----
+    // 之前 media/ 的 sweepMedia 写了半个月没人调用，inbox/ 和 voice/ 连期限都没有：
+    // 四天堆了 40MB，一年就是 3.6G。启动扫一次，之后每 6 小时一次。
+    // 只删这三个缓存目录里的文件——账本、日记、配置、她的房间一个字不碰。
+    try {
+      const runSweep = () => {
+        sweepCaches(root, { config, log: (m) => logger.info(`[dsh-fish] ${m}`) })
+          .catch((err) => logger.warn('[dsh-fish] 缓存清理失败', String(err?.message ?? err)))
+      }
+      runSweep()
+      sweepTimer = setInterval(runSweep, 6 * 3_600_000)
+      sweepTimer.unref?.()
+    } catch (err) {
+      logger.warn('[dsh-fish] 缓存清理没起来', String(err?.message ?? err))
+    }
 
     // ---- 换家留痕（2026-10-28 房客日志 m01863）----
     // 换 root 就是换家：老家的数据留在原地，跟新家没有任何关系。这句话
@@ -476,7 +494,9 @@ export function apply(ctx, baseConfig = {}) {
   }
 
   function shutdown() {
-    try { clearInterval(heartbeat) } catch { /* ignore */ }    try {
+    try { clearInterval(heartbeat) } catch { /* ignore */ }
+    try { clearInterval(sweepTimer) } catch { /* ignore */ }
+    try {
       const id = tenancy.tenant?.instanceId
       if (id) releaseRoot(root, id).catch(() => {})
     } catch { /* ignore */ }
