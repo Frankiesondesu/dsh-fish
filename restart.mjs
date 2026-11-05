@@ -30,8 +30,8 @@ import { setTimeout as sleep } from 'node:timers/promises'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const NODE = process.execPath
-const CHECK = process.argv.includes('--check')
-const TARGET = process.argv.slice(2).find((a) => !a.startsWith('-')) ?? ''
+let CHECK = process.argv.includes('--check')
+let TARGET = process.argv.slice(2).find((a) => !a.startsWith('-')) ?? ''
 
 const out = (...a) => console.log(...a)
 
@@ -88,6 +88,13 @@ const before = herBootAt()
 out('')
 out('  她 · 一键重启')
 out('  ' + '─'.repeat(46))
+if (process.argv.includes('--menu')) {
+  const pick = await choose()
+  if (pick === '2') TARGET = '桥'
+  else if (pick === '3') TARGET = 'DSH'
+  else if (pick === '4') CHECK = true
+  out('')
+}
 if (TARGET) out(`  只重启：${TARGET}`)
 
 if (CHECK) {
@@ -161,3 +168,25 @@ out('    · 体检：node launch.mjs --check')
 out('    · 只想关：node shutdown.mjs --check')
 out('')
 process.exit(portsOk ? 0 : 1)
+
+/**
+ * 交互菜单。**故意写在 node 里，不写进 .cmd**——
+ * .cmd 里放中文会被 cmd.exe 按 GBK 解析（UTF-8 的中文字节错位后变成
+ * & | > 这类元字符，整行被拆成几条命令）。2026-11-05 用户双击时踩到：
+ * 「'启' is not recognized as an internal or external command」。
+ * node 输出天生 UTF-8，控制台 chcp 65001 之后中文正常。
+ */
+async function choose() {
+  const { createInterface } = await import('node:readline')
+  const rl = createInterface({ input: process.stdin, output: process.stdout })
+  const ask = (q) => new Promise((res) => rl.question(q, res))
+  out('')
+  out('  1. 全部重启    DSH + QQ + 桥 + 查看器')
+  out('  2. 只重启桥    改完 bridge.mjs 用这个')
+  out('  3. 只重启 DSH  改完插件代码用这个（fork 生效）')
+  out('  4. 只看会关什么，不动手')
+  out('')
+  const ans = String(await ask('  选一个（1-4，直接回车=全部重启）：')).trim()
+  rl.close()
+  return ans
+}
