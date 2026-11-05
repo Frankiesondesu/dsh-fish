@@ -244,10 +244,8 @@ function readMessage(ev) {
 /** 她的通路收图上限是 6MB（media.js 的 MAX_IMAGE_BYTES），超了直接不发 */
 const IMAGE_MAX_BYTES = 6 * 1024 * 1024
 
-/** 一次最多拼几张：再多，每张都会被缩到看不清字。 */
-const STACK_MAX = 4
-/** 拼图统一宽度：720 够看清聊天截图里的字，又不至于让文件顶到上限。 */
-const STACK_WIDTH = 720
+/** 连发多张时，一次最多给她记几张的路径（再多，那一轮的话就全是路径了）。 */
+const MULTI_IMAGE_MAX = 6
 
 /** 她读图一次只能看一帧；动图（表情包）就把几帧拼成一张给她看 */
 const FFMPEG = String(process.env.DSH_FISH_FFMPEG ?? '').trim()
@@ -558,52 +556,6 @@ async function forwardNote(forwards) {
   return blocks.join('\n') + '\n\n'
 }
 
-/**
- * 把多张图竖着拼成一张（2026-11-05）。
- *
- * 为什么拼、不分两轮：她的通路一轮只收一张图。分两轮递，她会回两次话，
- * 中间还可能插进别的——「你看这两张」这种话就断了。拼成一张她能一次看到、
- * 能对比，而且插件那边一个字都不用改。
- *
- * 用 ffmpeg 的 vstack：各自缩到同一宽度（-2 保证偶数）、统一 rgb24，再竖着摞。
- * 输出 jpg 不用 png：聊天截图拼起来动辄两三千像素高，png 会顶到 6MB 上限。
- *
- * 任何一步失败都返回 null，调用方退回「只发第一张」并说清还有几张没看到。
- */
-function stackImages(bufs, { width = STACK_WIDTH } = {}) {
-  if (!Array.isArray(bufs) || bufs.length < 2) return null
-  const tag = `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`
-  const files = []
-  const outp = join(tmpdir(), `fish-stack-${tag}.jpg`)
-  try {
-    for (let i = 0; i < bufs.length; i++) {
-      const f = join(tmpdir(), `fish-stack-${tag}-${i}.img`)
-      writeFileSync(f, bufs[i])
-      files.push(f)
-    }
-    const args = ['-hide_banner', '-loglevel', 'error', '-y']
-    for (const f of files) args.push('-i', f)
-    const chains = files.map((_, i) =>
-      `[${i}:v]scale=${width}:-2,setsar=1,format=rgb24[v${i}]`)
-    const stack = files.map((_, i) => `[v${i}]`).join('') + `vstack=inputs=${files.length}[out]`
-    args.push('-filter_complex', [...chains, stack].join(';'), '-map', '[out]', '-q:v', '3', '-frames:v', '1', outp)
-    execFileSync(FFMPEG, args, { timeout: 30_000, windowsHide: true })
-    const out = readFileSync(outp)
-    if (!out.length) return null
-    if (out.length > IMAGE_MAX_BYTES) {
-      log(`多图拼接：拼完 ${(out.length / 1024 / 1024).toFixed(1)}MB，超过 ${IMAGE_MAX_BYTES / 1024 / 1024}MB 上限`)
-      return null
-    }
-    return out
-  } catch (err) {
-    log('多图拼接失败：', String(err?.message ?? err).slice(0, 160))
-    return null
-  } finally {
-    for (const f of files) { try { unlinkSync(f) } catch { /* ignore */ } }
-    try { unlinkSync(outp) } catch { /* ignore */ }
-  }
-}
-
 async function loadImage(seg) {
   const d = seg?.data ?? {}
   const tries = []
@@ -876,29 +828,34 @@ async function flush(p) {
   return enqueue(async () => {
     const t0 = Date.now()
     // 她的通路一轮只收一张图（插件侧 /local/say 的 image 是单数）。
-    // 连发多张时**拼成一张**递过去：她能一次看到、能对比，也不用分两轮
-    // 打断对话。拼不动就退回第一张，并在话里说清"还有几张没看到"。
+    // 一张：照旧直传，她抬眼就看见。
+    // 多张（2026-11-05 用户定）：**不拼接**——每张单独落到她屋里，把路径列给她，
+    //   看哪张、看不看，由她自己调 read_image 决定。拼接会把两件不同的事压成一张，
+    //   也会让分辨率打折；而她的 read_image 本来一次只读一张。
     let image = ''
     let imgNote = ''
     if (images.length) {
       const bufs = []
-      for (const seg of images.slice(0, STACK_MAX)) {
+      for (const seg of images.slice(0, MULTI_IMAGE_MAX)) {
         const b = await loadImage(seg)
         if (b) bufs.push(b)
       }
       let buf = bufs[0] ?? null
       if (bufs.length > 1) {
-        const stacked = stackImages(bufs)
-        if (stacked) {
-          log(`多图拼接：${bufs.length} 张 → ${(stacked.length / 1024).toFixed(0)}KB`)
-          buf = stacked
-          imgNote = `（他一次发来 ${bufs.length} 张图，拼成一张：从上往下第 1 到第 ${bufs.length} 张。）\n`
-        } else {
-          imgNote = `（他一次发来 ${bufs.length} 张图，我这边只递过来第一张。）\n`
-        }
+        const stamp = new Date().toISOString().replace(/[:.]/g, '-')
+        const lines = [`（他一次发来 ${bufs.length} 张图，都存到你屋里了：`]
+        bufs.forEach((b, i) => {
+          const ext = isGif(b) ? '.gif' : (b[0] === 0x89 && b[1] === 0x50 ? '.png' : '.jpg')
+          const saved = saveInbox(`图-${stamp}-${i + 1}${ext}`, b)
+          log(`收到图 ${i + 1}/${bufs.length}：${saved.name} ${(saved.bytes / 1024).toFixed(0)}KB → ${saved.path}`)
+          lines.push(` ${i + 1}. ${saved.path}（${(saved.bytes / 1024).toFixed(0)}KB）`)
+        })
+        lines.push('要看哪张就 read_image 读它；不看也行。）')
+        imgNote = lines.join('\n') + '\n'
+        buf = null // 多张时不直传，全走路径
       }
       // 动图（表情包多半是）抽几帧拼一张 —— 她一次只能看一帧，看第一帧等于没看懂那个表情。
-      // 单帧 GIF 不拼：那样只会得到一张八格全黑的图。多图时不走这条路（已经拼过了）。
+      // 单帧 GIF 不拼：那样只会得到一张八格全黑的图。多图时不走这条路（已经落盘了）。
       if (buf && bufs.length === 1 && isGif(buf)) {
         const frames = gifFrames(buf)
         if (frames > 1 || frames === 0) {
@@ -915,7 +872,7 @@ async function flush(p) {
       if (images.length > bufs.length) {
         imgNote += `（另外还有 ${images.length - bufs.length} 张，这次没带。）\n`
       }
-      if (images.length > 1) log(`他一次发了 ${images.length} 张图，拼 ${bufs.length} 张 → ${image ? '一张' : '没递成'}`)
+      if (images.length > 1) log(`他一次发了 ${images.length} 张图：${bufs.length} 张落盘，${image ? '另带一张直传' : '不直传'}`)
     }
     // 合并转发的聊天记录（2026-11-05）：段里只有一个 id，得拿它去换正文。
     // 短的直接贴给她，长的落盘给路径——她自己会调 her_open。
