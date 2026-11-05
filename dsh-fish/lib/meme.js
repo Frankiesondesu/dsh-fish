@@ -43,16 +43,56 @@ export function memeDir(root = rootDir()) {
  * @param {() => number} rand 注入随机源（测试用）
  * @returns {{pick:string, why:string}|null}
  */
+/**
+ * 这张图属于哪一类。
+ * 命名规则是 `类别-描述.ext`；爱蜜莉雅那批是 `爱蜜莉雅-类别-描述.ext`。
+ */
+export function moodOf(name) {
+  const parts = String(name ?? '').split('-')
+  return parts[0] === '爱蜜莉雅' ? (parts[1] ?? '') : (parts[0] ?? '')
+}
+
+/**
+ * 这张图算不算这一情绪。
+ *
+ * **看类别前缀，不看整串**：`忙-打字生气.gif` 的类别是「忙」，不该被「生气」挑走。
+ * 早期没有类别前缀的图（`Happy.png`）退回包含匹配，不然它们永远挑不到。
+ */
+export function matchMood(name, mood) {
+  const m = String(mood ?? '').trim().toLowerCase()
+  if (!m) return true
+  const cat = moodOf(name).toLowerCase()
+  if (cat === m) return true
+  if (!String(name).includes('-')) return String(name).toLowerCase().includes(m)
+  return false
+}
+
 export function pickMeme(names = [], mood = '', rand = Math.random) {
   const list = (Array.isArray(names) ? names : [])
     .filter((n) => MEME_EXT.includes(String(n).slice(String(n).lastIndexOf('.')).toLowerCase()))
   if (!list.length) return null
   const m = String(mood ?? '').trim()
   if (m) {
-    const hit = list.filter((n) => n.toLowerCase().includes(m.toLowerCase()))
-    if (hit.length) return { pick: hit[Math.floor(rand() * hit.length)], why: `名字里有「${m}」` }
+    const hit = list.filter((n) => matchMood(n, m))
+    if (hit.length) return { pick: hit[Math.floor(rand() * hit.length)], why: `这一类是「${m}」` }
   }
   return { pick: list[Math.floor(rand() * list.length)], why: m ? `没有「${m}」的，随便挑了一张` : '随便挑了一张' }
+}
+
+/**
+ * 按情绪筛出候选（预览用）。纯函数。
+ *
+ * 为什么要预览：`her_meme("生气")` 原来是在 14 张里随机——她不知道会发出哪张，
+ * 可能挑到「生气-刀1」那种太重的。选择权该在她手上，不在骰子上。
+ */
+export function listMood(names = [], mood = '') {
+  const list = (Array.isArray(names) ? names : [])
+    .filter((n) => MEME_EXT.includes(String(n).slice(String(n).lastIndexOf('.')).toLowerCase()))
+  const m = String(mood ?? '').trim()
+  if (!m) return list
+  // 没有这一类就返回空——预览要诚实。退回"全部"会让她看到一堆不相干的，
+  // 以为这些都能用来表达这个情绪。
+  return list.filter((n) => matchMood(n, m))
 }
 
 export function registerMeme(ctx, deps = {}) {
@@ -72,6 +112,14 @@ export function registerMeme(ctx, deps = {}) {
           required: true,
           description: '这一刻是什么感觉，一个词：开心 / 无语 / 生气 / 委屈 / 困 / 得意…',
         },
+        preview: {
+          type: 'boolean',
+          description: '只看这一类有哪些可选，不发。拿不准哪张合适时先看一眼。',
+        },
+        pick: {
+          type: 'string',
+          description: '指定发哪一张（预览里看到的文件名，写其中一段也行）。不填就随便挑一张。',
+        },
       }),
       output: {
         schema: {
@@ -81,11 +129,19 @@ export function registerMeme(ctx, deps = {}) {
             picked: { type: 'string' },
             why: { type: 'string' },
             note: { type: 'string' },
+            options: { type: 'array', items: { type: 'string' } },
+            more: { type: 'number' },
           },
           required: ['ok', 'note'],
         },
-        render: (_args, out) =>
-          [{ type: 'text', text: out.ok ? `[发了一张表情：${out.picked}]` : `[没发出去：${out.note}]` }],
+        render: (_args, out) => {
+          if (Array.isArray(out.options) && out.options.length) {
+            const more = Number(out.more) || 0
+            const tail = more > 0 ? ` …还有 ${more} 张` : ''
+            return [{ type: 'text', text: `[这一类有 ${out.options.length + more} 张：${out.options.join(' / ')}${tail}]` }]
+          }
+          return [{ type: 'text', text: out.ok ? `[发了一张表情：${out.picked}]` : `[没发出去：${out.note}]` }]
+        },
       },
       async execute(args, exec) {
         const who = guardWrite(deps.tenant, exec, 'her_meme')
@@ -97,7 +153,28 @@ export function registerMeme(ctx, deps = {}) {
         } catch {
           return { ok: false, picked: '', why: '', note: '你还没有表情包（memes 目录不存在）。' }
         }
-        const chosen = pickMeme(names, args?.mood, Math.random)
+        const mood = String(args?.mood ?? '').trim()
+
+        // 预览：只列这一类有哪些，不发。（选择权在她手上，不在骰子上）
+        if (args?.preview) {
+          const pool = listMood(names, mood)
+          if (!pool.length) return { ok: false, picked: '', why: '', note: '这一类没有表情。' }
+          const show = pool.slice(0, 14)
+          return { ok: true, picked: '', why: '', note: '', options: show, more: pool.length - show.length }
+        }
+
+        let chosen = null
+        const want = String(args?.pick ?? '').trim()
+        if (want) {
+          const pool = listMood(names, mood)
+          const hit = pool.find((n) => n === want) || pool.find((n) => n.includes(want))
+          if (!hit) {
+            return { ok: false, picked: '', why: '', note: `「${want}」不在${mood ? `「${mood}」里` : '表情库里'}。想看有哪些就先 preview。` }
+          }
+          chosen = { pick: hit, why: '你指定的' }
+        } else {
+          chosen = pickMeme(names, mood, Math.random)
+        }
         if (!chosen) {
           return { ok: false, picked: '', why: '', note: '你还没有表情包（memes 目录里没有图）。' }
         }
