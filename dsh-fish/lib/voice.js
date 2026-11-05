@@ -24,7 +24,7 @@
 
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
-import { mkdirSync, existsSync, unlinkSync } from 'node:fs'
+import { mkdirSync, existsSync, unlinkSync, writeFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 
 import { toJsonSchema } from './toolschema.js'
@@ -33,6 +33,7 @@ import { loadConfig } from './settings.js'
 import { deriveSelfCached } from './derive.js'
 import { defineTool } from './tool.js'
 import { guardWrite } from './tenant.js'
+import { detectFfmpeg } from './media.js'
 
 const run = promisify(execFile)
 
@@ -43,6 +44,74 @@ const PITCH = '-8Hz'
 
 /** 一次最多说多少字（约 200 字 ≈ 一分钟，再长没人听） */
 const MAX_CHARS = 200
+
+/**
+ * 切句：把一段话切成 2–4 段，用来并发合成（fork.51，2026-11-05）。
+ *
+ * 为什么值得切：edge-tts 的耗时大头是连接开销 + 逐句合成，
+ * 一整段 200 字要等 5–6 秒才听到第一个字。切成 3 段并发，
+ * 首声约等于「最长那一句」的时间（1.5–2 秒），拼回去只要 0.2 秒。
+ *
+ * 三条克制：
+ *   · 太短的段并进上一段——「嗯。」单独合成一次不值得；
+ *   · 段数上限 4——再多，连接开销反而盖过收益；
+ *   · 切不动就返回 1 段（调用方退回整段合成，不做无用功）。
+ *
+ * 导出是为了能单测：切句错了会让她的语气在句子中间断掉，这比慢更糟。
+ */
+export function splitForSpeech(text, { maxParts = 4, minChars = 8 } = {}) {
+  const s = String(text ?? '').trim()
+  if (!s) return []
+  // 按句末标点 / 换行切，标点留在前一段（edge-tts 靠它决定语调收尾）
+  const raw = s.match(/[^。！？!?；;\n]+[。！？!?；;\n]*/g) ?? [s]
+  const parts = []
+  for (const seg of raw) {
+    const t = seg.trim()
+    if (!t) continue
+    const prev = parts[parts.length - 1]
+    // 太短的一段并进上一段：单独合成一次「嗯。」只会多花一次连接
+    if (prev !== undefined && (t.length < minChars || prev.length < minChars)) {
+      parts[parts.length - 1] = prev + t
+    } else {
+      parts.push(t)
+    }
+  }
+  // 段太多：从尾部往前并，保住前几段的短（首声快）
+  while (parts.length > maxParts) {
+    const last = parts.pop()
+    parts[parts.length - 1] += last
+  }
+  return parts
+}
+
+/** 合成一段。失败就抛，由调用方决定回退。 */
+async function tts(text, file) {
+  await run(
+    pythonExe(),
+    ['-m', 'edge_tts', '--voice', VOICE, `--rate=${RATE}`, `--pitch=${PITCH}`, '--text', text, '--write-media', file],
+    { timeout: 90_000, windowsHide: true },
+  )
+}
+
+/**
+ * 把分片按顺序拼回一条 mp3。用 concat demuxer + copy——同参数同编码，
+ * 不重新编码，200 字大约 0.2 秒。
+ *
+ * list 文件放在同目录、只写文件名：Windows 上 ffmpeg 对绝对路径里的
+ * 反斜杠 + 单引号很挑，相对路径 + cwd 最不容易出事。
+ */
+async function concatMp3(dir, names, outName, bin) {
+  const listName = `list-${Date.now()}.txt`
+  const list = join(dir, listName)
+  writeFileSync(list, names.map((n) => `file '${n}'`).join('\n'), 'utf8')
+  try {
+    await run(bin, ['-y', '-f', 'concat', '-safe', '0', '-i', listName, '-c', 'copy', outName], {
+      timeout: 60_000, windowsHide: true, cwd: dir,
+    })
+  } finally {
+    try { unlinkSync(list) } catch { /* ignore */ }
+  }
+}
 
 /**
  * 找 python。她这台机器上装了 edge-tts 的是 WorkBuddy 自带的那个 3.13，
@@ -104,16 +173,36 @@ export function registerVoice(ctx, deps = {}) {
         const stamp = new Date().toISOString().replace(/[:.]/g, '-')
         const file = join(dir, `v-${stamp}.mp3`)
 
-        try {
-          await run(
-            pythonExe(),
-            ['-m', 'edge_tts', '--voice', VOICE, `--rate=${RATE}`, `--pitch=${PITCH}`, '--text', text, '--write-media', file],
-            { timeout: 90_000, windowsHide: true },
-          )
-        } catch (err) {
-          try { if (existsSync(file)) unlinkSync(file) } catch { /* ignore */ }
-          const why = String(err?.stderr ?? err?.message ?? err).slice(0, 120)
-          return { ok: false, seconds: 0, note: `声音没做出来：${why}` }
+        // fork.51：分句并发合成，再拼回一条。首声从「整段合成完」提前到
+        // 「最长那一句合成完」。任何一步失败都退回整段——不做没验证过的花活。
+        // 说话还是**一条**语音：分成好几条发，等于替她决定了几句话。
+        const parts = splitForSpeech(text)
+        let made = false
+        if (parts.length > 1) {
+          const ff = detectFfmpeg()
+          if (ff.ok) {
+            const base = `v-${stamp}`
+            const names = parts.map((_, i) => `${base}-${i}.mp3`)
+            try {
+              await Promise.all(parts.map((p, i) => tts(p, join(dir, names[i]))))
+              await concatMp3(dir, names, `${base}.mp3`, ff.bin)
+              made = existsSync(file) && statSync(file).size > 0
+            } catch { /* 下面退回整段 */ }
+            // 分片一律清掉：留着既占地方，也会被桥的目录扫描看到
+            for (const n of names) {
+              try { unlinkSync(join(dir, n)) } catch { /* ignore */ }
+            }
+            if (!made) { try { unlinkSync(file) } catch { /* ignore */ } }
+          }
+        }
+        if (!made) {
+          try {
+            await tts(text, file)
+          } catch (err) {
+            try { if (existsSync(file)) unlinkSync(file) } catch { /* ignore */ }
+            const why = String(err?.stderr ?? err?.message ?? err).slice(0, 120)
+            return { ok: false, seconds: 0, note: `声音没做出来：${why}` }
+          }
         }
 
         const { config } = await loadConfig(root)
