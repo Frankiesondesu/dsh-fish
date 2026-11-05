@@ -27,6 +27,7 @@ import { registerAsk } from './ask.js'
 import { registerAlarm } from './alarm.js'
 import { registerHelp } from './help.js'
 import { registerVoice } from './voice.js'
+import { registerMeme } from './meme.js'
 import { registerDream } from './dream.js'
 import { registerProactive } from './proactive.js'
 import { devModeSync } from './devmode.js'
@@ -401,6 +402,7 @@ export function apply(ctx, baseConfig = {}) {
         () => registerHelp(ctx, { root }),
         // fork.46（2026-11-04）：把一句话说成声音。说不说由她定，不是自动管道。
         () => registerVoice(ctx, { root, tenant: tenancy }),
+        () => registerMeme(ctx, { root, tenant: tenancy }),
         // 0.8.1 本机实验（2026-10-30 m02837）：梦 A 案——醒来记一句。
         // **只在 .dev 存在时注册**：公开版里她既没有这个工具，也不该在身份里读到它。
         ...(devModeSync(root) ? [() => registerDream(ctx, { root, tenant: tenancy })] : []),
