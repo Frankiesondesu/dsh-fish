@@ -378,6 +378,9 @@ async function main() {
     [18765, 'ASR'],
   ]
   for (const [port, name] of ports) {
+    // 只关一个时，别的还开着是应该的——报出来只会让人以为没关干净
+    // （2026-11-05 用户「只重启 DSH」时看到两条假的 ⚠️）
+    if (ONLY && ONLY !== name) continue
     if (await portOpen(port)) out(`  ⚠️ ${name} 的端口 ${port} 还占着`)
   }
 

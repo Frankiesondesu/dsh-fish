@@ -68,6 +68,9 @@ async function waitUntil(fn, ms, step = 500) {
 function portsFor(target) {
   if (target === '桥') return [6199]
   if (target === '查看器') return [7788]
+  // DSH 不占这两个端口（她的通路是动态端口，桥发消息前会自己重新发现）。
+  // 2026-11-05 用户选 3 时踩到：脚本傻等了 30 秒，还报了两条根本不成立的警告。
+  if (/^dsh$/i.test(target)) return []
   return [6199, 7788]
 }
 
