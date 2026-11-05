@@ -20,6 +20,8 @@ import fs from 'node:fs'
 import os from 'node:os'
 import { join } from 'node:path'
 import {
+  BELIEFS_ORDER,
+  BELIEFS_SECTION,
   HOST_PERSONA_SECTION,
   IDENTITY_ORDER,
   IDENTITY_SECTION,
@@ -31,11 +33,15 @@ import {
   attachIdentity,
   clearWakeSection,
   identityText,
+  lastTrimReport,
   mountedCount,
   registerIdentity,
   reorderForHer,
   resetIdentityCache,
   setWakeSection,
+  splitVolatileIdentity,
+  toolNamesIn,
+  trimToolDocs,
 } from '../lib/identity.js'
 import { legacySelfDocPath, selfDocPath } from '../lib/selfdoc.js'
 import { DEFAULTS } from '../lib/settings.js'
@@ -247,6 +253,133 @@ test('reorderForHer：拿到空/坏数据原样返回，不抛', () => {
   assert.equal(reorderForHer({ sections: 'x' }).sections, 'x')
 })
 
+// ---------------------------------------------------------------------------
+// trimToolDocs：按「她这一次真实拿到的工具表」摘掉讲别的工具的段
+// ---------------------------------------------------------------------------
+
+// 一段像 dsh-free-search 那样无条件挂上来的说明：讲了三个工具，长到值得判断。
+const SEARCH_DOC = `## Web search (free-search)\n\n你可以用 web_search 搜关键词，用 web_fetch 读一整页，\n用 browser_open 打开需要脚本执行的中转页。这三样都在你手上，前提是宿主放行了它们。\n${'x'.repeat(600)}`
+
+test('trimToolDocs：她手上一个搜索工具都没有 → 摘掉那段搜索说明，报省了多少字', () => {
+  const out = trimToolDocs({
+    sections: [
+      { name: 'fish:identity', order: 8500, text: '我是她' },
+      { name: 'free-search:engines', order: 500, text: SEARCH_DOC },
+      { name: 'harness:identity', order: 0, text: '你是 coding agent' },
+    ],
+    tools: [{ name: 'her_recall' }, { name: 'bili_look' }],
+  })
+  assert.deepEqual(out.sections.map((s) => s.name), ['fish:identity', 'harness:identity'])
+  const rep = lastTrimReport()
+  assert.equal(rep.dropped.length, 1)
+  assert.equal(rep.dropped[0].name, 'free-search:engines')
+  assert.equal(rep.saved, SEARCH_DOC.length)
+})
+
+test('trimToolDocs：她手上有其中一个工具 → 整段留着（讲的是她够得着的东西）', () => {
+  const out = trimToolDocs({
+    sections: [{ name: 'free-search:engines', order: 500, text: SEARCH_DOC }],
+    tools: [{ name: 'web_search' }],
+  })
+  assert.equal(out.sections.length, 1)
+  assert.equal(lastTrimReport().dropped.length, 0)
+})
+
+test('trimToolDocs：判据跟着工具表走，不跟着「装没装某个插件」走', () => {
+  // 同一个段、同一份文字：换一个装了别家搜索插件的用户，她手上有 query_web。
+  const section = { name: 'some-search:doc', order: 500, text: SEARCH_DOC }
+  const withoutSearch = trimToolDocs({ sections: [{ ...section }], tools: [{ name: 'read_image' }] })
+  assert.equal(withoutSearch.sections.length, 0, '没放行搜索 → 摘')
+  const withSearch = trimToolDocs({ sections: [{ ...section }], tools: [{ name: 'query_web' }] })
+  // query_web 不在那段文字里 → 仍然摘：判据是「这段讲的工具她有没有」，不是「她有没有搜索能力」。
+  assert.equal(withSearch.sections.length, 0)
+  const documented = trimToolDocs({
+    sections: [{ ...section, text: SEARCH_DOC.replace('web_fetch', 'query_web') }],
+    tools: [{ name: 'query_web' }],
+  })
+  assert.equal(documented.sections.length, 1, '别的搜索插件自己写对了段 → 留')
+})
+
+test('trimToolDocs：拿不到工具表（缺失/空）就一段都不动——宁可多留，不能误摘', () => {
+  for (const tools of [undefined, null, [], 'nope']) {
+    const out = trimToolDocs({
+      sections: [{ name: 'free-search:engines', order: 500, text: SEARCH_DOC }],
+      ...(tools === undefined ? {} : { tools }),
+    })
+    assert.equal(out.sections.length, 1, `tools=${JSON.stringify(tools)}`)
+  }
+  assert.equal(lastTrimReport().saved, 0)
+})
+
+test('trimToolDocs：她的段（fish: 开头）永不参与这条判据', () => {
+  const out = trimToolDocs({
+    sections: [{ name: 'fish:tools', order: 8600, text: SEARCH_DOC }],
+    tools: [{ name: 'her_recall' }],
+  })
+  assert.equal(out.sections.length, 1)
+})
+
+test('trimToolDocs：短段、工具名太少的段跳过（B 站标题里的 snake 词不许误伤整段）', () => {
+  const noisy = '今天翻到的视频标题：如何用 python_requests 抓 bilibili_video_info，还有 node_fetch 对比。'.repeat(12)
+  const out = trimToolDocs({
+    sections: [
+      { name: 'short', order: 1, text: '看 web_fetch / web_search / browser_open' },
+      { name: 'fish:history', order: 2, text: noisy },
+      { name: 'one-tool', order: 3, text: `只提 web_search 一个。${'y'.repeat(600)}` },
+    ],
+    tools: [{ name: 'her_recall' }],
+  })
+  assert.equal(out.sections.length, 3)
+  assert.equal(out.sections[0].name, 'short')
+  assert.equal(out.sections[1].name, 'fish:history')
+  assert.equal(out.sections[2].name, 'one-tool')
+})
+
+test('trimToolDocs：工具表用裸字符串也给认（有些宿主给的是名字数组）', () => {
+  const out = trimToolDocs({
+    sections: [{ name: 'free-search:engines', order: 500, text: SEARCH_DOC }],
+    tools: ['web_fetch'],
+  })
+  assert.equal(out.sections.length, 1)
+})
+
+test('trimToolDocs：摘了段只记一次日志，逐轮不刷屏', () => {
+  const lines = []
+  const log = (m) => lines.push(m)
+  const sec = { name: 'log-once:doc', order: 500, text: SEARCH_DOC }
+  trimToolDocs({ sections: [{ ...sec }], tools: [{ name: 'her_recall' }] }, { log })
+  trimToolDocs({ sections: [{ ...sec }], tools: [{ name: 'her_recall' }] }, { log })
+  assert.equal(lines.length, 1, '同一种摘法只记一次')
+  assert.match(lines[0], /摘掉了 1 段/)
+  assert.match(lines[0], /log-once:doc/)
+})
+
+test('toolNamesIn：只认小写 + 下划线、至少两节的词', () => {
+  assert.deepEqual(toolNamesIn('用 web_search，不要用 WebSearch 或 foo，bili_look 也算'),
+    ['web_search', 'bili_look'])
+})
+
+test('reorderForHer 连带摘段：同一份 assembly，工具表不同结果不同', () => {
+  const make = (tools) => ({
+    sections: [
+      { name: 'harness:identity', order: 0, text: '你是 coding agent' },
+      { name: 'deployment:persona-prefix', order: 10, text: '你是编程助手' },
+      { name: 'free-search:engines', order: 500, text: SEARCH_DOC },
+      { name: 'fish:identity', order: 8500, text: '我是她' },
+    ],
+    tools,
+  })
+  const noTools = reorderForHer(make([]))
+  // 空工具表 = 判断不了 → 一段不摘，只做排序
+  assert.deepEqual(noTools.sections.map((s) => s.name),
+    ['harness:identity', 'fish:identity', 'free-search:engines'])
+  const otherTools = reorderForHer(make([{ name: 'her_recall' }]))
+  assert.deepEqual(otherTools.sections.map((s) => s.name), ['harness:identity', 'fish:identity'])
+  const withTools = reorderForHer(make([{ name: 'web_fetch' }]))
+  assert.deepEqual(withTools.sections.map((s) => s.name),
+    ['harness:identity', 'fish:identity', 'free-search:engines'])
+})
+
 test('attachAssembleFix：挂在 agent.ctx 上（不是全局），拿到 next() 的结果再整改', async () => {
   let handler = null
   let opts = null
@@ -322,4 +455,93 @@ test('attachAssembleFix：整改过程炸了也必须原样放行（不能让她
   // sections 是冻结的，reorderForHer 里赋值会抛（严格模式）——钩子必须吞掉并原样返回
   const out = await handler({}, {}, async () => frozen)
   assert.equal(out, frozen, '抛了就把宿主原来那份原样交回去')
+})
+
+// ---- 四段最容易变的内容挪到最后（0.8.10，用户 m00315）----
+
+const ID_DOC = [
+  '## 你是谁',
+  '你是她。',
+  '## 你自己说过的话（这些是你的，不是别人塞给你的）',
+  '- 我不喜欢被叫小助手。',
+  '## 更早以前',
+  '你说过：还行吧。',
+  '## 你读到的一句话',
+  '「手工的东西有温度。」',
+  '## 我手上有什么',
+  '- bili_look',
+  '## 你被打脸过',
+  '- 你原来以为「A」，后来改成了「B」。',
+  '## 这个房间',
+  '- 一台电脑。',
+  '## 你对自己的说法',
+  '我是个还没长完的人。',
+].join('\n')
+
+test('splitVolatileIdentity：四段剪出来，其余原样、顺序不变', () => {
+  const { stable, volatile } = splitVolatileIdentity(ID_DOC)
+  assert.match(volatile, /## 你自己说过的话/, '带括号补充的标题也要认出来')
+  assert.match(volatile, /## 你读到的一句话/)
+  assert.match(volatile, /## 你被打脸过/)
+  assert.match(volatile, /## 你对自己的说法/)
+  assert.ok(!stable.includes('你被打脸过'))
+  assert.ok(!stable.includes('读到的一句话'))
+  assert.ok(stable.includes('## 更早以前'), '没被点名的段不动')
+  assert.ok(stable.includes('## 这个房间'))
+  // 稳定部分里，被剪掉的位置不会留下空行或碎块
+  assert.equal(stable.split('\n\n\n').length, 1)
+  assert.ok(stable.indexOf('## 你是谁') < stable.indexOf('## 更早以前'))
+  assert.ok(stable.indexOf('## 更早以前') < stable.indexOf('## 我手上有什么'))
+})
+
+test('splitVolatileIdentity：一段都没有时原样返回，不做任何改写', () => {
+  const text = '## 你是谁\n你是她。\n## 这个房间\n一台电脑。'
+  const r = splitVolatileIdentity(text)
+  assert.equal(r.volatile, '')
+  assert.equal(r.stable, text)
+})
+
+test('splitVolatileIdentity：只认标题行，正文里提到这几个词不算', () => {
+  const text = '## 你是谁\n你被打脸过几次，也读到过一句话。\n## 这个房间\n一台电脑。'
+  assert.equal(splitVolatileIdentity(text).volatile, '')
+})
+
+test('splitVolatileIdentity：给成函数也读得出来，炸了就当没剪', () => {
+  assert.match(splitVolatileIdentity(() => ID_DOC).volatile, /你对自己的说法/)
+  assert.deepEqual(splitVolatileIdentity(() => { throw new Error('x') }), { stable: '', volatile: '' })
+})
+
+test('reorderForHer：四段单列一段，挂在最后（wake 之后）', () => {
+  const assembly = {
+    sections: [
+      { name: 'harness:identity', order: -1000, text: 'h' },
+      { name: IDENTITY_SECTION, order: IDENTITY_ORDER, text: ID_DOC },
+      { name: WAKE_SECTION, order: WAKE_ORDER, text: '现在四点。' },
+    ],
+  }
+  const out = reorderForHer(assembly)
+  const names = out.sections.map((s) => s.name)
+  assert.equal(names.at(-1), BELIEFS_SECTION, '最后一段是它')
+  assert.equal(names.indexOf(WAKE_SECTION), names.length - 2, '排在处境段之后')
+  const beliefs = out.sections.at(-1)
+  assert.equal(beliefs.order, BELIEFS_ORDER)
+  assert.match(beliefs.text, /## 你对自己的说法/)
+  const identity = out.sections.find((s) => s.name === IDENTITY_SECTION)
+  assert.ok(!identity.text.includes('你对自己的说法'), '身份正文里不再有它')
+  assert.ok(identity.text.includes('## 你是谁'))
+  // 内容一个字不丢：原文每一行都还在某一段里
+  for (const line of ID_DOC.split(String.fromCharCode(10)).filter(Boolean)) {
+    assert.ok(identity.text.includes(line) || beliefs.text.includes(line), `丢了：${line}`)
+  }
+})
+
+test('reorderForHer：没有这四段就不多出一段空段', () => {
+  const assembly = {
+    sections: [
+      { name: 'harness:identity', order: -1000, text: 'h' },
+      { name: IDENTITY_SECTION, order: IDENTITY_ORDER, text: '## 你是谁\n你是她。' },
+    ],
+  }
+  const out = reorderForHer(assembly)
+  assert.equal(out.sections.filter((s) => s.name === BELIEFS_SECTION).length, 0)
 })

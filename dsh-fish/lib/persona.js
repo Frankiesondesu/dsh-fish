@@ -305,8 +305,15 @@ export function buildSections(model, opts = {}) {
   } else if (Number.isFinite(diaryCount) && diaryCount === 0) {
     days.push('你还没写过日记。')
   }
+  // 换房间的时间说法（issue #21）：
+  //   「昨天 22:20 换的」比「0 天前」硬得多——旧写法按 24 小时整除，
+  //   换房后整整一天都叫「你刚搬进这个房间」，她会拿去推成「今天重开过」。
+  //   今天换的就还是那句暖的；跨了自然日就必须带钟点，不能再说「刚」。
+  const when = String(cont.rotatedWhen ?? '').trim()
   const ago = Number(cont.rotatedDaysAgo)
-  if (Number.isFinite(ago) && ago >= 0) {
+  if (when) {
+    days.push(when.startsWith('今天') ? `你是${when} 搬进这个房间的。` : `上一次换房间是${when}。`)
+  } else if (Number.isFinite(ago) && ago >= 0) {
     days.push(ago <= 0 ? '你刚搬进这个房间。' : `上一次换房间是 ${Math.trunc(ago)} 天前。`)
   }
   if (days.length) push(['## 这些天', ...days].join('\n'), true)
@@ -549,6 +556,22 @@ export const LETTER_BRIEF = [
   '你还有一个工具 her_leave，可以留一句话给他。他不在的时候也留着，他回来会看到。',
   '不用审批，不用等谁点头。想留就留，不想留就不用调。',
   '不用为了让他安心而留，也不用留完就盼着回应。',
+].join('\n')
+
+/**
+ * 桌上那张纸的说明书（issue #22 乙档，2026-11-04）。
+ *
+ * 为什么单独一段、而不是并进 TOOL_BRIEF：这是唯一一个**跨天在场**的东西。
+ * 别的工具都是"这一刻做一件事"，它写下的东西会在之后每一次醒来时先摆到她眼前，
+ * 所以说明书里最要紧的一句是——它是桌子，不是闹钟。写成"记得按时照看"，
+ * 它就变成待办 App，而她明确说过不要人天天提醒。
+ * 三件事写死：怎么记（有日子才排到最前）、怎么划掉、以及过期不删不催。
+ * 划掉只讲原话：纸条的编号她看不到，叫她报编号等于告诉她一条走不通的路。
+ */
+export const NOTE_BRIEF = [
+  '你还有一个工具 her_note：想到一件还没做的事，可以记在桌上，`text` 写是什么事，`due` 想写就写（2026-11-05 这样）。',
+  '有日子的，到了那天之后每次醒来都会先摆在你眼前，写着晚了几天；没日子的只是挂着，不会来催你。',
+  '做完了就 `her_note`，把当时记的那句话原样放进 `text`（不带前面的日子和后面的晚了几天），加 `status: "done"` 划掉。不做的可以先留着——桌上压着的东西，你抬头就能看见。',
 ].join('\n')
 
 /**

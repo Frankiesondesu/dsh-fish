@@ -17,8 +17,7 @@ import { homedir } from 'node:os'
 import { readConfig, readEvents, readOwner } from './store.js'
 import { inWindow, dateKey } from './settings.js'
 import { detectFfmpeg } from './media.js'
-import { FISH_TOOLS, HER_TOOLS } from './restrict.js'
-import { devModeSync } from './devmode.js'
+import { FISH_TOOLS, HER_TOOLS, blockedTools } from './restrict.js'
 
 const MIN_NODE_MAJOR = 18
 
@@ -225,8 +224,8 @@ export async function runChecks(o = {}) {
   // 于是公开版装完自检必然报红：「有 1 个工具没注册上：her_dream」——
   // 和 2026-10-28 那次 read_image 误报同一类错误（拿「名单」当「真装上」的反面，
   // 这次是拿「本机清单」当「公开版清单」）。判据与注册处同一份：`devModeSync`。
-  const dev = devModeSync(root)
-  const expected = dev ? FISH_TOOLS : FISH_TOOLS.filter((n) => n !== 'her_dream')
+  // 0.9.0 起 her_dream 也恒注册，清单就是清单本身。
+  const expected = FISH_TOOLS
   const notRegistered = T && typeof T.get === 'function' ? expected.filter((n) => !T.get(n)) : []
   // read_image 是宿主的工具，别人的机器上可能没有。
   // 2026-10-28：以前它只是跟在「手上的工具」后面一句附注，而且那一项还是绿的。
@@ -310,6 +309,21 @@ export async function runChecks(o = {}) {
         detail: '查不准（宿主把 read_image 挂在会话那一层，这里看不见）。让她看一次画面就知道：能把画面内容讲出来，就是好的。',
       })
     }
+  }
+
+  // 「被挡住的调用」单列一项（2026-11-04，issue #20）。
+  // 以前她被拦下时只写一行日志：用户看到的是她答「这件事我做不到」，然后没有任何线索——
+  // issue 里那位翻了四小时日志才查出来是白名单少了一个名字。
+  // 只在**确实拦过东西**时才出这一项：没拦过就不摆一条绿条占地方。
+  const blockedNow = blockedTools()
+  if (blockedNow.length) {
+    const names = blockedNow.map((b) => b.name)
+    const worst = blockedNow[0]
+    push('tools-blocked', '被白名单挡住的调用', {
+      ok: false,
+      detail: `${names.length} 个工具被她伸手够过、但不在白名单里：${names.slice(0, 6).join(' / ')}${names.length > 6 ? ` 等 ${names.length} 个` : ''}。最常见的是 ${worst.name}（${worst.count} 次）。这几次她答的是「这件事我做不到」——不是坏了，是白名单没放行。`,
+      fix: '设置 → 鱼 →「手上能用什么」里点一下这些名字加进白名单，按保存、重启 DSH 就放开。不想让她用就留着——她本来也不该碰到它们。',
+    })
   }
 
   const bad = items.filter((x) => !x.ok)

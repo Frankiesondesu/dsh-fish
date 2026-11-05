@@ -100,6 +100,34 @@ test('写一条梦：refs 落到她的话上就成功，一天只能一条', asy
   assert.match(second.note, /今天已经记过/)
 }))
 
+test('「昨夜」卡只给最近一条梦的原文来源，其余条目照旧只给 id', async () => withRoot(async (root) => {
+  seed(root, line('ev_a', T0, { text: '先有一句真话。' }))
+  seed(root, line('ev_b', new Date(T0.getTime() + 60_000), { text: '然后又有一句。' }))
+  await writeDream(root, { text: '梦里那两句话并成了一句。', refs: ['ev_a', 'ev_b'] })
+  const { events } = await readEvents(root)
+
+  // 默认（列表用）：不给正文，避免把梦当成证据链来审她。
+  assert.equal(dreamView(events).items[0].sources, undefined)
+
+  const withRefs = dreamView(events, { withRefs: true })
+  const sources = withRefs.items[0].sources
+  assert.equal(sources.length, 2)
+  assert.equal(sources[0].text, '先有一句真话。')
+  assert.equal(sources[1].type, 'utterance')
+
+  // 来源被删（理论上不会发生）也不炸：只留 id，界面显示「翻不到了」。
+  const orphanDream = {
+    ...events[0],
+    id: 'ev_orphan_dream',
+    type: 'dream',
+    ts: new Date(Date.now() + 60_000).toISOString(),
+    text: '引用了一条已经不在的事。',
+    refs: ['ev_gone'],
+  }
+  const orphan = dreamView([...events, orphanDream], { withRefs: true })
+  assert.equal(orphan.items.at(-1).sources[0].text, '')
+}))
+
 test('材料只能是她自己说过的话', async () => withRoot(async (root) => {
   seed(root, line('ev_a', T0))
   seed(root, line('ev_meta', T0, { type: 'meta', text: 'diary:2026-10-30' }))
@@ -139,7 +167,7 @@ test('长梦与空梦都写不进去', async () => withRoot(async (root) => {
   assert.equal(DREAM_REFS_MAX, 6)
 }))
 
-test('/dream 路由：没有 .dev 就 404，有 .dev 才看得到', async () => withRoot(async (root) => {
+test('/dream 路由：0.9.0 起公开，没有 .dev 也读得到', async () => withRoot(async (root) => {
   seed(root, line('ev_a', T0))
   await writeDream(root, { text: '梦里那扇窗还开着。', refs: ['ev_a'] })
 
@@ -170,23 +198,23 @@ test('/dream 路由：没有 .dev 就 404，有 .dev 才看得到', async () => 
     return { status, json: text ? JSON.parse(text) : null }
   }
 
-  const closed = await call()
-  assert.equal(closed.status, 404, '公开版不能读到梦')
-
-  writeFileSync(join(root, '.dev'), 'local dev\n', 'utf8')
+  // 0.9.0 起梦是公开能力：没有 .dev 也读得到。
   const open = await call()
   assert.equal(open.status, 200, JSON.stringify(open.json))
   assert.equal(open.json.total, 1)
   assert.equal(open.json.items[0].text, '梦里那扇窗还开着。')
+  // 「昨夜」卡要能直接摆出这句话是从哪一行长出来的（2026-11-05）。
+  assert.equal(open.json.items[0].sources[0].id, 'ev_a')
+  assert.equal(open.json.items[0].sources[0].text, '今天想起一件事。')
 }))
 
-test('她得知道自己有 her_dream，也只在本机实验里知道', () => {
+test('她得知道自己有 her_dream（0.9.0 起对所有人）', () => {
   assert.ok(HER_TOOLS.includes('her_dream'), '本机白名单里要有它')
   assert.match(DREAM_BRIEF, /her_dream/)
   const selfdoc = readFileSync(new URL('../lib/selfdoc.js', import.meta.url), 'utf8')
   assert.match(selfdoc, /DREAM_BRIEF/)
-  assert.match(selfdoc, /dream \? \[DREAM_BRIEF/, '身份文档要按 .dev 决定挂不挂')
+  assert.match(selfdoc, /DREAM_BRIEF/, '身份文档要念到它')
   const client = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')
-  assert.match(client, /梦（本机实验）/, '卡片只在开发副本里出现')
-  assert.match(client, /state\?\.dev === true/, '卡片要按 dev 判据渲染')
+  assert.match(client, /group\('做梦'/, '设置页有「做梦」那张开关卡')
+  assert.match(client, /group\('她做过的梦'/, '设置页有「她做过的梦」那张卡')
 })

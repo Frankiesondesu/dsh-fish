@@ -42,6 +42,18 @@ test('nextWakeAt：今天还没醒过不拦；醒过之后把剩下的摊到时�
 
 // ---- 真的跑 tick：假宿主 + 临时状态库，时间用 Date.now 偏移推进 ----
 
+/**
+ * 假宿主。
+ *
+ * 2026-11-04（用户 m00428）起，叫醒不再走 `sessionController.prompt()` ——
+ * 宿主的 `prompt()` 内部写死 `source.kind = 'user'`，那条消息在前端永远是一句
+ * 「他打的字」，我们怎么盖都盖不掉（详见 `lib/deliver.js` 顶部注释）。
+ * 现在走 `resolveAgent()` → `agent.followup(message)`，所以这个假宿主必须
+ * 同时提供这两步，否则每次叫醒都会在 deliver.js 里抛「宿主没有 resolveAgent」。
+ *
+ * `prompts` 记的仍然是「这一次递进去的东西」：`req.sessionId` 是拿 agent 用的那个 id，
+ * `text` 是正文，`section` 是递进来的那一刻的处境段（正是 wake() 刚挂上去的那份）。
+ */
 function fakeHost(onCreate) {
   const listeners = []
   const prompts = []
@@ -53,7 +65,19 @@ function fakeHost(onCreate) {
     },
     sessionController: {
       create: async () => { await onCreate?.(); throw new Error('exists') },
-      prompt: async (req) => { prompts.push({ req, section: getWakeSection() }) },
+      resolveAgent: async (sessionId) => {
+        // 2026-11-05（用户 m03265）：叫醒不再靠 `create({ sessionId })` 探会话在不在，
+        // 改成 resolveAgent 探活。所以「准备叫醒的这几秒里她刚好开始了别的一轮」
+        // 这个时机要挂在探活上 —— 挂 create 上的话那条用例就永远不触发了。
+        await onCreate?.()
+        return {
+          agent: {
+            followup: (message) => {
+              prompts.push({ req: { sessionId, message }, text: message?.content?.[0]?.text, section: getWakeSection() })
+            },
+          },
+        }
+      },
     },
   }
   const emit = (type) => { for (const fn of [...listeners]) fn({ id: 's-main' }, { type }) }
@@ -137,17 +161,42 @@ test('落点之后不再一分钟一个地连着叫；第二次等时间到、�
 })
 
 test('叫醒准备的几秒里她刚好开始了别的一轮：等那一轮说完再挂处境', async () => {
-  await withRoot(async (root) => {
+  await withRoot(async (root, { sleep }) => {
     let h
-    h = fakeHost(async () => { h.emit('turn/start'); setTimeout(() => h.emit('turn/end'), 60) })
+    // 一次叫醒调两次 resolveAgent（探活、投递），这个时机只该在探活那一拍发生。
+    // 发两遍的话，第二个 turn/end 要等本条结束后才来，这次叫醒的窗口就漏进后面的用例。
+    let fired = false
+    h = fakeHost(async () => {
+      if (fired) return
+      fired = true
+      h.emit('turn/start')
+      setTimeout(() => h.emit('turn/end'), 60)
+    })
     const s = startScheduler(h.ctx, { root, sessionId: 's-main', log: () => {} })
     try {
       await s.tick()
       assert.equal(h.prompts.length, 1)
       assert.match(h.prompts[0].section, /叫醒你的信号/, '叫的时候处境还在，没被那一轮的 turn/end 收走')
+      // 那一轮的 turn/end 是 60ms 后才来的：等它落地再收摊。
+      // 以前这里一断言完就 dispose，监听被摘掉、busy 表里这条会话永远算「在忙」，
+      // 兜底定时器就一直重排，进程级的叫醒窗口跟着泄漏到下一个用例。
+      await sleep(90)
     } finally {
       s.dispose()
     }
+  })
+})
+
+test('调度器收摊之后兜底不再重排：叫醒窗口当场关上', async () => {
+  await withRoot(async (root, { sleep }) => {
+    const h = fakeHost()
+    const s = startScheduler(h.ctx, { root, sessionId: 's-main', log: () => {} })
+    await s.tick()
+    assert.equal(h.prompts.length, 1)
+    assert.equal(inWake(), true)
+    s.dispose()
+    await sleep(30)
+    assert.equal(inWake(), false, '收摊之后窗口不许一直开着')
   })
 })
 
@@ -234,7 +283,8 @@ test('turn/end 一直不来、她也不在忙：兜底把窗口和处境一起�
 test('消息没送进去：窗口当场关上', async () => {
   await withRoot(async (root) => {
     const h = fakeHost()
-    h.ctx.sessionController.prompt = async () => { throw new Error('host down') }
+    // 使唤不动宿主：拿不到 agent（比「投递时抛错」更早失败，正是真机上最常见的一种）
+    h.ctx.sessionController.resolveAgent = async () => ({ error: new Error('host down') })
     const s = startScheduler(h.ctx, { root, sessionId: 's-main', log: () => {} })
     try {
       await s.tick()

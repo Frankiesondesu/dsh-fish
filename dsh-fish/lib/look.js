@@ -157,7 +157,21 @@ export async function lookOnce(o = {}) {
       }
       // 今天真的看过的那一条：评论闸门认这一行（2026-10-28）。
       // 与 looked: 的区别是带日期——昨天看过的，今天不能拿去评。
-      await appendEvent({ type: 'meta', text: `look:${dk} ${p.video.bvid}`, ...stamp }, { ...who }, root).catch(() => {})
+      //
+      // 2026-11-04（用户 m02464）：原来这行只有 BV 号，于是日报「翻到过什么」里
+      // 由 look: 来的条目全成了「(无标题)」——同一份日报里，browse: 来的有标题、
+      // look: 来的没有，读者看到的是"坏数据"。whatseen.js 的 glancedItems()
+      // 早就写了三级兜底（browse 记账 → look 行自带 JSON → 只剩 BV 号），
+      // 但兜底第二级一直是空的，因为它找不到 JSON。
+      // 跟 watch.js 的 watched: 保持同一形状：展示信息跟着凭证一起落下来，
+      // 报告不必二次取数。老事件没有这段 JSON，读的一方两种形状都要认。
+      const info = {
+        title: String(p.video.title ?? '').slice(0, 120),
+        up: String(p.video.up ?? '').slice(0, 60),
+        duration: Number(p.video.duration) || 0,
+        view: Number(p.video.view) || 0,
+      }
+      await appendEvent({ type: 'meta', text: `look:${dk} ${p.video.bvid} ${JSON.stringify(info)}`, ...stamp }, { ...who }, root).catch(() => {})
     }
 
     // 评论区里别人的话（2026-10-24，用户 m02454）：她自己去看的时候也可能读到一句。
@@ -276,8 +290,8 @@ export function registerLook(ctx, deps = {}) {
         if (!who.ok) return { ok: false, text: '', note: who.note }
 
         const { config } = await loadConfig(root)
-        if (!config?.browse?.enabled) {
-          // 关掉时不能装作看了。但也不能说"管理员不让你看"——就说不通。
+        // 2026-11-05（用户 m02562）：能不能看由 bili.enabled 决定，不再借 browse 那个刷站开关。
+        if (config?.bili?.enabled === false) {
           return { ok: false, text: '', note: '现在打不开。' }
         }
         const r = await lookOnce({

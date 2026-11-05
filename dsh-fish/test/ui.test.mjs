@@ -135,3 +135,92 @@ test('反馈页：开发者 QQ + 群二维码都自带，不引外链（2026-10-
   assert.ok(/showTab\('feedback'\) \? feedbackPage : null/.test(src), '反馈页要挂进渲染树')
   assert.ok(/const feedbackPage = h\('div', \{ className: 'page' \}/.test(src), '要有 feedbackPage')
 })
+
+// ---------------------------------------------------------------------------
+// 「手上能用什么」按来源分组（2026-11-04，issue #20）
+//
+// 以前这里只有一个逗号分隔的输入框：用户既不知道这台机器上到底有哪些工具，
+// 也不知道该填哪个——只能去翻日志（issue 里那位翻了四小时）。
+// 这几条守的是「分组真的挂进了渲染树」和「界面不说系统词」。
+// ---------------------------------------------------------------------------
+
+test('工具分组：四组 chips 都挂进 toolsCard，且排在白名单输入框之前', async () => {
+  const src = await readFile(CLIENT, 'utf8')
+  const cardStart = src.indexOf('const toolsCard = h(')
+  assert.ok(cardStart > 0, '要能定位 toolsCard')
+  const card = src.slice(cardStart, src.indexOf('// 导入卡（2026-10-27）'))
+  assert.ok(card.includes('chipSection,'), '分组要真的挂进这张卡（源码里有、界面上点不到等于没做）')
+  const chipAt = card.indexOf('chipSection,')
+  const inputAt = card.indexOf("placeholder: '例如：skill, web_search, read_image")
+  assert.ok(chipAt > 0 && inputAt > chipAt, '分组清单要摆在输入框上面：先给可点的，再留手工兜底')
+
+  // 四组的标题必须在（组是空的就不摆，所以只查源码里有没有这四句）
+  for (const t of [
+    '她自己本来就有的（不用放行）',
+    '这台机器上还有这些',
+    '她本来就看得见、收窄挡不住的',
+    '这一局被挡下来过',
+  ]) {
+    assert.ok(src.includes(t), `分组标题要在：${t}`)
+  }
+})
+
+test('工具分组：页面一打开就拉 /tools（以前只在点保存时才拉，清单永远是空的）', async () => {
+  const src = await readFile(CLIENT, 'utf8')
+  const loadAt = src.indexOf('const load = useCallback(')
+  assert.ok(loadAt > 0)
+  const loadBody = src.slice(loadAt, loadAt + 6000)
+  assert.ok(loadBody.includes("jget('/tools')"), 'load() 里要拉一次工具名单')
+  // 四个字段都要灌进 state，缺一个界面上就有一组永远是空的
+  for (const setter of ['setToolsKnown', 'setToolsOwnLayer', 'setToolsHerTools', 'setToolsBlocked']) {
+    assert.ok(loadBody.includes(`${setter}(`), `load() 要灌 ${setter}`)
+  }
+})
+
+test('工具分组：界面文案不出现「权限/禁止/违规」这类系统词', async () => {
+  const src = await readFile(CLIENT, 'utf8')
+  const cardStart = src.indexOf('const toolsCard = h(')
+  const card = src.slice(cardStart, src.indexOf('// 导入卡（2026-10-27）'))
+  assert.doesNotMatch(card, /权限|禁止|违规|没有授权/, '这是「白名单没放行」，不是「权限不足」')
+})
+
+test('工具分组：被挡过的名字不在别的组里重复出现', async () => {
+  const src = await readFile(CLIENT, 'utf8')
+  // 同一个名字在屏幕上出现两次，用户会以为它们是两个不同的东西
+  assert.ok(src.includes('!blockedSet.has(n)'), 'known 那组要排掉被挡过的')
+  assert.ok(src.includes('const ownList = (toolsOwnLayer ?? []).filter((n) => !blockedSet.has(n))'), 'own 那组同理')
+})
+
+// 2026-11-04 用户反馈：真机一百多个胶囊全摊开，等于没有界面。
+test('工具分组：名字多的那一组默认收着，点一下才展开', async () => {
+  const src = await readFile(CLIENT, 'utf8')
+  // 默认收起——状态初始值不能是 true
+  assert.ok(src.includes('const [toolsOpenFams, setToolsOpenFams] = useState({})'), '展开状态初值要是空对象（即全收着）')
+  assert.match(src, /const famOpen = \(fam\) => toolsOpenFams\[fam\] === true/, '没点过的一律按收起算')
+  // 折叠条要真的能点，且展开后才渲染这一族的胶囊
+  assert.ok(src.includes("h('span', { className: 'famcaret' }"), '折叠条要有箭头，不然看不出能点')
+  assert.match(src, /famOpen\(g\.fam\)\s*\n?\s*\? h\('div', \{ key: `chips:\$\{g\.fam\}`, className: 'chips' \}/, '展开才渲染这一族的名字')
+  assert.ok(src.includes("famOpen('__loose')\n              ? h('div', { key: 'chips:__loose', className: 'chips' }"), '零散那一族同理')
+  // 归类只按名字前缀，不许猜「这个工具是干什么的」
+  assert.match(src, /const famOf = \(name\) => \{[\s\S]{0,160}indexOf\('_'\)/, '按第一个下划线切前缀')
+  // 只有一只的别单独占一行标题
+  assert.match(src, /if \(f && names\.length >= 2\) fams\.push/, '一族里至少两只才算一族')
+})
+
+test('工具分组：点名字只是起草，说明里必须写明还要按保存', async () => {
+  const src = await readFile(CLIENT, 'utf8')
+  assert.ok(src.includes("h('div', { className: 'chipsnote' }"), '要有显眼的说明块，不能只写在角落小字里')
+  const noteAt = src.indexOf("className: 'chipsnote'")
+  const note = src.slice(noteAt, noteAt + 700)
+  assert.ok(note.includes('还没生效'), '要说清点一下还没生效')
+  assert.ok(note.includes('保存设置'), '要说清还得按保存')
+  assert.ok(note.includes('重启'), '要说清重启才真的放开')
+})
+
+test('工具分组：全部展开/全部收起不会把外层那一块也收起来', async () => {
+  const src = await readFile(CLIENT, 'utf8')
+  const at = src.indexOf('const toggleAllFams = () =>')
+  assert.ok(at > 0)
+  const body = src.slice(at, at + 400)
+  assert.ok(body.includes('...prev'), '要基于上一份状态改，别整个覆盖（否则外层 __other 被清掉，点一次反而整块收起）')
+})

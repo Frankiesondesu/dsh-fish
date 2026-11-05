@@ -12,7 +12,10 @@
  *   没有任何指向她本人的控件 —— 那是 B §8 的红线。
  */
 window.__ModuleLoader__.load({
-  id: 'dsh-fish',
+  // 这个 id 必须**等于 package.json 的包名**，不是短名：client-modules 用 loader
+  // 条目名（完整包标识）去解析浏览器 bundle，注册时名字对不上，这一节就静默挂不上
+  // ——宿主那半边照常跑，设置页却什么也不显示（2026-11-05 改名 @ssamurias/dsh-fish 后踩过）。
+  id: '@ssamurias/dsh-fish',
   factory: (require) => {
     const module = { exports: {} }
     const exports = module.exports
@@ -78,6 +81,25 @@ window.__ModuleLoader__.load({
       '.dfish ul{margin:0;padding-left:17px;font-size:13px;line-height:20px}',
       '.dfish li{margin:3px 0}',
       '.dfish .tag{display:inline-block;padding:0 6px;border-radius:999px;border:.5px solid var(--dsw-alias-border-l2);font-size:11px;color:var(--dsw-alias-label-tertiary);margin-left:6px}',
+      // 工具分组胶囊（2026-11-04，issue #20）。以前只有一个逗号分隔的输入框，
+      // 用户既不知道这台机器上到底有哪些工具，也不知道该填哪个——只能去翻日志。
+      // 现在按来源分组摆出来，点一下就是加/减白名单，输入框退成手工兜底。
+      '.dfish .chips{display:flex;flex-wrap:wrap;gap:6px;margin:5px 0 0}',
+      '.dfish .chip{background:transparent;border:.5px solid var(--dsw-alias-border-l2);border-radius:999px;color:var(--dsw-alias-label-secondary,var(--dsw-alias-label-tertiary));font-size:11.5px;height:22px;padding:0 9px;cursor:pointer;white-space:nowrap}',
+      '.dfish .chip:hover:not(:disabled){border-color:var(--dsw-alias-state-business-primary);color:var(--dsw-alias-state-business-primary)}',
+      '.dfish .chip.on{border-color:var(--dsw-alias-state-business-primary);color:var(--dsw-alias-state-business-primary);background:rgba(128,128,128,.10)}',
+      '.dfish .chip.her{cursor:default;opacity:.8}',
+      '.dfish .chip.blk{border-style:dashed}',
+      '.dfish .grouphd{font-size:11.5px;line-height:17px;color:var(--dsw-alias-label-tertiary);margin:11px 0 0}',
+      // 折叠条（2026-11-04，用户反馈）：一百多个胶囊全摊开等于没有界面。
+      // 按名字前缀分族、默认全收着，点哪族开哪族。
+      '.dfish .famhd{display:flex;align-items:center;gap:6px;width:100%;height:24px;text-align:left;background:transparent;border:0;border-radius:6px;color:var(--dsw-alias-label-secondary,var(--dsw-alias-label-tertiary));font-size:12px;line-height:18px;padding:0 4px;margin:3px 0 0;cursor:pointer}',
+      '.dfish .famhd:hover:not(:disabled){background:rgba(128,128,128,.10);color:var(--dsw-alias-label-primary)}',
+      '.dfish .famhd .famcaret{flex:none;width:9px;font-size:10px;opacity:.7}',
+      '.dfish .famhd .famname{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:ui-monospace,Consolas,monospace}',
+      '.dfish .famhd .famcnt{flex:none;font-size:11px;color:var(--dsw-alias-label-tertiary)}',
+      '.dfish .famhd.open .famname{color:var(--dsw-alias-label-primary)}',
+      '.dfish .chipsnote{font-size:11.5px;line-height:17px;color:var(--dsw-alias-label-tertiary);background:rgba(128,128,128,.07);border-radius:6px;padding:6px 8px;margin:0 0 4px}',
       '.dfish pre{margin:0;white-space:pre-wrap;word-break:break-word;font-size:12px;line-height:18px;color:var(--dsw-alias-label-secondary,inherit);font-family:ui-monospace,Consolas,monospace}',
       '.dfish .empty{color:var(--dsw-alias-label-tertiary);font-size:13px;margin:0}',
       '.dfish .dim{color:var(--dsw-alias-label-tertiary);font-size:12px}',
@@ -307,6 +329,14 @@ window.__ModuleLoader__.load({
       const [toolsKnown, setToolsKnown] = useState(null)
       // 看得见、但收窄挡不住的那些（own 层，比如 dsh-ops 的 ops_*）。白名单放行 = 守卫放行。
       const [toolsOwnLayer, setToolsOwnLayer] = useState([])
+      // 这个进程里被兜底守卫真挡下来的工具（2026-11-04，issue #20）。
+      // 进来之前它只活在日志里——而她答「这件事我做不到」的时候，用户唯一的线索就是这里。
+      const [toolsBlocked, setToolsBlocked] = useState([])
+      // 她自己本来就有的那几件（服务端给的真名单，不是界面硬编码）。
+      const [toolsHerTools, setToolsHerTools] = useState([])
+      // 工具分组的展开状态（2026-11-04，用户反馈）：真机上一百多个名字全摊开，
+      // 等于没有界面。默认全收起来，点哪个前缀才展开哪一组。
+      const [toolsOpenFams, setToolsOpenFams] = useState({})
       const [toolsSaveNote, setToolsSaveNote] = useState('')
       const [toolsSaveErr, setToolsSaveErr] = useState('')
       // 运行日志（2026-10-24）：只在点开时才读，不参与 30 秒轮询。
@@ -355,6 +385,12 @@ window.__ModuleLoader__.load({
       const [proactiveOn, setProactiveOn] = useState(false)
       const [proactiveMax, setProactiveMax] = useState(2)
       const [proactiveIdle, setProactiveIdle] = useState(6)
+      // 2026-11-05（用户 m02634）：梦 / 主动性 / 兴趣 三个开关，默认全开。
+      const [driveOn, setDriveOn] = useState(true)
+      const [interestOn, setInterestOn] = useState(true)
+      const [dreamEnabled, setDreamEnabled] = useState(true)
+      // 空醒开关（0.9.0 公开）：醒来时没派活、桌上也没东西，她可以自己找点事做。
+      const [selfWakeOn, setSelfWakeOn] = useState(true)
       const [avoidText, setAvoidText] = useState('')
       // 刷站（全是环境参数：她今天能不能出门、一次看见几条，不是她爱看什么）
       const [browseOn, setBrowseOn] = useState(true)
@@ -568,6 +604,10 @@ window.__ModuleLoader__.load({
             setProactiveMax(Number(pr.maxPerDay ?? 2))
             setProactiveIdle(Number(pr.minIdleHours ?? 6))
           }
+          setDriveOn(s.config?.drive?.enabled !== false)
+          setInterestOn(s.config?.interest?.enabled !== false)
+          setDreamEnabled(s.config?.dream?.enabled !== false)
+          setSelfWakeOn(s.config?.memory?.selfWake !== false)
 
           // 不再拉 /events（2026-11-02，用户 m00335）：这里取回来的 e.rows 只进了
           // setEvents，全文件没有一处渲染它——每 30 秒白拉 25 条事件（九成是后台记账）。
@@ -615,6 +655,16 @@ window.__ModuleLoader__.load({
             setAvatarPresent(Boolean(r && r.present))
             setAvatarBytes(Number(r && r.bytes) || 0)
           }).catch(() => {})
+          // 工具名单（2026-11-04，issue #20）：以前只在点「保存设置」时才拉一次，
+          // 于是页面一打开，分组清单永远是空的——用户看不出这台机器上到底有哪些工具，
+          // 也看不出哪几个真被挡过。这里跟其它只读卡片一样静默失败，不影响别处。
+          jget('/tools').then((r) => {
+            if (!r) return
+            setToolsKnown(Array.isArray(r.known) ? r.known : null)
+            setToolsOwnLayer(Array.isArray(r.ownLayer) ? r.ownLayer : [])
+            setToolsHerTools(Array.isArray(r.herTools) ? r.herTools : [])
+            setToolsBlocked(Array.isArray(r.blocked) ? r.blocked : [])
+          }).catch(() => {})
           // 规则与解禁（R3）：失败不影响其它卡片
           jget('/rules').then(setRules).catch(() => {})
           // 运行日志：失败就当没这回事（日志本身坏了不该拖垮设置页）
@@ -637,6 +687,10 @@ window.__ModuleLoader__.load({
           setBrowseDanmaku(Number(cfg.browse?.danmaku ?? 6))
           setBiliMinGap(Number(cfg.bili?.minIntervalMs ?? 800))
           setBiliJitter(Number(cfg.bili?.jitterMs ?? 500))
+          setDriveOn(cfg.drive?.enabled !== false)
+          setInterestOn(cfg.interest?.enabled !== false)
+          setDreamEnabled(cfg.dream?.enabled !== false)
+          setSelfWakeOn(cfg.memory?.selfWake !== false)
           setNotifyOn(cfg.notify?.enabled === true)
           setCommentOn(cfg.comment?.enabled === true)
           setCommentPerDay(Number(cfg.comment?.perDay ?? 1))
@@ -866,6 +920,14 @@ window.__ModuleLoader__.load({
         } catch (e) { setSaveFail(e.message) }
       }
 
+      // 顶层那三个开关（梦 / 主动性 / 兴趣）：各写各的组，互不覆盖。
+      const patchGroup = async (key, patch) => {
+        try {
+          await jpost('/config', { [key]: patch })
+          flashSaved()
+        } catch (e) { setSaveFail(e.message) }
+      }
+
       // 改完就生效：任何一项变了，停手 700ms 就写盘（连点加减号也只写一次）。
       const cfgSig = JSON.stringify(buildConfig())
       useEffect(() => {
@@ -910,6 +972,7 @@ window.__ModuleLoader__.load({
             if (names && names.length) { known = names; setToolsKnown(names) }
             own = Array.isArray(r?.ownLayer) ? r.ownLayer : []
             setToolsOwnLayer(own)
+            setToolsBlocked(Array.isArray(r?.blocked) ? r.blocked : [])
           } catch { /* 拿不到就沿用旧名单，只查拼写 */ }
           const check = checkToolNames(toolsAllowText, known)
           if (!check.ok) {
@@ -1307,6 +1370,147 @@ window.__ModuleLoader__.load({
       // 定时工具是宿主给的、默认不放（用户 m04504）：用户自己加进白名单之后，
       // 这里才改口说「她能自己定提醒」——界面不替配置撒谎。
       const scheduleOn = (toolsAllowSaved ?? []).some((n) => String(n).trim() === 'schedule_create')
+
+      // ---- 工具分组（2026-11-04，issue #20）----
+      // 以前这里只有一个空输入框：用户既不知道这台机器上到底有哪些工具，也不知道该填哪个，
+      // 只能去翻日志或者凭猜。现在按来源分组摆出来，点一下就是加/减白名单；
+      // 输入框留着当手工兜底（批量粘贴、填还没注册的名字）。
+      const allowList = String(toolsAllowText || '').split(',').map((s) => s.trim()).filter(Boolean)
+      const toggleTool = (name) => {
+        const next = allowList.includes(name) ? allowList.filter((n) => n !== name) : [...allowList, name]
+        setToolsAllowText(next.join(', '))
+        setToolsSaveNote('')
+        setToolsSaveErr('')
+      }
+      const herList = Array.isArray(toolsHerTools) ? toolsHerTools : []
+      const herSet = new Set(herList)
+      const ownSet = new Set(toolsOwnLayer ?? [])
+      const blockedList = (toolsBlocked ?? []).map((b) => (typeof b === 'string' ? { name: b } : b)).filter((b) => b && b.name)
+      const blockedSet = new Set(blockedList.map((b) => b.name))
+      const knownList = Array.isArray(toolsKnown) ? toolsKnown : []
+      // 她自己那几件和 own 层都单独摆，剩下的才是「装了但没放行」的全量名单。
+      // 被挡过的那几只已经在最后一组里挂着次数了，这里不再重复摆一遍——
+      // 同一个名字在屏幕上出现两次，用户会以为它们是两个不同的东西。
+      const otherList = knownList.filter((n) => !herSet.has(n) && !ownSet.has(n) && !blockedSet.has(n)).sort()
+      const ownList = (toolsOwnLayer ?? []).filter((n) => !blockedSet.has(n))
+
+      // ---- 名字多的那一组按前缀收起来（2026-11-04，用户反馈）----
+      // 真机上「装了但没放行」能有一百多个名字，全摊开等于没有界面。
+      // 归类只按名字本身（第一个下划线之前那截）算一族，不去猜每个工具是干什么的——
+      // 猜错了分类比不分类更糟，而且工具名一改分类就全乱。
+      // 一族里只有一只的并进「零散」，免得每个孤名占一行标题。
+      const famOf = (name) => {
+        const i = String(name).indexOf('_')
+        return i > 0 ? String(name).slice(0, i) : ''
+      }
+      const famBuckets = new Map()
+      for (const n of otherList) {
+        const f = famOf(n)
+        if (!famBuckets.has(f)) famBuckets.set(f, [])
+        famBuckets.get(f).push(n)
+      }
+      const loose = []
+      const fams = []
+      for (const [f, names] of famBuckets) {
+        if (f && names.length >= 2) fams.push({ fam: f, names })
+        else loose.push(...names)
+      }
+      fams.sort((a, b) => b.names.length - a.names.length || a.fam.localeCompare(b.fam))
+      loose.sort()
+      // 默认全收着。已经点开的就记住——保存/刷新一次页面不该把用户翻到一半的组收回去。
+      const famOpen = (fam) => toolsOpenFams[fam] === true
+      const toggleFam = (fam) => setToolsOpenFams((prev) => ({ ...prev, [fam]: !prev[fam] }))
+      const allFamsOpen = fams.length > 0 && fams.every((g) => famOpen(g.fam))
+      // 只在族这一层翻，别把外层「这台机器上还有这些」的状态一起清掉——
+      // 清掉的话点一次「全部展开」反而把整块收起来了。
+      const toggleAllFams = () => {
+        setToolsOpenFams((prev) => {
+          const next = { ...prev }
+          for (const g of fams) next[g.fam] = !allFamsOpen
+          if (loose.length) next['__loose'] = !allFamsOpen
+          return next
+        })
+      }
+      const toolChip = (name, kind, count) => h('button', {
+        key: `${kind}:${name}`,
+        className: `chip${kind === 'her' ? ' on her' : ''}${allowList.includes(name) && kind !== 'her' ? ' on' : ''}${kind === 'blk' ? ' blk' : ''}`,
+        title: kind === 'her'
+          ? '她自己本来就有的，不用放行'
+          : kind === 'blk'
+            ? `这一局被兜底守卫挡下来过${count ? ` ${count} 次` : ''}——她当时答的就是「这件事我做不到」`
+            : '点一下加进/移出白名单',
+        disabled: kind === 'her',
+        onClick: kind === 'her' ? undefined : () => toggleTool(name),
+      }, kind === 'blk' && count > 1 ? `${name} ×${count}` : name)
+      const groupOf = (title, hint, nodes) => (nodes && nodes.length
+        ? [h('div', { className: 'grouphd' }, title),
+           hint ? h('div', { className: 'grouphd', style: { marginTop: '2px' } }, hint) : null,
+           h('div', { className: 'chips' }, nodes)]
+        : [])
+      // 一族一行的折叠条：点标题展开这一族，右边挂个数。
+      const famRow = (key, label, count, open, onToggle) => h('button', {
+        type: 'button',
+        key,
+        className: `famhd${open ? ' open' : ''}`,
+        onClick: onToggle,
+      },
+      h('span', { className: 'famcaret' }, open ? '▾' : '▸'),
+      h('span', { className: 'famname' }, label),
+      h('span', { className: 'famcnt' }, String(count)))
+      // 「装了但没放行」单独折一层：真机上能有一百多个，摊开就没法看了。
+      // 外层收着，点开才看见有哪些族；族再各自收着，点哪族开哪族。
+      const otherOpen = famOpen('__other')
+      const otherGroups = otherOpen
+        ? [
+            h('div', { key: 'famall', className: 'row', style: { gap: '8px', margin: '6px 0 2px' } },
+              h('button', { type: 'button', onClick: toggleAllFams }, allFamsOpen ? '全部收起' : '全部展开')),
+            ...fams.flatMap((g) => [
+              famRow(`fam:${g.fam}`, `${g.fam}_…`, g.names.length, famOpen(g.fam), () => toggleFam(g.fam)),
+              famOpen(g.fam)
+                ? h('div', { key: `chips:${g.fam}`, className: 'chips' }, g.names.map((n) => toolChip(n, 'other')))
+                : null,
+            ]),
+            loose.length
+              ? famRow('fam:__loose', '零散的（凑不成一族）', loose.length, famOpen('__loose'), () => toggleFam('__loose'))
+              : null,
+            loose.length && famOpen('__loose')
+              ? h('div', { key: 'chips:__loose', className: 'chips' }, loose.map((n) => toolChip(n, 'other')))
+              : null,
+          ]
+        : []
+      const chipSection = (herList.length || knownList.length || blockedList.length)
+        ? h('div', { style: { marginTop: '10px' } },
+            // 用户明确要求写在明面上：点名字只是起草，不按保存不生效。
+            h('div', { className: 'chipsnote' },
+              '点名字 = 把那个工具名写进下面的白名单输入框，这时还没生效；要再按一次「保存设置」才写盘，重启 DSH 之后才真的放开。'),
+            ...groupOf('她自己本来就有的（不用放行）', null, herList.map((n) => toolChip(n, 'her'))),
+            otherList.length
+              ? [
+                  famRow('fam:__other', '这台机器上还有这些（装了但没放行）', otherList.length, otherOpen, () => toggleFam('__other')),
+                  h('div', { key: 'famhint', className: 'grouphd', style: { marginTop: '2px' } },
+                    otherOpen
+                      ? '按名字前缀分了几族，点哪族开哪族。加进来之后她下一轮就能用，代价是工具定义会占掉一部分上下文。'
+                      : '装了但没放行就是这些。点一下展开，按前缀分族挑。'),
+                  ...otherGroups,
+                ]
+              : [],
+            ...groupOf(
+              '她本来就看得见、收窄挡不住的（加进来只是让兜底守卫放行）',
+              null,
+              ownList.map((n) => toolChip(n, 'own')),
+            ),
+            ...groupOf(
+              `这一局被挡下来过（${blockedList.length} 个，虚线）`,
+              '她答「这件事我做不到」很可能就是因为它们。点一下加进白名单，重启后才算放开。',
+              blockedList.map((b) => toolChip(b.name, 'blk', b.count)),
+            ),
+            h('div', { className: 'dim', style: { marginTop: '8px' } },
+              toolsRestrict
+                ? '改动都要先按「保存设置」写盘，再重启 DSH 才生效。'
+                : '收窄现在是关着的，这些名字加不加都不影响她——关着的时候宿主给的工具她全看得见。'))
+        : h('div', { className: 'dim', style: { marginTop: '8px' } },
+            '她还没在这台机器上开过会话，宿主那边暂时给不出工具名单。等她和你说过话再回来看这里，就有一份可点的清单了。')
+
       const toolsCard = h('div', { className: 'card' },
         h('h3', null, '手上能用什么'),
         h('div', { className: 'dim' },
@@ -1326,6 +1530,7 @@ window.__ModuleLoader__.load({
           on: toolsRestrict,
           onChange: setToolsRestrict,
         })),
+        chipSection,
         h('div', { className: 'dim', style: { marginTop: '8px' } },
           '插件能力白名单（逗号分隔，留空 = 不额外给）。填的是工具名称，不是插件名称，也不是技能名称。',
           '想要技能生效就得填 skill——代价是 DSH 会把所有技能的说明一次性塞进她的上下文，暂不支持只启用某几个技能。',
@@ -1964,21 +2169,48 @@ window.__ModuleLoader__.load({
               hint: '超过这么多天没说话，她会记下「你不在」。' }))),
         // 主动说话（0.8.1 本机实验）：只有 .dev 下才出现。频率是上限，不是任务——
         // 开关开着也不代表她每天都会说，说不说由她自己判断（见 lib/proactive.js）。
-        state?.dev === true ? group('主动说话（本机实验）',
-          '她想说话的时候可以自己开口，不是被提醒推着说。这里调的是「最多说几次」和「多久没说话才可能开口」，不是命令她每天必须说。',
+        // 主动搭话（0.8.1 起，0.9.0 公开）：只留三件跟「开口」直接有关的事。
+        // 劲儿与兴趣是另一套东西，各自一张卡——混在一张卡里，用户分不清哪一项在管什么。
+        group('主动搭话',
+          '她可以自己找你说话，不用你先开口。这里调的是上限：开着也可能好几天不说，那是她的判断，不是坏了。',
           h('div', { className: 'grid2' },
             Toggle({ label: '允许她主动开口', on: proactiveOn,
               onChange: (v) => { setProactiveOn(v); patchProactive({ enabled: v }) },
-              hint: '关着就等于没有这个功能。开着也可能好几天不说——那是她的判断，不是故障。' }),
+              hint: '关掉就完全没有这个功能。' }),
             Sel({ label: '一天最多几次', value: proactiveMax,
               onChange: (v) => { setProactiveMax(v); patchProactive({ maxPerDay: Number(v) }) },
               options: [0, 1, 2, 3, 4, 5, 6],
               fmt: (v) => (Number(v) === 0 ? '0 次 · 不主动' : `最多 ${v} 次`),
-              hint: '上限，不是配额。到了上限只是不能再开新的空手回合，第二天照常。' }),
-            Num({ label: '多久没说话才可能开口', value: proactiveIdle,
+              hint: '上限，不是任务。到了上限只是今天不再多开一轮，第二天照常。' }),
+            Num({ label: '你多久没说话，她才可能开口', value: proactiveIdle,
               onChange: (v) => { setProactiveIdle(v); patchProactive({ minIdleHours: Number(v) }) },
               min: 1, max: 24, unit: '小时',
-              hint: '越久没说话，开口的概率越高（有上限）。刚聊完不会立刻再开一次。' }))) : null,
+              hint: '越久没说话，她越可能开口（有上限）。刚聊完不会马上又来找你。' }))),
+        // 主观能动性：不是「定时叫她说话」，而是她心里慢慢攒的一股劲。
+        group('主观能动性',
+          '她心里会慢慢攒一股想动的劲：越久没自己动过、桌上越有值得看的东西，攒得越快。攒够了才会自己醒一次——不按钟点，也不是每天必须。',
+          h('div', { className: 'grid2' },
+            Toggle({ label: '让她自己攒这股劲', on: driveOn,
+              onChange: (v) => { setDriveOn(v); patchGroup('drive', { enabled: v }) },
+              hint: '关掉：她不会自己开一轮，只在你叫她、或者日程到点时才醒。已经发生的事不受影响。' }))),
+        // 兴趣与惦记：她醒来时桌上摆的那几样东西。
+        group('兴趣',
+          '她醒来的时候，桌上会摆几样她自己的东西：问过还没答案的问题、翻到过的旧句子、你回没回她留的那句话、最近总说到的那件事。这些只给她看，不会变成待办。',
+          h('div', { className: 'grid2' },
+            Toggle({ label: '醒来时把这些摆出来', on: interestOn,
+              onChange: (v) => { setInterestOn(v); patchGroup('interest', { enabled: v }) },
+              hint: '关掉：只叫醒，桌上不放东西。' })),
+          h('div', { className: 'grid2' },
+            Toggle({ label: '醒着没事时，自己找点事做', on: selfWakeOn,
+              onChange: (v) => { setSelfWakeOn(v); patchGroup('memory', { selfWake: v }) },
+              hint: '她醒来时没有派活、桌上也没有东西，可以自己翻翻旧句子、写点什么，或者什么都不做。关掉只影响「自己找事做」这一种醒来。' }))),
+        // 梦：独立一张卡（用户 m02765 要求从「日记」里拿出来——它跟日记不是一件事）。
+        group('做梦',
+          '她醒来可以记一句梦。梦只能用她自己说过的话拼出来，不会改任何设置，也不算成长。',
+          h('div', { className: 'grid2' },
+            Toggle({ label: '允许她记梦', on: dreamEnabled,
+              onChange: (v) => { setDreamEnabled(v); patchGroup('dream', { enabled: v }) },
+              hint: '关掉后不再记新的，已经记下的一条不删。' }))),
         group('日记',
           '她每天会写日记。打开下面那个开关，你就能看。',
           h('div', { className: 'grid2' },
@@ -2131,6 +2363,42 @@ window.__ModuleLoader__.load({
                 diaryCache.current[diaryCur] === undefined
                   ? h('p', { className: 'empty' }, '读取中…')
                   : h('pre', null, esc(diaryCache.current[diaryCur])))),
+
+        // ---- 梦（2026-10-30 m02837；0.9.0 起对所有人显示；2026-11-05 用户 m03247 搬到住所页，和日记、小纸条放一起）----
+        // 0.9.0 拆了 .dev 门：her_dream 对所有人注册，`/dream` 也不再 404，所以这张卡不再按 dev 藏。
+        // 2026-11-05：改成「昨夜」一张卡——梦不是她的成长数据，是一句给她自己和给你看的话。
+        // 卡片右下角把她引用的那几行原文摆出来，让你一眼看见这句梦是从哪儿长出来的。
+        group('她做过的梦',
+          '她偶尔会把真实发生过的事重新拼成一句梦；不算成长，也不会被当成新的记忆。',
+          !dreams ? h('p', { className: 'dim' }, '还没读到。')
+            : !(dreams.items ?? []).length ? h('p', { className: 'dim' }, '她还没记过梦。')
+            : (() => {
+                const list = dreams.items ?? []
+                const latest = list[list.length - 1]
+                const older = list.slice(0, -1).reverse().slice(0, 5)
+                const when = (ts) => {
+                  const d = new Date(ts)
+                  if (!Number.isFinite(d.getTime())) return ''
+                  const hours = (Date.now() - d.getTime()) / 3_600_000
+                  return hours >= 0 && hours <= 30 ? '昨夜' : `${d.getMonth() + 1} 月 ${d.getDate()} 日`
+                }
+                return h('div', null,
+                  h('div', { className: 'hint', style: { margin: '0 0 4px' } }, when(latest.ts)),
+                  h('div', { style: { fontSize: '15px', lineHeight: 1.8 } }, latest.text),
+                  (latest.sources ?? []).length
+                    ? h('div', { style: { marginTop: '10px' } },
+                        h('div', { className: 'dim', style: { margin: '0 0 3px' } }, '这句话是从这几行长出来的'),
+                        ...latest.sources.map((s) => h('div', { className: 'dim', key: s.id },
+                          s.text ? `「${s.text}」` : `（这条已经翻不到了：${s.id}）`)))
+                    : null,
+                  older.length
+                    ? h('div', { style: { marginTop: '12px' } },
+                        h('div', { className: 'dim' }, `更早的 ${list.length - 1} 条`),
+                        ...older.map((d) => h('div', { key: d.id, style: { marginTop: '6px' } },
+                          h('div', { className: 'hint', style: { margin: '0 0 2px' } }, `${d.day} · 引用了 ${(d.refs ?? []).length} 件`),
+                          h('div', null, d.text))))
+                    : null)
+        })),
 
         inboxCard,
 
@@ -2520,19 +2788,6 @@ window.__ModuleLoader__.load({
                   '体检只看账本，不评价对错。两句话对不上不是错误——都可能是她当时真心这么想；快忘掉也不代表不重要，只是还没被反复提起或检验。')),
         ),
 
-        // ---- 梦（2026-10-30 m02837，本机实验 A 案）----
-        // 只在 .dev 下渲染：公开版没有 her_dream 这个工具，`/dream` 也直接 404。
-        state?.dev === true
-          ? group('梦（本机实验）',
-              '只在这台机器的开发副本里显示。她醒来后可以把真实发生过的事重新拼成一句梦；不算成长，也不会被当成新的记忆。',
-              !dreams ? h('p', { className: 'dim' }, '还没读到。')
-                : !(dreams.items ?? []).length ? h('p', { className: 'dim' }, '她还没记过梦。')
-                : h('div', null, ...(dreams.items ?? []).slice(0, 12).map((d) => h('div', { key: d.id, style: { marginBottom: '8px' } },
-                    h('div', { className: 'hint', style: { margin: '0 0 2px' } }, `${d.day} · 引用了 ${(d.refs ?? []).length} 件`),
-                    h('div', null, d.text),
-                  ))))
-          : null,
-
         // ---- 原来这里的「信箱」卡 2026-10-29（用户 m02105）搬到住所页，改名「她写的小纸条」----
       )
 
@@ -2841,7 +3096,7 @@ window.__ModuleLoader__.load({
       const startInstall = async (version) => {
         const v = version || dl?.version
         if (!v) return
-        if (!window.confirm(`安装会先关掉 DeepSeek Harness，再由后台脚本替换插件、装完自动重开。没发出去的话先发完。现在装 v${v}？`)) return
+        if (!window.confirm(`安装会先关掉 DeepSeek Harness，装完自己重开——不会弹任何窗口，所以中途看到它没了不用找它。没发出去的话先发完。现在装 v${v}？`)) return
         setDl({ ...dl, version: v, phase: 'installing', note: '正在准备安装…' })
         try {
           const r = await jpost('/update/install', { version: v })
@@ -2849,10 +3104,10 @@ window.__ModuleLoader__.load({
             setDl({ ...dl, version: v, phase: 'failed', error: r.error || '安装没能开始。' })
             return
           }
-          setDl({ ...dl, version: v, phase: 'installing', note: r.note || '正在关闭应用…' })
+          setDl({ ...dl, version: v, phase: 'installing', note: r.note || '正在关闭应用…装完会自己打开，中间不会有窗口。' })
         } catch {
           // 应用可能在响应发回来之前就退了——这时候报"失败"是错的。
-          setDl({ ...dl, version: v, phase: 'installing', note: '正在关闭应用…' })
+          setDl({ ...dl, version: v, phase: 'installing', note: '正在关闭应用…装完会自己打开，中间不会有窗口。' })
         }
       }
 
@@ -2870,7 +3125,7 @@ window.__ModuleLoader__.load({
         }))
 
       const aboutCard = group('关于',
-        '这个插件是从 GitHub 装的，装完之后没有东西会提醒你作者又发了新版——想查就点一下。',
+        '这个插件是从 npm 或 GitHub 装的，装完之后没有东西会提醒你作者又发了新版——想查就点一下。',
         h('div', null,
           rowTip('当前版本', curVer || '读不到',
             '插件自己记的版本号，和 GitHub 上 tag 对应的那个。'),

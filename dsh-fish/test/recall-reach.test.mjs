@@ -89,7 +89,8 @@ test('门槛只影响"能不能取出来"，不改账本、不改返回结构', 
 
   const fresh = ev(0, '我刚说了一句关于视频的话')
   const { rows } = searchEvents([fresh, ...filler(true)], '视频', { now: NOW })
-  assert.deepEqual(Object.keys(rows[0]).sort(), ['ago', 'date', 'id', 'text', 'type'])
+  // 0.8.8 起行里多了 chatOnly / clock / refs / verdict（来源、时间到分钟、改口关系）。
+  assert.deepEqual(Object.keys(rows[0]).sort(), ['ago', 'chatOnly', 'clock', 'date', 'id', 'refs', 'text', 'type', 'verdict'])
 })
 
 test('默认值就是 30 天 / 0.45（改默认值要同时改这里的意图说明）', () => {

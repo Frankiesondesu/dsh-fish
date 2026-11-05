@@ -16,12 +16,13 @@ import assert from 'node:assert/strict'
 import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { Readable } from 'node:stream'
 
 import { appendEvent, readEvents } from '../lib/store.js'
 import { validateEvent, normalizeScene, SCENES } from '../lib/schema.js'
 import {
   channelsPath, channelKey, channelTitle, resolveChannel, saveChannel, findChannel, dropChannel,
-  CHANNELS_MAX,
+  channelExpired, CHANNELS_MAX,
 } from '../lib/channels.js'
 import { addExchange, recentExchanges, BUCKET_HOME, BUCKET_GROUP } from '../lib/talkmem.js'
 import { sayToHer } from '../lib/say.js'
@@ -276,6 +277,46 @@ test('群里说了话，书房里留一句「刚才有人叫过你」（串门�
   } finally { await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) }
 })
 
+test('等群里这一轮时侧栏结了账：没认领的聊天行不算她在群里回的', async () => {
+  const root = await tmpRoot()
+  try {
+    await seed(root)
+    const { ctx } = fakeCtx()
+    // 群里最长等 75 秒，这期间侧栏回合结束，turns.js 就写一行 uncommitted（形状照抄 turns.js）。
+    const writes = []
+    const { prompt } = ctx.sessionController
+    ctx.sessionController.prompt = async (req, signal) => {
+      if (String(req?.requestId).startsWith('say-')) {
+        for (const w of writes.splice(0)) await w()
+      }
+      return prompt(req, signal)
+    }
+    const chatLine = (text) => () => appendEvent(
+      { type: 'utterance', text, flags: ['uncommitted'] },
+      { day: 1, stage: 1, source: 'system' },
+      root,
+    )
+    const opts = { root, waitMs: 5_000, channel: 'qq-group:1', scene: 'group', speaker: '路人' }
+
+    writes.push(chatLine('这句只在侧栏说（合成）。'))
+    const r = await sayToHer(ctx, '群里有人问你在不在', opts)
+    assert.deepEqual(r.said, [], '侧栏的话不能算她在群里回的')
+    assert.equal(r.herReply, '')
+    assert.equal(r.note, '她这次没说话。')
+    const group = await recentExchanges(root, 4, 'group')
+    assert.equal(group[group.length - 1].her, '', '也不能进群聊那一桶')
+    const notes = await readFile(join(root, 'session-notes.json'), 'utf8').catch(() => '')
+    assert.doesNotMatch(notes, /你回过了/, '她没回，书房就不该留「你回过了」')
+
+    // 她在这一轮真认领了一句：照常算，只滤掉聊天行
+    writes.push(chatLine('这句也只在侧栏说（合成）。'))
+    writes.push(() => appendEvent({ type: 'utterance', text: '这句是她认领的（合成）。' }, { day: 1, stage: 1, source: 'tool' }, root))
+    const r2 = await sayToHer(ctx, '群里又有人问', opts)
+    assert.deepEqual(r2.said.map((s) => s.text), ['这句是她认领的（合成）。'])
+    assert.equal(r2.herReply, '这句是她认领的（合成）。')
+  } finally { await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) }
+})
+
 test('私聊仍回书房：写 seen、涨轮数，与以前一字不差', async () => {
   const root = await tmpRoot()
   try {
@@ -379,5 +420,196 @@ test('whoami 只收 GET', async () => {
     const route = routes.find((r) => String(r.path || '').endsWith('/whoami'))
     const { status } = await callRoute(route, 'POST')
     assert.equal(status, 405)
+  } finally { await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) }
+})
+
+// ------------------------------------------------------------------ 0.9.1 房间字段
+
+test('room 可选：私聊也能另开房，群聊也能并进书房', async () => {
+  const root = await tmpRoot()
+  try {
+    const priv = await resolveChannel(root, { channel: 'qq:dm:1', scene: 'private', room: 'channel' })
+    assert.equal(priv.house, false, '桥说 room=channel，私聊就另开一间')
+    assert.equal(priv.scene, 'private', '另开房不等于场次变成群聊')
+
+    const merged = await resolveChannel(root, { channel: 'qq-group:1', scene: 'group', room: 'house' })
+    assert.equal(merged.house, true, '桥说 room=house，群聊也回书房')
+    assert.equal(merged.scene, 'group', '并进书房仍然记成群聊场次')
+
+    const normal = await resolveChannel(root, { channel: 'qq-group:1', scene: 'group' })
+    assert.equal(normal.house, false, '不传 room 时群聊照旧另开房')
+  } finally { await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) }
+})
+
+test('title 用桥给的显示名，不再拿 channel id 当侧栏标题', () => {
+  assert.equal(channelTitle('qq-group:987654', 'group', '摸鱼群'), '跟大肥鱼说话·群聊（摸鱼群）')
+  assert.equal(channelTitle('qq:dm:123', 'private', '小王'), '跟大肥鱼说话·私聊（小王）')
+  assert.match(channelTitle('qq-group:987654', 'group'), /987654/, '没给名字才回落到 key')
+  assert.doesNotMatch(channelTitle('qq-group:1', 'group', '摸鱼群'), /他/)
+})
+
+test('群房按建房时间算天数：到点才换，关掉就不换', async () => {
+  const root = await tmpRoot()
+  try {
+    const now = Date.now()
+    const DAY = 86_400_000
+    await saveChannel(root, {
+      channel: 'qq-group:1', scene: 'group', sessionId: 's-old', title: '客厅',
+      bornAt: new Date(now - 8 * DAY).toISOString(),
+    })
+    const entry = await findChannel(root, 'qq-group:1')
+    assert.equal(channelExpired(entry, 7, now), true)
+    assert.equal(channelExpired(entry, 7, now - 2 * DAY), false, '八天前建的房，两天前还没到期')
+    assert.equal(channelExpired(entry, 0, now), false, '0 = 不自动换房')
+    assert.equal(channelExpired(entry, -1, now), false)
+    assert.equal(channelExpired(null, 7, now), false)
+  } finally { await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) }
+})
+
+test('群房用满 7 天：旧房改名封存，新话落进新房，映射指向新房', async () => {
+  const root = await tmpRoot()
+  try {
+    await seed(root)
+    const { updateConfig } = await import('../lib/settings.js')
+    await updateConfig({ rooms: { groupRotateDays: 1 } }, root)
+    const DAY = 86_400_000
+    await saveChannel(root, {
+      channel: 'qq-group:7', scene: 'group', sessionId: 's-old', title: '老客厅',
+      bornAt: new Date(Date.now() - 2 * DAY).toISOString(),
+    })
+    const { ctx, calls } = fakeCtx()
+
+    const r = await sayToHer(ctx, '新的一天，群里又有人叫你', {
+      root, waitMs: 5_000, channel: 'qq-group:7', scene: 'group', speaker: '张三', title: '老客厅',
+    })
+    assert.equal(r.ok, true)
+    assert.notEqual(r.sessionId, 's-old', '到期后不许往旧房里塞')
+    const buried = calls.find((c) => c.op === 'rename' && c.sessionId === 's-old')
+    assert.ok(buried, '旧房要改名封存，不能留在侧栏当同名空房')
+    assert.match(buried.title, /之前/)
+    const saved = await findChannel(root, 'qq-group:7')
+    assert.equal(saved.sessionId, r.sessionId)
+    assert.equal(channelExpired(saved, 1), false, '新房从今天重新算天数')
+
+    const { events } = await readEvents(root)
+    assert.equal(events.filter((e) => String(e.text).startsWith('seen:')).length, 0, '群房到期也不写 seen')
+    assert.equal((await homeStatus(root)).turns, 0, '群里的话不涨轮数')
+  } finally { await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) }
+})
+
+test('群友私聊另开房并标 guest：不写 seen、不涨轮数，正文说清不是他', async () => {
+  const root = await tmpRoot()
+  try {
+    await seed(root)
+    const { ctx, calls } = fakeCtx()
+    const r = await sayToHer(ctx, '你好呀', {
+      root, waitMs: 5_000, channel: 'qq:dm:9', scene: 'private', room: 'channel', guest: true,
+      speaker: '路人甲', title: '路人甲',
+    })
+    assert.equal(r.ok, true)
+    assert.equal(r.scene, 'private')
+    assert.notEqual(r.sessionId, 's-house', 'room=channel 时私聊另开一间')
+
+    const sent = calls.find((c) => c.op === 'prompt' && c.req?.sessionId === r.sessionId && String(c.req?.requestId).startsWith('say-'))
+    const text = sent?.req?.content?.[0]?.text ?? ''
+    assert.match(text, /不是他/, '外客私聊必须标清楚，否则她以为是主人本人')
+    assert.match(text, /路人甲/, '说话人要带上')
+    assert.doesNotMatch(text, /## 他跟你说话了/)
+
+    const saved = await findChannel(root, 'qq:dm:9')
+    assert.match(saved.title, /私聊（路人甲）/)
+    const { events } = await readEvents(root)
+    assert.equal(events.filter((e) => String(e.text).startsWith('seen:')).length, 0, '群友不算他来过')
+    assert.equal((await homeStatus(root)).turns, 0, '群友不涨轮数')
+    assert.equal((await recentExchanges(root)).length, 0, '外客的话不进书房桶')
+    assert.equal((await recentExchanges(root, 4, 'group')).length, 1, '外客的话进群聊桶，观测台看得到')
+  } finally { await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) }
+})
+
+test('guest 但没传 room：私聊仍回书房，只是正文标外客、不碰生命体征', async () => {
+  const root = await tmpRoot()
+  try {
+    await seed(root)
+    const { ctx, calls } = fakeCtx()
+    const r = await sayToHer(ctx, '路过问一句', {
+      root, waitMs: 5_000, channel: 'qq:dm:2', scene: 'private', guest: true, speaker: '路人乙',
+    })
+    assert.equal(r.sessionId, 's-house', '不传 room 时私聊仍回书房')
+    const sent = calls.find((c) => c.op === 'prompt' && c.req?.sessionId === r.sessionId && String(c.req?.requestId).startsWith('say-'))
+    assert.match(sent?.req?.content?.[0]?.text ?? '', /不是他/)
+    const { events } = await readEvents(root)
+    assert.equal(events.filter((e) => String(e.text).startsWith('seen:')).length, 0)
+    assert.equal((await homeStatus(root)).turns, 0)
+  } finally { await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) }
+})
+
+// ------------------------------------------------------------------ 真走 HTTP 路由
+//
+// 桥不装在本机也能测：桥对插件做的唯一一件事就是 POST /dsh-fish/say。
+// 这条用例从路由入口收 body、读 JSON、再交给 sayToHer，守的是「桥发什么，
+// 插件就落到哪儿」——中间的解析、白名单、字段透传都在这一层，漏了它，
+// 单测全绿也可能因为路由没透传 room 而白开一间房。
+
+function fakeObserveCtxWithSessions() {
+  const { ctx: base, calls } = fakeCtx()
+  const routes = []
+  const ctx = {
+    ...base,
+    get(k) {
+      if (k === 'webServer') return { register: (def) => { routes.push(def); return () => {} } }
+      if (k === 'connection') return { requestRejection: () => null }
+      return base.get(k)
+    },
+    logger: { info: () => {}, warn: () => {}, error: () => {} },
+  }
+  return { ctx, routes, calls }
+}
+
+async function postRoute(route, body) {
+  let status = 0
+  let out = ''
+  const res = {
+    writeHead: (s) => { status = s },
+    setHeader: () => {},
+    end: (s) => { out = String(s ?? '') },
+  }
+  const req = Readable.from([Buffer.from(JSON.stringify(body), 'utf8')])
+  req.method = 'POST'
+  req.url = route.path
+  req.headers = { 'content-type': 'application/json' }
+  await route.handler(req, res)
+  return { status, body: out }
+}
+
+test('POST /dsh-fish/say：桥只发 HTTP 就能开房，room/title/guest 原样落地', async () => {
+  const root = await tmpRoot()
+  try {
+    await seed(root)
+    const { ctx, routes, calls } = fakeObserveCtxWithSessions()
+    registerObserve(ctx, { root, version: '9.9.9' })
+    const route = routes.find((r) => String(r.path || '').endsWith('/say'))
+    assert.ok(route, '必须有 /dsh-fish/say 路由')
+
+    const { status, body } = await postRoute(route, {
+      text: '你好呀', channel: 'qq:dm:42', scene: 'private', room: 'channel',
+      guest: true, speaker: '阿明', title: '阿明',
+    })
+    assert.equal(status, 200, '桥发来的合法请求一律 200，被规则拦下也是 200')
+    const d = JSON.parse(body)
+    assert.equal(d.ok, true)
+    assert.equal(d.scene, 'private', 'room=channel 不改变场次')
+    assert.equal(d.sessionId, 's-room-1', '私聊 + room=channel 要另开一间，不能挤进书房')
+
+    const saved = await findChannel(root, 'qq:dm:42')
+    assert.match(saved.title, /私聊（阿明）/, 'title 字段要进侧栏标题')
+
+    const sent = calls.find((c) => c.op === 'prompt' && c.req?.sessionId === d.sessionId && String(c.req?.requestId).startsWith('say-'))
+    const text = sent?.req?.content?.[0]?.text ?? ''
+    assert.match(text, /不是他/, 'guest 要标成外客')
+    assert.match(text, /阿明/, 'speaker 要拼进正文')
+
+    const { events } = await readEvents(root)
+    assert.equal(events.filter((e) => String(e.text).startsWith('seen:')).length, 0, '外客不算他来过')
+    assert.equal((await homeStatus(root)).turns, 0, '外客不涨轮数')
   } finally { await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) }
 })

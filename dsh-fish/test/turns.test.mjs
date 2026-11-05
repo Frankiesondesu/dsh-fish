@@ -190,6 +190,161 @@ test('来源判据：真人 / 插件 / 上下文 / 外渠道 分得清', () => {
   assert.equal(classifyMessage({ source: { kind: 'user', rpcId: 'uuid-5', clientTimeZone: 'Asia/Shanghai', scene: 'desk' } }), 'human')
 })
 
+test('来源判据：宿主拼的上下文和通知都不算人（2026-11-05）', () => {
+  // 形状抄自宿主 0.2.2-rc.1 写 source 的地方
+  for (const source of [
+    { kind: 'time-context', form: 'snapshot', sections: [] },
+    { kind: 'tmux-context', form: 'snapshot', sections: [] },
+    { kind: 'model-selection', form: 'notice', summary: 'a → b' },
+    { kind: 'tool-jobs', form: 'notice', summary: 'done' },
+    { kind: 'plan-mode', form: 'notice', summary: 'on' },
+    { kind: 'action-cards', form: 'notice', through: 1 },
+    { kind: 'agent-instructions', form: 'instructions', changes: [] },
+    { kind: 'session-reference', form: 'recall', version: 1, references: [] },
+    { kind: 'skill-catalog', form: 'catalog', entries: [] },
+    { kind: 'working-directory' },
+    { kind: 'cordis-host-runner' },
+    { kind: 'ptc-mode' },
+    { kind: 'user-approval' },
+    { kind: 'agent-message', form: 'relay', senderSessionId: 's-1' },
+    { kind: 'compact-checkpoint' },
+    { kind: 'goal' },
+    { kind: 'team-message' },
+    { kind: 'bili-humanism-post-viewing-question' },
+    { kind: 'bili-humanism-personality-review' },
+    { kind: 'bili-humanism-shadow-review' },
+    // 这几种没有单列，只靠 form 挡住，钉一下
+    { kind: 'subagent-settled', form: 'notice' },
+    { kind: 'skill-invocation', form: 'instructions' },
+    { kind: 'repeat-tool-reminder', form: 'notice' },
+    { kind: 'tool-goal', form: 'notice' },
+    { kind: 'webhook', form: 'notice' },
+    // 宿主以后加的新上下文：kind 没见过，但 form 认得
+    { kind: 'future-a', form: 'snapshot' },
+    { kind: 'future-b', form: 'notice' },
+    { kind: 'future-c', form: 'catalog' },
+    { kind: 'future-d', form: 'instructions' },
+    { kind: 'future-e', form: 'recall' },
+  ]) {
+    assert.equal(classifyMessage({ source }), 'context', source.kind)
+  }
+  // 反过来：外渠道和人答的问题不能被这一条误伤（#18）
+  assert.equal(classifyMessage({ source: { kind: 'qq' } }), 'human')
+  assert.equal(classifyMessage({ source: { kind: 'qq', form: 'relay' } }), 'human')
+  assert.equal(classifyMessage({ source: { kind: 'user-question-reply', callId: 'c-1', outcome: 'answered' } }), 'human')
+})
+
+test('宿主每轮的时间快照不涨轮数、不记他来过、不换房（2026-11-05）', async () => {
+  const root = await tmpRoot()
+  try {
+    await writeCfg(root, { chat: { rotateAfter: 3 }, memory: { hearEvery: 1 } })
+    const { ctx, created } = fakeCtx()
+    const off = registerTurns(ctx, { root, log: () => {} })
+    try {
+      const timeContext = (text) => ({
+        type: 'user/message',
+        data: {
+          id: `m-${Math.random().toString(36).slice(2)}`,
+          role: 'user',
+          content: [{ type: 'text', text }],
+          source: { kind: 'time-context', form: 'snapshot', sections: [{ name: 'time-context', text }] },
+        },
+      })
+      // 真机一轮桥接消息的形状：不带时区的 user，再加一条时间快照。
+      // 她那条会话和别的会话里都会出现，两边都不能算他来过。
+      for (let i = 0; i < 6; i += 1) {
+        ctx.emit('session/event', session(), {
+          type: 'user/message',
+          data: { id: `im-${i}`, role: 'user', content: [{ type: 'text', text: `桥接 ${i}` }], source: { kind: 'user', rpcId: `im-qq-${i}` } },
+        })
+        ctx.emit('session/event', session(), timeContext(`当前时间 12:0${i}`))
+        ctx.emit('session/event', session('s-other'), timeContext(`当前时间 12:0${i}`))
+        ctx.emit('session/event', session(), TURN_END)
+        await settled()
+      }
+
+      assert.equal((await homeStatus(root)).turns, 0, '时间快照不是一轮人话')
+      assert.equal((await homeStatus(root)).sessionId, HER_SESSION, '不能因为时间快照换房')
+      assert.equal(created.length, 0, '不该建新会话')
+      const { events } = await readEvents(root)
+      assert.equal(events.filter((e) => e.type === 'meta' && String(e.text).startsWith('seen:')).length, 0, '不算他来过')
+      assert.equal(events.filter((e) => e.type === 'heard').length, 0, '「当前时间」不是他说的话')
+    } finally {
+      off()
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 })
+  }
+})
+
+test('人话后面跟时间快照：只算一轮，记的是人话（2026-11-05）', async () => {
+  const root = await tmpRoot()
+  try {
+    await writeCfg(root, { memory: { hearEvery: 1 } })
+    const { ctx } = fakeCtx()
+    const off = registerTurns(ctx, { root, log: () => {} })
+    try {
+      ctx.emit('session/event', session(), humanMsg('今天想和你说说那部电影的结尾'))
+      ctx.emit('session/event', session(), {
+        type: 'user/message',
+        data: { id: 'm-time', role: 'user', content: [{ type: 'text', text: '当前时间 12:00' }], source: { kind: 'time-context', form: 'snapshot', sections: [] } },
+      })
+      await settled()
+      ctx.emit('session/event', session(), herMsg([{ type: 'text', text: '好，我听着。' }]))
+      ctx.emit('session/event', session(), TURN_END)
+      await waitFor(async () => (await homeStatus(root)).turns === 1)
+      await settled()
+
+      const { events } = await readEvents(root)
+      assert.equal(events.filter((e) => e.type === 'meta' && String(e.text).startsWith('seen:')).length, 1, '他来过一次')
+      const heard = events.filter((e) => e.type === 'heard')
+      assert.ok(heard.length <= 1)
+      for (const h of heard) assert.ok(!String(h.text).includes('当前时间'), '时间快照不进他说的话')
+      const exchanges = await recentExchanges(root)
+      assert.equal(exchanges.length, 1)
+      assert.ok(!String(exchanges[0].me).includes('当前时间'), 'talkmem 里只有他的话')
+    } finally {
+      off()
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 })
+  }
+})
+
+test('不带时区的 user 轮和叫醒轮不结账：她说的话不写成聊天行（2026-11-05）', async () => {
+  const root = await tmpRoot()
+  try {
+    const { ctx } = fakeCtx()
+    const off = registerTurns(ctx, { root, log: () => {} })
+    try {
+      const context = (id, source) => ({ type: 'user/message', data: { id, role: 'user', content: [{ type: 'text', text: '上下文' }], source } })
+      ctx.emit('session/event', session(), { type: 'user/message', data: { id: 'im-1', role: 'user', content: [{ type: 'text', text: '桥接来的话' }], source: { kind: 'user', rpcId: 'im-qq-1' } } })
+      ctx.emit('session/event', session(), context('t-1', { kind: 'time-context', form: 'snapshot', sections: [] }))
+      await settled()
+      ctx.emit('session/event', session(), herMsg([{ type: 'text', text: '这句没有人在等。' }]))
+      ctx.emit('session/event', session(), TURN_END)
+      await settled()
+
+      ctx.emit('session/event', session(), context('w-1', { kind: 'fish-wake' }))
+      ctx.emit('session/event', session(), context('c-1', { kind: 'compact-checkpoint' }))
+      await settled()
+      ctx.emit('session/event', session(), herMsg([{ type: 'text', text: '醒来自己说的。' }]))
+      ctx.emit('session/event', session(), TURN_END)
+      await settled()
+
+      assert.equal((await homeStatus(root)).turns, 0)
+      assert.deepEqual(await recentExchanges(root), [])
+      const { events } = await readEvents(root)
+      assert.equal(events.filter((e) => e.type === 'utterance').length, 0, '这两种轮都不写聊天行')
+      assert.equal(events.filter((e) => e.type === 'meta' && String(e.text).startsWith('seen:')).length, 0)
+    } finally {
+      off()
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 })
+  }
+})
+
 test('正文提取：真机 content 数组、老宿主 data.text 都兜得住', () => {
   assert.equal(messageText({ content: [{ type: 'text', text: '今天想说什么' }] }), '今天想说什么')
   assert.equal(messageText({ content: [{ type: 'text', text: '一' }, { type: 'text', text: '二' }] }), '一\n二')
@@ -587,6 +742,73 @@ test('认识不出来的来源，日志里要留一行（别静默丢消息）',
         lines.some((l) => l.includes('认不出来源')),
         '认不出来源时必须留一行日志，否则用户只能去读源码才知道哪一步断了（issue #18 现场就是这样）',
       )
+    } finally {
+      off()
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 })
+  }
+})
+
+test('外渠道连着说三句：seen 只写一条，日志也只打一行（别刷屏）', async () => {
+  const root = await tmpRoot()
+  const lines = []
+  try {
+    const { ctx } = fakeCtx()
+    const off = registerTurns(ctx, { root, log: (...a) => lines.push(a.join(' ')) })
+    try {
+      const say = (n) => ({
+        type: 'user/message',
+        data: {
+          id: `qq-${n}`,
+          role: 'user',
+          content: [{ type: 'text', text: `第 ${n} 句` }],
+          source: { kind: 'qq' },
+        },
+      })
+      for (const n of [1, 2, 3]) {
+        ctx.emit('session/event', session('s-qq'), say(n))
+        ctx.emit('session/event', session('s-qq'), TURN_END)
+      }
+      await settled()
+
+      const { events } = await readEvents(root)
+      const seen = events.filter((e) => e.type === 'meta' && String(e.text).startsWith('seen:'))
+      assert.equal(seen.length, 1, '同一分钟里连说几句只写一条 seen')
+
+      // 2026-11-04（用户 m02556）：日志以前写在这个 if 外面，于是三句就是三行。
+      // 日志重复到看不出哪条是真的，等于这条日志白写。
+      const about = lines.filter((l) => l.includes('认识的会话之外的动静'))
+      assert.equal(about.length, 1, '同一分钟里连说几句只该打一行日志，不能刷屏')
+    } finally {
+      off()
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 })
+  }
+})
+
+test('认不出来源：同一个 kind 连着丢十条，日志也只留一行', async () => {
+  const root = await tmpRoot()
+  const lines = []
+  try {
+    const { ctx } = fakeCtx()
+    const off = registerTurns(ctx, { root, log: (...a) => lines.push(a.join(' ')) })
+    try {
+      const mystery = (n) => ({
+        type: 'user/message',
+        data: {
+          id: `m-${n}`,
+          role: 'user',
+          content: [{ type: 'text', text: `不知道谁发的 ${n}` }],
+          source: { kind: 'user', rpcId: `uuid-${n}` },
+        },
+      })
+      for (let n = 0; n < 10; n += 1) ctx.emit('session/event', session(), mystery(n))
+      await settled()
+
+      const about = lines.filter((l) => l.includes('认不出来源'))
+      assert.equal(about.length, 1, '同一个 kind 十分钟之内只打一行，免得把日志淹掉')
     } finally {
       off()
     }

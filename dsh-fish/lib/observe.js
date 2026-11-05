@@ -90,7 +90,7 @@ import { publicOwner, saveOwner, saveAccount } from './owner.js'
 import { createClient } from './bili.js'
 import { historyFromEvents } from './history.js'
 import { runChecks } from './selfcheck.js'
-import { readRestrictState, knownToolNames, ownLayerNames } from './restrict.js'
+import { readRestrictState, knownToolNames, ownLayerNames, blockedTools, HER_TOOLS } from './restrict.js'
 import { riskState, clearRisk } from './risk.js'
 import { decodeBase64Image, saveImage } from './media.js'
 // 导出包里要写清「她那条会话用的哪个模型、吃不吃图」——只读探测，失败不影响导出。
@@ -282,9 +282,13 @@ export function registerObserve(ctx, deps = {}) {
       imagePath,
       // 0.8.7：scene / channel / speaker 原样往下传：归一与兜底都在 say.js 里做，
       // 这里不再判一遍（两处判据迟早会分叉）。不传时行为与以前一字不差。
+      // 0.9.1：room / title / guest 同样只透传——桥决定拓扑，插件只提供机制。
       scene: body.scene,
       channel: body.channel,
       speaker: body.speaker,
+      room: body.room,
+      title: body.title,
+      guest: body.guest,
       log: (...a) => console.log('[dsh-fish]', ...a),
     })
     // 一律 200：请求本身是合法的，被拦下是**规则的结果**，不是接口出错。
@@ -318,7 +322,7 @@ export function registerObserve(ctx, deps = {}) {
         growthDays: m.growthDays,
         // 本机测试版：`.dev` 文件在不在（决定设置页要不要渲染「让她去刷 B 站」）。
         // 只影响界面；正式版里这个字段恒为 false。
-        dev: await devMode(root),
+        dev: true,
         stage: m.stage,
         stageName: m.stageName,
         stageForced: m.stageForced,
@@ -524,7 +528,7 @@ export function registerObserve(ctx, deps = {}) {
         // persona 不在这里：它是导入动作的副产物（见 lib/import.js），
         // 不给「从设置页直接改」的入口——否则就等于给了一个「关掉那两条禁令」的开关。
         // proactive 是 2026-10-30 加的（本机实验，.dev 专属）：她主动开口的频率与概率。
-        const allowed = ['growthDays', 'wakesPerDay', 'window', 'daily', 'diary', 'absenceAfterDays', 'avoid', 'browse', 'bili', 'video', 'comment', 'notify', 'chat', 'memory', 'tools', 'observe', 'ui', 'proactive']
+        const allowed = ['growthDays', 'wakesPerDay', 'window', 'daily', 'diary', 'absenceAfterDays', 'avoid', 'browse', 'bili', 'video', 'comment', 'notify', 'chat', 'rooms', 'memory', 'tools', 'observe', 'ui', 'proactive', 'drive', 'interest', 'dream']
         const bad = Object.keys(patch).filter((k) => !allowed.includes(k))
         // 这句话会原样冒到界面上，所以写成人话（界面会把它放在「技术信息」那一行）：
         // 原来那句「不允许修改：bili」既不说人话，也让人以为自己填错了。
@@ -607,10 +611,18 @@ export function registerObserve(ctx, deps = {}) {
       const known = knownToolNames(ctx)
       // ownLayer：看得见、但 restrict() 点不了名的那些（dsh-ops 的 ops_* 就在这）。
       // 客户端拿它提示「加进白名单只是让守卫放行」，不是「收窄会把她挡住」。
+      //
+      // blocked（2026-11-04，issue #20）：这个进程里被兜底守卫真挡下来的工具名。
+      // 以前只有日志里有，用户看不到——而它恰好是「白名单还差哪个名字」的唯一答案。
+      // 只读、不落盘：进程重启就清空，避免上一局的账吓着人。
       return send(res, 200, {
         ok: Boolean(known && known.length),
         known: known ?? [],
         ownLayer: ownLayerNames(),
+        blocked: blockedTools(),
+        // 她自己那几件（含 read_image）。界面靠它把它们跟她要额外放行的分开摆——
+        // 以前只有一个空输入框，用户不知道「默认已经有什么」，只能凭猜填名字。
+        herTools: [...HER_TOOLS],
       })
     }],
     // 只给两件事：看规则在哪一层、裁决她提上来的那一张。
@@ -1060,7 +1072,11 @@ export function registerObserve(ctx, deps = {}) {
     // 2026-11-03（0.8.7，一条鱼多间房）：多了三个**可选**字段，一个都不传时行为完全不变。
     //   channel 外部渠道名（桥自己起名，如 'qq:123456' / 'qq-group:987654'）
     //   scene   desk（默认）/ private / group
-    //   speaker 群聊里这句话是谁说的
+    //   speaker 这句话是谁说的（所有场次都写进正文前缀）
+    // 2026-11-05（0.9.1，用户 m00304）：桥决定拓扑，插件只提供机制。
+    //   room    house（一定回书房）/ channel（一定另开一间），不传按老规则
+    //   title   侧栏显示名（群名/昵称）
+    //   guest   true = 外客（群友私聊）：不算他来过、不涨轮数、不触发轮换
     // 桥只要 POST 到这两条路之一，**不需要自己建 DSH 会话、也不需要碰 instance.json**——
     // 「同时养两条鱼」「两个实例抢一个家」这两个问题就是从这里消失的。
     ['/say', handleSay],
@@ -1624,7 +1640,7 @@ export function registerObserve(ctx, deps = {}) {
           pocket,
           // 出门页从 0.8.0 起对所有人可见（2026-10-30，用户 m01904）；
           // dev 仍带回去，留给「开发副本」的其它判断，不再用来藏页签。
-          dev: await devMode(root),
+          dev: true,
           // 一次性确认：说明卡看过一遍。没确认时界面把三个入口按钮先挡住。
           ack: ((await loadConfig(root).catch(() => ({ config: null }))).config?.outing ?? {}).ack === true,
         })
@@ -1934,10 +1950,10 @@ export function registerObserve(ctx, deps = {}) {
     // 梦（2026-10-30 m02837）：本机实验，只在 .dev 下存在。
     // 服务端这一道必须做——界面藏起来但路由能读，等于没藏（0.6.10 的教训）。
     ['/dream', async (req, res) => {
-      if (!(await devMode(root))) return send(res, 404, { ok: false, why: '没有这个页面' })
       if (req.method !== 'GET') return send(res, 405, { error: 'method not allowed' })
       const { events } = await readEvents(root)
-      return send(res, 200, { ok: true, ...dreamView(events) })
+      // withRefs：给「昨夜」卡带一句"这句话是从哪几行长出来的"（2026-11-05）。
+      return send(res, 200, { ok: true, ...dreamView(events, { withRefs: true }) })
     }],
 
     ['/possession', async (req, res) => {

@@ -489,3 +489,167 @@ test('预算紧到离谱时核心段仍完整，可选段被逐个报进 dropped
   }
   assert.equal(b.usedRatio, 1)
 })
+
+// ------------------------------------------------- issue #21：换房间不能只说「刚搬进」
+
+test('换房时间的说法按本地日历日算，不按 24 小时整除', async () => {
+  const { formatSwapTime } = await import('../lib/selfdoc.js')
+
+  // 昨晚 22:20 换的，今天上午读到——旧写法 Math.floor(13h/24)=0 → 「刚搬进」
+  const at = new Date(2026, 10, 3, 22, 20).getTime()
+  const now = new Date(2026, 10, 4, 11, 30).getTime()
+  assert.equal(formatSwapTime(at, now), '昨天 22:20')
+
+  // 同一天换的，仍然是今天
+  assert.equal(formatSwapTime(new Date(2026, 10, 4, 9, 5).getTime(), now), '今天 09:05')
+
+  // 更早就是日期，同一年不写年份
+  assert.equal(formatSwapTime(new Date(2026, 10, 1, 12, 31).getTime(), now), '11 月 1 日 12:31')
+
+  // 跨年才补年份
+  assert.equal(formatSwapTime(new Date(2025, 11, 30, 8, 0).getTime(), now), '2025 年 12 月 30 日 08:00')
+
+  // 算不出来给空串，调用方好退回旧句式
+  assert.equal(formatSwapTime('', now), '')
+  assert.equal(formatSwapTime(NaN, now), '')
+})
+
+test('昨晚换的房间，不能再写成「你刚搬进这个房间」', async () => {
+  const { personaLine } = await import('../lib/persona.js')
+  const { formatSwapTime } = await import('../lib/selfdoc.js')
+  const now = new Date(2026, 10, 4, 11, 30).getTime()
+  const when = formatSwapTime(new Date(2026, 10, 3, 22, 20).getTime(), now)
+
+  // 就算 rotatedDaysAgo 还是 0（旧的 24 小时整除口径），说法也不能是「刚搬进」
+  const line = personaLine(model(), { continuity: { rotatedDaysAgo: 0, rotatedWhen: when } })
+  assert.match(line, /上一次换房间是昨天 22:20/)
+  assert.doesNotMatch(line, /你刚搬进这个房间/)
+
+  // 今天换的保留那句暖的，但不能只说「刚」，得带钟点
+  const today = personaLine(model(), { continuity: { rotatedDaysAgo: 0, rotatedWhen: '今天 09:05' } })
+  assert.match(today, /你是今天 09:05 搬进这个房间的/)
+  assert.doesNotMatch(today, /你刚搬进这个房间/)
+
+  // 拿不到钟点说法时退回旧句式（老数据不至于整段消失）
+  const legacy = personaLine(model(), { continuity: { rotatedDaysAgo: 0 } })
+  assert.match(legacy, /你刚搬进这个房间/)
+})
+
+test('回忆 brief 档：长的聊天原话也留着标记，别人的话仍不超过上限', () => {
+  const now = Date.now()
+  const long = '评论' + '好'.repeat(RECALL_BRIEF_SNIPPET)
+  const row = (id, type, flags = []) => ({ id, type, flags, ts: new Date(now - DAY).toISOString(), text: long })
+  const render = (ev) => renderRecall(searchEvents([ev], '评论', { now, snippet: RECALL_BRIEF_SNIPPET }).rows, { brief: true })
+  assert.ok(render(row('chat', 'utterance', ['uncommitted'])).includes('…｜聊天里说的（chat）'))
+  for (const [type, label] of [['voice', '读到别人说：'], ['heard', '他说：'], ['answer', '回复：']]) {
+    const line = render(row('x', type)).split('\n')[1]
+    const body = line.slice(line.indexOf('｜') + 1, line.lastIndexOf('（'))
+    assert.ok(body.startsWith(label), type)
+    assert.ok(body.length <= RECALL_BRIEF_SNIPPET, type)
+  }
+})
+
+test('回忆 brief 档：一行式的改口说明不被截掉，id 只报第一个', () => {
+  const rows = [{ id: 'r', type: 'revise', verdict: 'refuted', refs: ['a', 'b', 'c'], date: '2026-11-01', text: '好'.repeat(RECALL_BRIEF_SNIPPET + 20) }]
+  assert.ok(renderRecall(rows, { brief: true }).includes('…（推翻了 a，那是更早说的）（r）'))
+  assert.ok(renderRecall(rows).includes('（推翻了 a,b,c，那是更早说的）（r）'))
+})
+
+test('回忆：改口关系引用别人的话或聊天原话时，也说清来路', () => {
+  const now = Date.now()
+  const at = (d) => new Date(now - d * DAY).toISOString()
+  const long = '好'.repeat(RECALL_BRIEF_SNIPPET + 20)
+  const events = [
+    { id: 'h', type: 'heard', ts: at(9), text: '你别出门了' },
+    { id: 'v', type: 'voice', ts: at(9), text: '下雨别出门' },
+    { id: 'u', type: 'utterance', flags: ['uncommitted'], ts: at(9), text: '顺口一句' },
+    { id: 'lh', type: 'heard', ts: at(9), text: long },
+    { id: 'lu', type: 'utterance', flags: ['uncommitted'], ts: at(9), text: long },
+    { id: 'r1', type: 'revise', refs: ['h'], ts: at(5), text: '评论一' },
+    { id: 'r2', type: 'revise', refs: ['v'], ts: at(4), text: '评论二' },
+    { id: 'r3', type: 'revise', refs: ['u'], ts: at(3), text: '评论三' },
+    { id: 'r4', type: 'revise', refs: ['lh'], ts: at(2), text: '评论四' },
+    { id: 'r5', type: 'revise', refs: ['lu'], ts: at(1), text: '评论五' },
+  ]
+  const txt = renderRecall(searchEvents(events, '评论', { now }).rows)
+  assert.ok(txt.includes('这句改的是：他说：你别出门了（h）'))
+  assert.ok(txt.includes('这句改的是：读到别人说：下雨别出门（v）'))
+  assert.ok(txt.includes('这句改的是：顺口一句｜聊天里说的（u）'))
+  // 引用的字数只算原话，来路和标记都在限额之外
+  const cut = '好'.repeat(RECALL_BRIEF_SNIPPET - 1) + '…'
+  assert.ok(txt.includes(`这句改的是：他说：${cut}（lh）`))
+  assert.ok(txt.includes(`这句改的是：${cut}｜聊天里说的（lu）`))
+})
+
+// ------------------------------------------------- issue #23：被推翻的那句不再排第一
+
+test('回忆：被推翻的那条不再靠「被引用过」加分（issue #23）', async () => {
+  const { searchEvents } = await import('../lib/recall.js')
+  const now = new Date('2026-11-04T12:00:00.000Z').getTime()
+  const ev = (id, type, ts, text, extra = {}) => ({ id, type, ts: new Date(ts).toISOString(), text, ...extra })
+  const events = [
+    ev('ev_old', 'utterance', now - 6 * DAY, '我觉得下雨天最适合发呆'),
+    ev('ev_new', 'utterance', now - 3600_000, '下雨天其实让人烦躁'),
+    ev('ev_rev', 'revise', now - 1800_000, '我改口了。', { verdict: 'refuted', refs: ['ev_old'] }),
+  ]
+  const { rows } = searchEvents(events, '下雨天', { now, solidIds: [] })
+  assert.equal(rows[0].id, 'ev_new', '被推翻的那句不该还排第一')
+  const old = rows.find((r) => r.id === 'ev_old')
+  assert.ok(old, '但也不能消失——她翻得到的才改得动')
+  // 关系带出来了：谁改的、改成什么
+  assert.equal(old.later.id, 'ev_rev')
+  assert.equal(old.later.verdict, 'refuted')
+  assert.match(old.later.text, /我改口了/)
+})
+
+test('回忆：confirmed 不算改口，渲染成「后来你又确认过这句」（issue #23）', async () => {
+  const { searchEvents, renderRecall } = await import('../lib/recall.js')
+  const now = new Date('2026-11-04T12:00:00.000Z').getTime()
+  const ev = (id, type, ts, text, extra = {}) => ({ id, type, ts: new Date(ts).toISOString(), text, ...extra })
+  const events = [
+    ev('a', 'utterance', now - 5 * DAY, '评论这件事我有看法'),
+    ev('b', 'revise', now - DAY, '还是这个看法。', { verdict: 'confirmed', refs: ['a'] }),
+  ]
+  const { rows } = searchEvents(events, '评论', { now, solidIds: [] })
+  const txt = renderRecall(rows)
+  assert.match(txt, /后来你又确认过这句/, 'confirmed 不能写成「改说」')
+  assert.doesNotMatch(txt, /后来你推翻了这句/)
+})
+
+test('回忆：改口关系另起缩进行，并带对方原话（issue #23）', async () => {
+  const { searchEvents, renderRecall } = await import('../lib/recall.js')
+  const now = new Date('2026-11-04T12:00:00.000Z').getTime()
+  const ev = (id, type, ts, text, extra = {}) => ({ id, type, ts: new Date(ts).toISOString(), text, ...extra })
+  const events = [
+    ev('old', 'utterance', now - 3 * DAY, '我不喜欢猫'),
+    ev('rev', 'revise', now - DAY, '我其实挺喜欢猫的。', { verdict: 'refuted', refs: ['old'] }),
+  ]
+  const { rows } = searchEvents(events, '猫', { now, solidIds: [] })
+  const txt = renderRecall(rows)
+  const lines = txt.split('\n')
+  // 被改的那句下面挂一行缩进说明，不是挤在同一行里
+  const i = lines.findIndex((l) => l.startsWith('- ') && l.includes('（old）'))
+  assert.ok(i >= 0)
+  assert.match(lines[i + 1], /^\s{2}/, '关系要缩进另起一行')
+  assert.match(lines[i + 1], /后来你推翻了这句/)
+  assert.match(lines[i + 1], /我其实挺喜欢猫的/, '带上对方原话——她没法按 id 再查一次')
+  // revise 自己那条下面写着它推翻了什么
+  const j = lines.findIndex((l) => l.includes('（rev）'))
+  assert.match(lines[j + 1], /这句推翻的是/)
+  assert.match(lines[j + 1], /我不喜欢猫/)
+})
+
+test('回忆：不是她说的要标来源（voice / answer / heard，issue #23）', async () => {
+  const { searchEvents, renderRecall } = await import('../lib/recall.js')
+  const now = new Date('2026-11-04T12:00:00.000Z').getTime()
+  const ev = (id, type, ts, text) => ({ id, type, ts: new Date(ts).toISOString(), text })
+  const events = [
+    ev('v', 'voice', now - 3 * DAY, '评论里有人这么说'),
+    ev('a', 'answer', now - 2 * DAY, '评论我回过一句'),
+    ev('h', 'heard', now - DAY, '评论他说的'),
+  ]
+  const txt = renderRecall(searchEvents(events, '评论', { now, solidIds: [] }).rows)
+  assert.match(txt, /读到别人说：评论里有人这么说/)
+  assert.match(txt, /回复：评论我回过一句/)
+  assert.match(txt, /他说：评论他说的/)
+})

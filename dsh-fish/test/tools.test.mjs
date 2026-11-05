@@ -13,7 +13,7 @@
  * 这里守三件事：
  *   1. lib/ 里不许再 import 宿主的 dsh-tools；
  *   2. `defineTool(spec)` 就是恒等（注册时直接交 JSON Schema）；
- *   3. 七个工具定义都长成宿主认的形状（parameters 是 object-rooted JSON Schema、
+ *   3. 八个工具定义都长成宿主认的形状（parameters 是 object-rooted JSON Schema、
  *      output.schema 也是、render / execute 是函数）。
  */
 
@@ -32,6 +32,7 @@ import { registerRecall } from '../lib/recall.js'
 import { registerHerDiary } from '../lib/herdiary.js'
 import { registerSpeak } from '../lib/speak.js'
 import { registerWatch } from '../lib/watch.js'
+import { registerNote } from '../lib/note.js'
 import { FISH_TOOLS, HER_TOOLS } from '../lib/restrict.js'
 import { runChecks } from '../lib/selfcheck.js'
 
@@ -78,8 +79,9 @@ test('八个工具定义都长成宿主认的形状', () => {
   registerHerDiary(ctx, deps)
   registerSpeak(ctx, deps)
   registerWatch(ctx, deps)
+  registerNote(ctx, deps)
 
-  assert.equal(ctx.defs.length, 7, '我们自己的工具是 7 个（第 8 个 read_image 是宿主的）')
+  assert.equal(ctx.defs.length, 8, '我们自己的工具是 8 个（第 9 个 read_image 是宿主的）')
   const names = ctx.defs.map((d) => d.name)
   for (const n of names) assert.ok(FISH_TOOLS.includes(n), `${n} 不在 FISH_TOOLS 里`)
 
@@ -172,17 +174,17 @@ test('自检按 registry 里真的在不在判断，而不是配置名单', asyn
 //
 // 2026-10-28 的 read_image 也是同一类错误（拿名单当「真装上」）；这次是拿了
 // 「本机清单」当「公开版清单」。判据必须与注册处同一份：`devModeSync`。
-test('自检不把只在 .dev 下才注册的 her_dream 算成「没装上」', async () => {
+test('0.9.0 起 her_dream 也恒注册：缺了就要报红', async () => {
   const cfg = { growthDays: 30, window: { start: '20:00', end: '23:00' }, tools: {} }
   // 公开版真机：注册表里没有 her_dream，别的都在。
   const pub = { get: (n) => (n === 'her_dream' ? undefined : { name: n }) }
 
-  // ① 公开版（没有 .dev）：不许报红，也不许在措辞里出现 her_dream。
+  // ① 没有 .dev 也照样查 her_dream：0.9.0 起它不再是开发副本专属。
   const pubRoot = join(tmpdir(), `dsh-fish-sc-pub-${process.pid}`)
   const pubRes = await runChecks({ root: pubRoot, config: cfg, host: {}, tools: pub, net: false })
   const pubItem = pubRes.items.find((i) => i.id === 'tools')
-  assert.equal(pubItem.ok, true, `公开版不该因 her_dream 报红：${pubItem.detail}`)
-  assert.doesNotMatch(pubItem.detail, /her_dream/)
+  assert.equal(pubItem.ok, false, `缺了 her_dream 必须报红：${pubItem.detail}`)
+  assert.match(pubItem.detail, /her_dream/)
 
   // ② 开发副本（有 .dev）：这次 her_dream 真应该在，缺了就得报出来——
   //    别为了让公开版变绿，把开发副本的漏注册也一起瞒过去。
@@ -200,5 +202,4 @@ test('自检不把只在 .dev 下才注册的 her_dream 算成「没装上」', 
   const missItem = missRes.items.find((i) => i.id === 'tools')
   assert.equal(missItem.ok, false)
   assert.match(missItem.detail, /bili_watch/)
-  assert.doesNotMatch(missItem.detail, /her_dream/)
 })

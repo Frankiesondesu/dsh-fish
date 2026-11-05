@@ -46,15 +46,51 @@ function localClock(ts) {
   return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
 }
 
-/** 某一天她自己写下的话（按时间顺序） */
+/**
+ * 只留在对话里说过、没被她自己认领下来的话。
+ *
+ * 2026-11-04（群反馈）：`turns.js` 的 `settle()` 会把这一轮她说过的话补写成
+ * `utterance` 并打上 `flags:['uncommitted']`——注释写得很清楚：**只留证，不当信念**。
+ * 但日报的 `quotesOf()` 只按「类型 + 当天」过滤，完全不看 flags，于是聊天原话
+ * 和她在 `growth_commit` 里认领下来的话一视同仁，全被当成「她说了什么」印成一长串，
+ * 一天聊几十句的那天，日报就只剩流水账，回看分不清主次。
+ *
+ * `uncommitted` 在仓库里唯一的逻辑读者是 `derive.js` 的 `wontCount`（数她拒绝过几次），
+ * 所以不进日报不影响任何判定，纯粹是展示口径。
+ */
+const isChatOnly = (e) => Array.isArray(e?.flags) && e.flags.includes('uncommitted')
+
+/** 某一天她自己**认领下来**的话（按时间顺序）。聊天原话不算。 */
 export function quotesOf(events, dk) {
   const out = []
   for (const e of events ?? []) {
     if (!QUOTABLE.has(e?.type)) continue
     if (localDay(tsOf(e)) !== dk) continue
+    if (isChatOnly(e)) continue
     out.push(e)
   }
   return out.sort((a, b) => tsOf(a).localeCompare(tsOf(b)))
+}
+
+/** 「聊天时说过的」最多列几段（最近的）、每段多少字。 */
+export const REPORT_CHAT_LINES = 20
+export const REPORT_CHAT_CHARS = 120
+
+/** 某一天只在对话里说过、没认领下来的那些话（按时间顺序）。 */
+export function chatLinesOf(events, dk) {
+  const out = []
+  for (const e of events ?? []) {
+    if (!QUOTABLE.has(e?.type)) continue
+    if (localDay(tsOf(e)) !== dk) continue
+    if (!isChatOnly(e)) continue
+    out.push(e)
+  }
+  return out.sort((a, b) => tsOf(a).localeCompare(tsOf(b)))
+}
+
+/** 某一天只在对话里说过、没认领下来的句子条数。用来把「什么都没说」和「只在聊天里说过」分开。 */
+export function chatOnlyCount(events, dk) {
+  return chatLinesOf(events, dk).length
 }
 
 export function fmtDur(sec) {
@@ -98,6 +134,7 @@ export function buildReport(o = {}) {
   const glanced = Array.isArray(seen.glanced) ? seen.glanced : []
   const handed = Array.isArray(seen.handed) ? seen.handed : []
   const quotes = quotesOf(o.events ?? [], dk)
+  const chat = chatLinesOf(o.events ?? [], dk)
   const L = []
 
   L.push(`# ${dk}`)
@@ -144,8 +181,35 @@ export function buildReport(o = {}) {
       L.push('')
     }
   } else {
-    L.push('今天她什么都没说。')
+    // 不能一律写「今天她什么都没说」——她可能只是在对话里说过，没认领下来，
+    // 那样印出来的是一句假话。两种情形要分开说。
+    L.push(chat.length ? '这一节今天是空的，聊天时说的在下面。' : '今天她什么都没说。')
     L.push('')
+  }
+
+  // 聊天时说过的：单列一节，不全列。
+  // 前提是「她这一轮真的说了话」——turns.js 的 settle() 会把这些话补写成
+  // utterance 并打 flags:['uncommitted']，只留证不当信念；但一天聊几十轮的话
+  // 全塞进「她说了什么」就只剩流水账，回看分不清哪几句是她自己记下的。
+  // 所以另起一节、按时刻一行一段、只留最近的 20 段、每段 120 字。
+  if (chat.length) {
+    L.push('## 聊天时说过的')
+    L.push('')
+    L.push('_她在对话里说出口的话。_')
+    L.push('')
+    for (const q of chat.slice(-REPORT_CHAT_LINES)) {
+      // 换行会把「一行一段」压坏；按 UTF-16 截时别把 emoji 切成半个。
+      const text = String(q.text ?? '').replace(/\s+/g, ' ').trim()
+      const cut = text.length > REPORT_CHAT_CHARS
+        ? text.slice(0, REPORT_CHAT_CHARS - 1).replace(/[\uD800-\uDBFF]$/, '') + '…'
+        : text
+      L.push(`- ${localClock(tsOf(q))} ${cut}`)
+    }
+    L.push('')
+    if (chat.length > REPORT_CHAT_LINES) {
+      L.push(`_只列了最近 ${REPORT_CHAT_LINES} 段，今天一共 ${chat.length} 段。_`)
+      L.push('')
+    }
   }
 
   // 日记：默认不出现。只有配置里 visible=true 才贴进来。

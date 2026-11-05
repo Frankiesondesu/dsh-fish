@@ -80,7 +80,7 @@ export const DEFAULTS = {
   // 频率是上限不是行为要求：到上限就闭嘴，没到也不保证一定开口。
   // 概率随「多久没人说话」缓慢上升（baseChance + 超出 minIdleHours 的每小时 * gainPerHour，封顶 maxChance）。
   proactive: {
-    enabled: false,       // 默认关；公开版没有这个功能
+    enabled: false,       // 默认关；功能公开可见，但不替用户打开
     maxPerDay: 2,         // 一天最多开几次空手回合
     minIdleHours: 6,      // 距上一次记录不足这么久就不打扰
     baseChance: 0.15,     // 每次掷骰子的基础概率
@@ -103,7 +103,9 @@ export const DEFAULTS = {
   // 注意：这里**没有任何一项是"她喜欢什么"**。这些全是环境参数——
   // 她看什么、信不信、想不想写，是她自己的事，不是旋钮。
   browse: {
-    enabled: true,          // 装好就能用；不想让她上网就关掉
+    // 2026-11-05（用户 m02562）：默认关闭。刷站这条线不再由唤醒驱动，
+    // 参数留着是为了老配置能读进来，不会因为缺字段炸掉。
+    enabled: false,
     perDay: 1,              // 每天最多刷几次（0 = 从不）
     topN: 4,                // 一次看几条
     // 阶段 1 每次轮换几个不同的分区排行（2026-10-27，用户 m00763：首批别只吃固定片单）
@@ -126,9 +128,18 @@ export const DEFAULTS = {
   // 放在设置里比写死合理（写死就是让一部分人永远用不了）。
   // 注意：这是环境参数，不是"她性格"的一部分。
   bili: {
+    // 2026-11-05（用户 m02562）：刷站不再由唤醒驱动，她自己的 bili_* 工具默认还能用；
+    // 想彻底断网就把这一项设成 false。
+    enabled: true,
     minIntervalMs: 800,     // 两次请求之间最少等多久
     jitterMs: 500,          // 在最小间隔上再随机多等 0–jitterMs（打散固定节奏）
   },
+
+  // 她自己的三件事（2026-11-05，用户 m02634）：各自一个开关，默认全开。
+  // 关掉只是「以后不再这么做」，已经发生的记录一条都不删。
+  drive: { enabled: true },     // 主动性：攒够了才自己醒（lib/drive.js）
+  interest: { enabled: true },  // 兴趣：摆到桌上的那几行（好奇/旧句子/回音/反复主题）
+  dream: { enabled: true },     // 梦（lib/dream.js）
 
   // 看画面（2026-10-23 加）
   // 她看一条视频的**画面**：抽 9 帧拼成一张图，她 read_image 看。
@@ -193,6 +204,14 @@ export const DEFAULTS = {
     replyChars: 0,          // 单轮最多写多少字（0 = 不限，提示词里不出现任何长度要求）
   },
 
+  // 房间（2026-11-05，用户 m00304）
+  // 群房按「建了多久」轮换，不按轮数：群和群的热度差几十倍，同一阈值要么小群
+  // 永远换不了，要么热闹的群一天换三间。7 天是用户定的默认值；0 = 不轮换。
+  // 这项只管插件建的群房/客访房，书房仍按 chat.rotateAfter 轮数换。
+  rooms: {
+    groupRotateDays: 7,     // 群房用满几天换新（0 = 不换）
+  },
+
   // 记忆与上下文（2026-10-23 加）
   // docBudget 是她身份文档的字数上限：超了不是报错，是**按优先级丢可选段**
   // （四条黑名单与"你是谁"永远不丢）。她记得越多，文档越该只留最要紧的。
@@ -203,6 +222,7 @@ export const DEFAULTS = {
                             // 实测四档：1800/2000 丢打脸，2200 反而丢「你对自己的说法」（更糟），
                             // 2400 一段不丢、余 167 字。数字不是品格，只是"别把已有的段挤掉"。
     sleepEveryDays: 7,      // 每几天让她"想一想"一次（0 = 不主动想）
+    selfWake: true,         // 醒来时没派活、桌上也没东西时，她可以自己找点事做（空醒，0.9.0）
     sleepKeep: 12,          // 她总共留多少条自述（超出后最早的折进「更早以前」）
     beliefsShown: 3,        // 她一轮里逐条摆出来的判断数（1–8，默认 3）；其余折成一行
                             // 2026-10-25 用户问「想让她记住更多能不能调」——原来写死在
@@ -266,6 +286,7 @@ const LIMITS = {
   'comment.scanEveryMin': [5, 720],
   'chat.rotateAfter': [0, 500],
   'chat.replyChars': [0, 2000],
+  'rooms.groupRotateDays': [0, 365],
   'memory.docBudget': [600, 4000],
   'memory.sleepEveryDays': [0, 60],
   'memory.sleepKeep': [0, 100],
@@ -377,6 +398,10 @@ export function normalizeConfig(raw = {}) {
 
   // 主动说话（0.8.1 本机实验）：布尔严格化 + 数值夹紧（夹紧规则真身在 proactive.js）
   cfg.proactive = { ...DEFAULTS.proactive, ...cfg.proactive }
+  cfg.memory.selfWake = cfg.memory.selfWake !== false
+  cfg.drive = { enabled: cfg.drive?.enabled !== false }
+  cfg.interest = { enabled: cfg.interest?.enabled !== false }
+  cfg.dream = { enabled: cfg.dream?.enabled !== false }
   cfg.proactive.enabled = Boolean(cfg.proactive.enabled)
 
   // 她的工具面：preset 名 trim（空 = 用宿主默认组合），allow 去重去空
@@ -388,6 +413,7 @@ export function normalizeConfig(raw = {}) {
 
   // 对话与界面（2026-10-25）：replyChars 由 LIMITS 夹值，这里只补布尔严格化
   cfg.chat = { ...DEFAULTS.chat, ...cfg.chat }
+  cfg.rooms = { ...DEFAULTS.rooms, ...cfg.rooms }
   cfg.ui = { ...DEFAULTS.ui, ...cfg.ui }
   cfg.ui.ownerHintDismissed = Boolean(cfg.ui.ownerHintDismissed)
 

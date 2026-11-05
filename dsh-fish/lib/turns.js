@@ -31,7 +31,8 @@
  * 宿主的 v4 校验只要求 source.kind 是「非空、且不等于 'plugin'」的 producer-owned
  * 字符串（见 proactive.js 里 assertV4MessageSources 那段注释），所以外渠道的 kind
  * 是开放集合，任何桥都可以自己起名（qq / telegram / 别的）。认识的那几种挡掉，
- * 其余一律当人——宁可多算一轮也不静默丢消息。
+ * 宿主拼的上下文按 source.form 挡掉（MACHINE_FORMS），其余一律当人——
+ * 宁可多算一轮也不静默丢消息。
  *
  * 铁律：这里**基本只读**会话事件、只写 home.json / talk-recent.json / 一条 meta，
  * 不动对话本身。任何失败都吞掉——记账出错不能连累她说话。
@@ -54,6 +55,7 @@ import { HER_TYPES, normalizeScene } from './schema.js'
 import { refreshSelfDoc } from './selfdoc.js'
 import { growthDay, stageOf } from './derive.js'
 import { hearTurn } from './hear.js'
+import { stripToolMarkup, hasToolMarkup } from './markup.js'
 
 /**
  * 我们自己 prompt 进去的消息，rpcId 会带这些前缀。
@@ -80,7 +82,43 @@ const MACHINE_KINDS = new Set([
   'tool', // 工具结果回灌
   'plugin', // 插件自己发的（v4 校验禁用它当消息来源，这里再兜一层）
   'assistant', // 她自己说的话，不该反过来算他来过
+  // 2026-11-04（用户 m00428）：我们自己叫醒她用的来源（lib/deliver.js）。
+  // 宿主的 sc.prompt() 会把这个 kind 写死成 'user'，那条只能落成用户气泡；
+  // 改走 agent.followup() 之后来源由自己填，前端画成收起的折叠条。
+  // 漏了这一行，她自己醒来说的话就会被记成「他来过」——冷落天数、seen、
+  // turns 全被污染，她越主动，面板越显示「他刚来过」。
+  'fish-wake',
+  // 2026-11-05：宿主自己写进会话、又不带 source.form 的几种（带 form 的见 MACHINE_FORMS）。
+  // 都是 role:'user' 的系统消息，人说话时不会用这些 kind。
+  // 名单对照的是宿主 0.2.2-rc.1 的 MessageSourceMap（dsh-api-session-controller）。
+  'working-directory', // 工作目录变了
+  'cordis-host-runner', // 插件运行器的转告
+  'ptc-mode', // 工具执行模式提示
+  'user-approval', // 审批策略变了
+  'compact-checkpoint', // 压缩检查点
+  'goal', // /goal 的目标
+  'team-message', // 队友之间的话
+  'agent-message', // 子代理、队友之间转的话（form 是 relay，见下）
+  // dsh-bili-humanism 给模型排的提示词（手账存完后的提问、人格审阅）。
+  // 它们不是 plugin: 前缀，所以要单列，否则写一篇手账就多一条「他来过」。
+  'bili-humanism-post-viewing-question',
+  'bili-humanism-personality-review',
+  'bili-humanism-shadow-review',
 ])
+
+/**
+ * 宿主拼上下文时写在 source.form 上的形态（宿主前端的 KNOWN_FORMS）。
+ *
+ * 宿主给模型看的上下文（time-context、model-selection、tool-jobs、plan-mode、
+ * action-cards、agent-instructions、session-reference、tmux 快照……）kind 各不相同，
+ * 以后还会有新的，靠列 kind 总会漏；它们的共同点是都带这个字段。
+ * 漏一个的后果很重：time-context 最多十分钟一条，每条都是一次「他来过」、
+ * 一次 turns +1、一条写在他名下的 heard，满 rotateAfter 换房。
+ *
+ * relay 故意不在表里：外渠道转述人说的话，也可能自称 relay，那种要算人。
+ * 所以桥不要用这个表里的 form，用了就会被当上下文（AGENTS.md §7.2）。
+ */
+const MACHINE_FORMS = new Set(['snapshot', 'notice', 'catalog', 'instructions', 'recall'])
 
 /** 一条 user 消息最多记这么多字（talkmem 会再截到 160，这里只是别让整段注入进内存） */
 export const TURN_TEXT_MAX = 2000
@@ -117,6 +155,7 @@ export function classifyMessage(data) {
   if (normalizeScene(src.scene) === 'group') return 'group'
   // 宿主拼的上下文 / 定时消息 / 工具回灌 / 她自己说的话：都不是他
   if (MACHINE_KINDS.has(kind) || kind.startsWith('plugin:')) return 'context'
+  if (MACHINE_FORMS.has(src.form)) return 'context'
   const rid = String(src.rpcId ?? '')
   if (rid && PLUGIN_RPC.test(rid)) return 'plugin'
   if (kind === 'user') {
@@ -129,7 +168,7 @@ export function classifyMessage(data) {
     if (!rid) return 'human'
     return 'unknown'
   }
-  // 0.8.7：表里没有的 kind = 外渠道（qq / telegram / 别的桥自己起的名字）。
+  // 两张表都没挡住的 kind = 外渠道（qq / telegram / 别的桥自己起的名字）。
   // 宿主对 kind 只要求「非空且不是 'plugin'」，穷举不了，所以默认当人。
   return 'human'
 }
@@ -174,19 +213,30 @@ export function messageText(data) {
 export function assistantText(data) {
   if (!data || typeof data !== 'object') return ''
   const blocks = data.message?.content ?? data.content
-  if (typeof blocks === 'string') return blocks.trim()
+  if (typeof blocks === 'string') return stripToolMarkup(blocks)
   if (!Array.isArray(blocks)) {
-    return typeof data.text === 'string' ? data.text.trim() : ''
+    return typeof data.text === 'string' ? stripToolMarkup(data.text) : ''
   }
   const parts = []
   for (const b of blocks) {
     if (!b || typeof b !== 'object') continue
     if (b.type !== 'text') continue
-    if (typeof b.text === 'string' && b.text.trim()) parts.push(b.text)
+    if (typeof b.text === 'string') {
+      const t = stripToolMarkup(b.text)
+      if (t) parts.push(t)
+    }
   }
   return parts.join('\n').trim()
 }
 
+/**
+ * 模型侧工具调用标记的清洗在 `lib/markup.js`（issue #25）。
+ *
+ * 这里没有内联实现，是因为读同一份 assistant 正文的地方不止一处：
+ * 本文件把它写进 `utterance`，`lib/home.js` 的 `askForLastWords` 拿它当
+ * 「上一个房间里她留的最后一句」。清洗只做一次、收在一个纯函数里，
+ * 两边都从那儿取，才不会一边干净一边脏。
+ */
 function cut(s) {
   const t = String(s ?? '').trim()
   return t.length > TURN_TEXT_MAX ? t.slice(0, TURN_TEXT_MAX) + '…' : t
@@ -217,7 +267,18 @@ export function registerTurns(ctx, deps = {}) {
    * 只给外渠道那条路用：别的会话里他每说一句都写一条，事件流会被记账行淹掉。
    */
   let lastSeenAt = 0
+  /**
+   * 「认不出来源」这条日志上次打的时刻，按 kind 分开记。
+   * 2026-11-04（用户 m02556）：同一个 kind 十分钟最多一行，见下面总线段。
+   */
+  const unknownLoggedAt = new Map()
 
+  /**
+   * 「这一轮的正文里只剩工具标记」这条日志上次打的时刻。
+   * 2026-11-04（issue #25）：偶发（约 500 轮 2 次），但以后要是变多，
+   * 日志里要看得出来——否则又变成「事件流里少了一句，日志里一个字都没有」。
+   */
+  let markupDroppedAt = 0
   /**
    * 记一条「他来过」——冷落检测（absence.js）读的就是这个。
    *
@@ -267,8 +328,15 @@ export function registerTurns(ctx, deps = {}) {
         //
         // 所以：屋子不搬、轮数不涨、talkmem 不动（那些都是她的家事），
         // 只把「他来过」记下来。同一分钟里连说几句只写一条，别把事件流灌成记账。
-        if (Date.now() - lastSeenAt > 60_000) await markSeen()
-        log(`turns · 认识的会话之外的动静，只记他来过（${sessionId}）`)
+        //
+        // 2026-11-04（用户 m02566 报的刷屏）：日志原来写在这个 if **外面**，
+        // 于是节流只拦住了「写事件」，没拦住打日志——他连着发三句就是三行一样的
+        // 「认识的会话之外的动静」。日志重复到看不出哪条是真的，等于这条日志白写。
+        // 现在挪进 if 里：每 60 秒最多一行，且只在真的落了 seen 的那一次打。
+        if (Date.now() - lastSeenAt > 60_000) {
+          await markSeen()
+          log(`turns · 认识的会话之外的动静，只记他来过（${sessionId}）`)
+        }
         return
       }
       const ok = await adoptTalkSession(root, sessionId)
@@ -412,10 +480,16 @@ export function registerTurns(ctx, deps = {}) {
       if (!(rotateAfter > 0) || turns < rotateAfter) return
 
       // 该换会话了。换失败不算错：她还在旧会话里，下次再换。
+      // from：这一轮是从哪条会话里结出来的。`/say` 那边可能刚刚换过，
+      // Home 比对 home.json 之后会返回 skipped，这里就别再建第二条（0.8.8）。
       const st = await homeStatus(root)
-      const rot = await rotateTalkSession(ctx, { root, wsId: st.wsId, log })
+      const rot = await rotateTalkSession(ctx, { root, wsId: st.wsId, log, from: p.sessionId })
       if (!rot.ok) {
         log(`turns · 聊满 ${turns} 轮，该换会话但没换成：${rot.why}`)
+        return
+      }
+      if (rot.skipped) {
+        log(`turns · 聊满 ${turns} 轮，但屋子已经先换过了（${rot.sessionId}），这条不再换`)
         return
       }
       // 留一条 meta：换会话这件事要能在事件流里查到（观测台/排查用）。
@@ -470,9 +544,17 @@ export function registerTurns(ctx, deps = {}) {
           // 2026-11-03（issue #18）：unknown 以前是**悄无声息**地丢掉的。
           // 现场表现就是「明明在说话，事件流零增长，日志里一个字都没有」——
           // 报工单的人只能自己去读源码才知道哪一步断的。至少留一行。
+          //
+          // 2026-11-04（用户 m02556 报的刷屏）：同一个 kind 十分钟之内只打一行。
+          // 留一行是为了让人知道「有东西被丢了」，留一百行只会把日志淹掉——
+          // 那种情况下这条日志反而失去了它唯一的作用。
           if (cls === 'unknown') {
             const kind = String(event?.data?.source?.kind ?? '')
-            log(`turns · 这条消息认不出来源，没算进轮数（kind=${kind || '空'}）`)
+            const now = Date.now()
+            if (now - (unknownLoggedAt.get(kind) ?? 0) > 10 * 60_000) {
+              unknownLoggedAt.set(kind, now)
+              log(`turns · 这条消息认不出来源，没算进轮数（kind=${kind || '空'}）`)
+            }
           }
           return
         }
@@ -497,6 +579,18 @@ export function registerTurns(ctx, deps = {}) {
         }
         const said = cut(assistantText(event?.data))
         if (said) pending.says.push(said)
+        else if (Date.now() - markupDroppedAt > 60_000) {
+          // 2026-11-04（issue #25）：这一步的正文只剩工具调用标记
+          // （`</｜｜DSML｜｜ invoke>`），清洗后没有正文。她本来要说的那句话
+          // 在这一步就丢了，插件补不回来——能做的只有**别把标记当她的话记进去**，
+          // 并且在日志里留一行，免得以后这类事件变多了都没人发现。
+          const blocks = event?.data?.message?.content
+          const raw = Array.isArray(blocks) ? blocks.map((b) => String(b?.text ?? '')).join('\n') : ''
+          if (hasToolMarkup(raw)) {
+            markupDroppedAt = Date.now()
+            log('turns · 这一步的正文只剩工具调用标记，没当成她的话')
+          }
+        }
         return
       }
       if (type === 'turn/end') {

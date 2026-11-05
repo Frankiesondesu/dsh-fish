@@ -22,6 +22,7 @@ import { registerWatch } from './watch.js'
 import { registerZoom } from './zoom.js'
 import { registerHerOpen } from './herfile.js'
 import { registerLetter } from './letter.js'
+import { registerNote } from './note.js'
 import { registerBringBack } from './keep.js'
 import { registerAsk } from './ask.js'
 import { registerAlarm } from './alarm.js'
@@ -30,7 +31,6 @@ import { registerVoice } from './voice.js'
 import { registerMeme } from './meme.js'
 import { registerDream } from './dream.js'
 import { registerProactive } from './proactive.js'
-import { devModeSync } from './devmode.js'
 import { registerObserve } from './observe.js'
 import { startScheduler } from './scheduler.js'
 import { registerTurns } from './turns.js'
@@ -57,7 +57,7 @@ import { logBoot, makeLogger } from './log.js'
 export const name = 'dsh-fish'
 
 /** 版本号：只用于日志导出（排查时第一件事是确认跑的是哪一版）。 */
-export const VERSION = '0.8.7'
+export const VERSION = '0.9.0'
 
 // ⚠️ 一个数组写全，不要拆成对象
 // 2026-10-30（m02961）：`userQuestions` **不再写进 inject**。写进 inject 的东西缺一个，
@@ -250,10 +250,9 @@ export function apply(ctx, baseConfig = {}) {
         herDir,
         extra: config?.tools?.allow ?? [],
         enabled: config?.tools?.restrict !== false,
-        // 本机实验工具（m02837）：与注册、提示词共用 devModeSync 一个判据。
-        dream: devModeSync(root),
-        // 主动说话（m04610）：her_say 同样只在 .dev 下进白名单。
-        proactive: devModeSync(root),
+        // 0.9.0 起公开：梦与主动说话不再是本机实验。
+        dream: true,
+        proactive: true,
         log: (...a) => logger.info(...a),
         onResult: (r) => { restrictState = r },
       })
@@ -390,6 +389,10 @@ export function apply(ctx, baseConfig = {}) {
         () => registerHerOpen(ctx, { root }),
         // R4：留话（不审批）。和 growth_commit 一样是纯追加，但收件人明确。
         () => registerLetter(ctx, { root, tenant: tenancy }),
+        // issue #22 乙档（2026-11-04）：醒来看的那张便条。写完会不会到期、
+        // 到期那天摆不摆在最前面，都由 lib/note.js 与 scheduler 的唤醒正文负责，
+        // 这个工具只做两件事：记一张、划掉一张。**常驻注册**，不像梦与主动说话那样要 .dev。
+        () => registerNote(ctx, { root, tenant: tenancy }),
         // 0.6.17：纪念品。她只能「问」，真带回去要那个人在出门页点头。
         () => registerBringBack(ctx, { root, tenant: tenancy }),
         // 0.7.6（2026-10-30 m01274）：请求事件。她有事想征得同意时弹一张卡，
@@ -402,15 +405,14 @@ export function apply(ctx, baseConfig = {}) {
         () => registerHelp(ctx, { root }),
         // fork.46（2026-11-04）：把一句话说成声音。说不说由她定，不是自动管道。
         () => registerVoice(ctx, { root, tenant: tenancy }),
+        // fork.53（2026-11-05）：发一张表情。文件名就是它的意思，挑哪张由她定。
         () => registerMeme(ctx, { root, tenant: tenancy }),
-        // 0.8.1 本机实验（2026-10-30 m02837）：梦 A 案——醒来记一句。
-        // **只在 .dev 存在时注册**：公开版里她既没有这个工具，也不该在身份里读到它。
-        ...(devModeSync(root) ? [() => registerDream(ctx, { root, tenant: tenancy })] : []),
-        // 0.8.1 本机实验（2026-10-30 m04610）：主动说话——她自己判断有没有话想说。
-        // 同样只在 .dev 下注册；公开版没有 her_say，也没有空手回合。
+        // 0.8.1 起（2026-10-30 m02837）：梦 A 案——醒来记一句。0.9.0 起公开（不再挂 .dev）。
+        () => registerDream(ctx, { root, tenant: tenancy }),
+        // 0.8.1 起（2026-10-30 m04610）：主动说话——她自己判断有没有话想说。0.9.0 起公开。
         // 2026-10-30 真机：这里原来只有 { root, log }，guardWrite 拿到 undefined 的 state，
         // checkCaller(undefined) 每次都判「不在这个家」；写入守卫要的是 tenancy。
-        ...(devModeSync(root) ? [() => registerProactive(ctx, { root, tenant: tenancy, log: (...a) => logger.info(...a) })] : []),
+        () => registerProactive(ctx, { root, tenant: tenancy, log: (...a) => logger.info(...a) }),
       ]) {
         try {
           const d = reg()

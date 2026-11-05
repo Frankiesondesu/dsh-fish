@@ -172,6 +172,45 @@ const STOP_CHARS = new Set('的了是我你他她它在有和就都也不很吗�
 const DAY_MS = 86_400_000
 
 /**
+ * 这条只是「在对话里说过」，还是她自己认领写下的。
+ *
+ * `turns.js` 的 `settle()` 会把一轮里她说的话补写成 `utterance` 并打
+ * `flags:['uncommitted']`，注释写的是「只留证，不当信念」。它跟
+ * `growth_commit` 里认领下来的话在事件流里长得差不多，她翻旧事时
+ * 分不出哪个是自己认真写下的（2026-11-04 群反馈第二条、第三条）。
+ */
+const chatOnly = (ev) => Array.isArray(ev?.flags) && ev.flags.includes('uncommitted')
+
+/** 事件时刻 → 本地 HH:MM（与 report.js / inbox.js 同一口径） */
+function localClock(ts) {
+  // 调用方传进来的是已经 parse 过的毫秒数（searchEvents 里的 `ts`），
+  // 也可能有手写 fixture 直接给 ISO 串——两种都认。
+  const n = typeof ts === 'number' ? ts : Date.parse(String(ts ?? ''))
+  if (!Number.isFinite(n)) return ''
+  const d = new Date(n)
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+}
+
+// 按 UTF-16 截时别把 emoji 切成半个：写进文件就是乱码。
+const clip = (text, n) => (text.length > n ? text.slice(0, n - 1).replace(/[\uD800-\uDBFF]$/, '') + '…' : text)
+
+// 一条一行：正文里的换行会把行尾的 id 挤到下一行，也会把缩进的关系行拆开。
+const oneLine = (text) => text.replace(/\s+/g, ' ').trim()
+
+/** 不是她自己写下的，要说清来路 */
+function labelled(type, text) {
+  // heard 是旁听来的：明确写成「他说」，别让她误以为是自己说的。
+  if (type === 'heard') return `他说：${text}`
+  // voice、answer 同理：一句是读到的陌生人的话，一句是别人回她的。
+  if (type === 'voice') return `读到别人说：${text}`
+  if (type === 'answer') return `回复：${text}`
+  return text
+}
+
+/** 她说了但没认领。标在最后，所以要等截断之后再加，不然句子一长标记就被截掉了。 */
+const CHAT_MARK = '｜聊天里说的'
+
+/**
  * 把查询切成可匹配的片段。
  * 中文没有空格，整串匹配会全落空——所以补上二字切片。
  */
@@ -235,6 +274,42 @@ export function refCounts(events = []) {
 }
 
 /**
+ * 每条事件最近一次被哪条 revise 改过。
+ *
+ * 为什么要有（2026-11-04，issue #23）：`refCounts` 把 revise 的 refs 也数成
+ * 「被检验过」，于是**被推翻的那句反而加权排到第一**——她翻到自己早就推翻的话，
+ * 只能当它还算数，因为结果里 revise 和它改掉的那句毫无关系。
+ */
+function latestRevisions(events = []) {
+  const m = new Map()
+  for (const ev of events ?? []) {
+    if (ev?.type !== 'revise') continue
+    for (const r of Array.isArray(ev.refs) ? ev.refs : []) {
+      if (String(r) === String(ev.id)) continue
+      const prev = m.get(String(r))
+      if (!prev || !(Date.parse(ev.ts) < Date.parse(prev.ts))) m.set(String(r), ev)
+    }
+  }
+  return m
+}
+
+/**
+ * 顺着改口走到她最后的说法。那句后来也可能被改过，
+ * 而她没法按 id 再翻一次，只给一跳等于把「当它还算数」往后挪了一步。
+ * 走到「确认」就停：确认不是改口，再走下去会把她认下的那句说成改了。
+ */
+function lastSaying(ev, revisions, rowId) {
+  const seen = new Set([String(rowId), String(ev.id)])
+  let cur = ev
+  for (;;) {
+    const next = revisions.get(String(cur.id))
+    if (!next || next.verdict === 'confirmed' || seen.has(String(next.id))) return cur
+    seen.add(String(next.id))
+    cur = next
+  }
+}
+
+/**
  * 固化的那几条（derive 的 solid）。失败就当没有，绝不让检索翻不动。
  * 事件流越长算得越久，按「条数 + 最后一条 id」缓存一次。
  */
@@ -282,6 +357,7 @@ export function searchEvents(events, query, o = {}) {
     ? o.solidIds
     : new Set(Array.isArray(o.solidIds) ? o.solidIds.map(String) : [])
   const refs = weigh ? refCounts(events) : new Map()
+  const revisions = latestRevisions(events)
   // fork.36：门槛的两个系数。传了就用传的（配置/测试），没传用默认。
   const num = (v, d) => (v === undefined || v === null || !Number.isFinite(Number(v)) ? d : Number(v))
   const oldDays = num(o.oldDays, RECALL_OLD_DAYS)
@@ -373,8 +449,15 @@ export function searchEvents(events, query, o = {}) {
 
     let rank = score * decay
     if (weigh) {
+      // 2026-11-04（群反馈第三条）：认领过的话排在自己的聊天原话前面。
+      // 幅度取 +4：要压得过「只靠 solid 的认领（+3）」，又不能压过字面命中差得多的。
+      // 聊天原话不给这一分，它靠字面命中自己争。
+      if (!chatOnly(ev)) rank += 4
       if (solid.has(String(ev.id))) rank += 3
-      rank += Math.min(3, refs.get(String(ev.id)) ?? 0)
+      // issue #23：她已经推翻的话不算「被检验过」，不管之前被引用过几次。
+      // 原来 refCounts 把 revise 的 refs 也数进去，于是被推翻的旧话反而排到第一——
+      // 她翻到自己早就不要的说法，只能当它还算数。
+      if (revisions.get(String(ev.id))?.verdict !== 'refuted') rank += Math.min(3, refs.get(String(ev.id)) ?? 0)
     }
     // fork.36：可及性门槛。线索不够就是**想不起来**，不是"没有这条"——
     // 账本里它还在，只是她这次没把它调出来。人也是这样。
@@ -387,24 +470,56 @@ export function searchEvents(events, query, o = {}) {
   }
 
   scored.sort((a, b) => b.rank - a.rank || b.ts - a.ts)
-  const rows = scored.slice(0, limit).map(({ ts, ev, text }) => ({
+  // 改口关系不受 days、kind 影响：被改的那句在时间窗外，也照样引出来。
+  const byId = new Map()
+  if (revisions.size) {
+    for (const ev of events ?? []) if (ev && !SKIP_TYPES.has(ev.type)) byId.set(String(ev.id), ev)
+  }
+  const said = (ev, verdict) => ({
     id: String(ev.id ?? ''),
-    // 2026-11-03（issue #19）：原来取 UTC 日期。她翻「那天」翻到的是隔天的日期，
-    // 跟自己日记里的日期对不上。dateKey 走本地钟，与 settings 同一口径。
-    date: dateKey(new Date(ts)),
-    ago: Math.max(0, Math.floor((now - ts) / DAY_MS)),
-    type: String(ev.type ?? ''),
-    text: text.length > snippet ? text.slice(0, snippet - 1) + '…' : text,
-  }))
+    verdict: verdict ?? null,
+    // 引用也要说清来路：不然别人的话引出来就像她自己说过的。字数只算原话，来路另算。
+    text: labelled(String(ev.type ?? ''), clip(oneLine(String(ev.text ?? '')), RECALL_BRIEF_SNIPPET)) + (chatOnly(ev) ? CHAT_MARK : ''),
+  })
+  const rows = scored.slice(0, limit).map(({ ts, ev, text }) => {
+    const next = revisions.get(String(ev.id))
+    const last = next && lastSaying(next, revisions, ev.id)
+    const earlier = ev.type === 'revise'
+      ? (Array.isArray(ev.refs) ? ev.refs : []).filter((r) => String(r) !== String(ev.id)).map((r) => byId.get(String(r))).find(Boolean)
+      : null
+    return {
+      id: String(ev.id ?? ''),
+      // 2026-11-03（issue #19）：原来取 UTC 日期。她翻「那天」翻到的是隔天的日期，
+      // 跟自己日记里的日期对不上。dateKey 走本地钟，与 settings 同一口径。
+      date: dateKey(new Date(ts)),
+      // 2026-11-04（群反馈第二条）：同一天里说过两句话，光有日期她分不清先后，
+      // 更分不清哪句是后来改的口。这里补上本地时分（与报告、日记同一套口径）。
+      clock: localClock(ts),
+      ago: Math.max(0, Math.floor((now - ts) / DAY_MS)),
+      type: String(ev.type ?? ''),
+      // 聊天里随口说的，跟她自己认领写下的话分开标。heard 已经有「他说：」的先例，
+      // 这边沿用同一套：能标出来源就标出来源，别让她把别人/随口当成自己写下的。
+      chatOnly: chatOnly(ev),
+      // 改口关系：refs 指向被改的那几条，verdict 说明是推翻还是修正。
+      verdict: String(ev.verdict ?? ''),
+      refs: Array.isArray(ev.refs) ? ev.refs.map(String) : [],
+      // issue #23：关系单独成行，并带上对方原话开头。
+      // her_recall 不能按 id 查——只给 id 她翻不到，等于还得猜。
+      ...(last ? { later: said(last, last === next ? next.verdict : null) } : {}),
+      ...(earlier ? { earlier: said(earlier, ev.verdict) } : {}),
+      text: clip(oneLine(text), snippet),
+    }
+  })
   return { rows }
 }
 
-/** 渲染成她能读的一段（不是 JSON） */
 /**
  * 把一条记录转成她读得懂的一句（fork.10）。
  *
  * `saw:` / `watched:` / `browse:` 是系统记账，原文长得像配置项。
  * 她翻旧账时不该看见 `saw:BV1xx 《…》` 这种，得说成人话。
+ * （0.8.8 的 labelled 只管 heard/voice/answer 的来源标注，不管这几种记账原文；
+ * 所以两套并存：先 displayOf 翻记账，再 labelled 标来源。）
  */
 function displayOf(r) {
   const text = String(r.text ?? '')
@@ -432,6 +547,35 @@ function displayOf(r) {
   return text
 }
 
+/**
+ * 改口关系，每条一行，缩进挂在那条下面：
+ * 第一行的最后一个括号始终是这条自己的 id（身份文档就是这么教她抄 id 的）。
+ * 先写它改了谁，再写它后来被谁改，正好是时间顺序。brief 档不引对方的话。
+ */
+function relationLines(r, brief) {
+  const out = []
+  if (r.earlier) {
+    const { verdict, text, id } = r.earlier
+    const word = verdict === 'refuted' ? '这句推翻的是' : verdict === 'confirmed' ? '这句确认的是' : '这句改的是'
+    out.push(`  ${word}${brief ? '' : `：${text}`}（${id}）`)
+  }
+  if (r.later) {
+    const { verdict, text, id } = r.later
+    const word = verdict === 'refuted' ? '后来你推翻了这句' : verdict === 'confirmed' ? '后来你又确认过这句' : '后来你改过这句'
+    out.push(`  ${word}${brief ? '' : `${verdict === 'confirmed' ? '：' : '，改说：'}${text}`}（${id}）`)
+  }
+  return out
+}
+
+/**
+ * 渲染成她能读的一段（不是 JSON）
+ *
+ * 2026-11-04（群反馈第二条、第三条）改了三处展示口径：
+ *   1. 时间到分钟。原来只有日期，同一天里说过两句矛盾的话，她分不清先后。
+ *   2. 改口关系写出来。revise 一直带着 verdict 与 refs，但从来没往外拿过，
+ *      于是「我改口了」在回忆里跟普通的一句长得一样（日报里反而一直印着）。
+ *   3. 聊天里随口说的标出来。不是不许看，是要让她知道自己当时不是在记东西。
+ */
 export function renderRecall(rows, o = {}) {
   if (!rows?.length) return '你翻了，没翻到。'
   const brief = Boolean(o.brief)
@@ -441,11 +585,24 @@ export function renderRecall(rows, o = {}) {
     // 没写 id 的老调用方（测试里的手写 fixture）就不显示括号，别凭空造一个。
     const mark = r.id ? `（${r.id}）` : ''
     const ago = Number.isFinite(r.ago) && r.ago > 0 ? `（${r.ago} 天前）` : ''
-    // 先翻成人话（fork.10 的 displayOf，含 heard 的「他说：」），再按 brief 档截头——
+    const at = r.clock ? `${r.date} ${r.clock}` : r.date
+    // 先翻成人话（fork.10 的 displayOf：heard 的「他说：」+ 记账原文的翻译），再按 brief 档截头——
     // 截的是翻好之后的正文，别让她看到截了一半的记账原文。
+    // voice / answer 的来源标注（0.8.8 的 labelled）在翻译之后补上；heard 已由 displayOf 处理。
     let body = displayOf(r)
-    if (brief && body.length > RECALL_BRIEF_SNIPPET) body = body.slice(0, RECALL_BRIEF_SNIPPET - 1) + '…'
-    lines.push(`- ${r.date}${ago}｜${body}${mark}`)
+    if (r.type === 'voice' || r.type === 'answer') body = labelled(r.type, body)
+    if (brief) body = clip(body, RECALL_BRIEF_SNIPPET)
+    if (r.chatOnly) body += CHAT_MARK
+    // 改口关系：有对方原话就另起缩进行；手写 fixture 没有 earlier 数据时
+    // 退回旧的一行式说明，别让这层信息静默消失。
+    if (r.type === 'revise' && !r.earlier && !r.later) {
+      // brief 档不再整体截断这段，所以 id 只报第一个，别让一条变长。
+      const refs = Array.isArray(r.refs) ? r.refs : []
+      const to = (brief ? refs.slice(0, 1) : refs).join(',')
+      const how = r.verdict === 'refuted' ? '推翻了' : r.verdict === 'refined' ? '修正了' : r.verdict === 'confirmed' ? '仍然成立' : '改口'
+      body += to ? `（${how} ${to}，那是更早说的）` : `（${how}，那是更早说的）`
+    }
+    lines.push(`- ${at}${ago}｜${body}${mark}`, ...relationLines(r, brief))
   }
   return lines.join('\n')
 }

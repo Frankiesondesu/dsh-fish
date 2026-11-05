@@ -12,7 +12,7 @@
 
 📺 **[看视频讲解（19 分钟）](https://www.bilibili.com/video/BV1oTnZ6LEtc/)** —— 这个插件是怎么想出来的、她为什么会长成那样、13 亿 token 都花在哪了。
 
-> **当前版本 0.8.7**（2026-11-03）。这一版装了五件事：**接桥之后你说的话她能记住**（以前只有桌面客户端打的字算，QQ 桥进来的消息被静默丢掉）、**小纸条时间不再差 8 小时**、**一条鱼多间房**（桥改成只发 HTTP，不再另起一条 DSH 会话，所以不会「同时养两条鱼」、也不再撞双实例占用）、**换房间之后她还是她**（聊满 40 轮换会话时，记住日记写过几篇、请她给下一个房间留一句话）、**醒一醒跟着最新的那条对话走**。完整说明见 **[0.8.7 更新说明](RELEASE-NOTES-0.8.7.md)**，上一版见 **[0.8.6 更新说明](RELEASE-NOTES-0.8.6.md)**。
+> **当前版本 0.9.0**（2026-11-05）。这一版把一直只在开发机上生效的四样东西对所有人打开了：**她会自己开口**（攒够一股想动的劲、你在她的时段里、你确实一阵没说话、桌上有可说的东西，四条同时满足才开一轮；不想说就真的不写，只留一行记录）、**梦里记事**、**醒来没事时自己找点事做**（空醒）、**她会自己攒劲儿、惦记、缺工具就问你要**（主观能动性 / 兴趣）。刷 B 站不再挂在叫醒上（`bili_*` 工具仍可用）。0.9.0 起桥可以自己决定开几间房、每间是谁（`room` / `title` / `guest` 三个可选字段），群房默认满 7 天换新。四个设置卡可以单独关：主动搭话 / 主观能动性 / 兴趣 / 梦。完整说明见 **[0.9.0 更新说明](RELEASE-NOTES-0.9.0.md)**，上一版见 **[0.8.8 更新说明](RELEASE-NOTES-0.8.8.md)**。
 > **出门仍是实验功能**：它会真的把一条对话交出去，也会读那个工作区的项目笔记和记忆文件；最坏的情况是她把不该看的内容写进日记，而日记撤不回。第一次使用要先确认，风险与回退方式见 **[0.8.0 更新说明](RELEASE-NOTES-0.8.0.md)**。
 
 ## 和别的养成插件差在哪
@@ -140,6 +140,27 @@
 **这个豁免只发给「走过导入」的那一位**。判断依据是事件流里那条 `import-mark:` 记录，不是配置项——所以用「备份与恢复」把你自己的档搬回来，一分豁免都不会有，她仍然是你那只守着原规矩的鱼。事件流只能追加，原生的一局里永远长不出这条记录。
 
 **只在还没有起点的一局生效**。已经有起点时会拒绝，让你先重置——覆盖一个已经在长的她，这个决定不该由插件替你做。带过来的称呼也会顶掉我们第一天的起名事件，她不会再问一遍「该怎么叫你」。
+
+## 她会自己开口吗（0.9.0）
+
+会。但**默认是关着的**，你想要的时候再在设置里打开。
+
+**她什么时候会开口**：她自己会攒一股「想动」的劲，默认大约六七个小时攒满（桌上东西多的时候四小时上下），攒满之后还要同时满足三件事才会真的开一轮——你在她的醒着时段里（默认 12:00–02:00）、你确实有一阵没跟她说话了（默认 6 小时，下限 1 小时）、桌上有可说的东西。三件事都满足，她才自己醒一次；醒来说不说、说什么，仍然由她决定。
+
+**桌上有可说的东西**，指这几样：她自己问过、还没答案的问题；搁了很久的旧句子；她给你留过话、而你后来有没有来过；她最近总说到的那件事。桌上什么都没有的时候，劲儿再满她也不动——这条是 0.9.0 加的，为了让「醒来」有由头，而不是按表打卡。
+
+**她可以真的什么都不说**：不写就是不写。那一轮不会出现在对话里，只留一行记录（0.9.0 起「这一轮没什么要说的」这类元话也按「没开口」处理，不会占掉当天的次数）。
+
+**在哪调**：设置 → 大肥鱼，有四个独立卡：
+
+- **主动搭话** —— 开/关；一天最多几次（0–6）；你多久没说话她才可能开口（1–24 小时）。
+- **主观能动性** —— 她要不要自己攒这股劲（关掉就只按日程叫醒，不会自己开）。
+- **兴趣** —— 要不要把「她最近总说到的那件事」摆到桌上，以及「醒着没事时，自己找点事做」（空醒：没有待办、桌上也没有东西时，她可以自己翻翻旧句子、写点什么，或者什么都不做）。
+- **梦** —— 梦里记不记事。
+
+**花多少**：一次开口大约 1.5 分钱（0.9.0 实测一次 `¥0.0146`，上下文 50 万 token 量级）。想省就把「一天最多几次」调到 1，或者把「你多久没说话」调大。
+
+**关掉之后**：工具本身还在（`her_say`、`her_note`、`her_dream` 都在，她照样能记、能写、能做梦），只是不会再自己开一轮。
 
 ## 数据在哪
 
@@ -347,7 +368,7 @@ lib/
   toolschema.js 简写参数 DSL → 标准 JSON Schema
   observe.js    宿主侧 JSON API（/dsh-fish/state、/events、/beliefs、/diary、/config、/wake、/browse、/reports、/update）
   client.js     浏览器半边：设置 → 大肥鱼
-test/           1090 个测试，node --test 全绿
+test/           1441 个测试，node --test 全绿
 ```
 
 ## 跑测试
@@ -368,24 +389,27 @@ ffmpeg 写文件这件事不需要额外权限：抽帧和拼图都从 stdout �
 
 默认不校验证书（ffmpeg 的 `tls_verify` 默认就是 0），拉到能出就直接出。只有你明确想校验证书、或某个构建不带 CA 时，才设置 `DSH_FISH_CA_FILE` 指向 CA 包——设了它会同时打开 `-tls_verify 1`，两者必须成对，光给 CA 不开校验是空转（2026-10-30 实测：传一个不存在的 CA 文件照样出图）。
 
-三种装法，任选一种：
-
-1. **面板装**（推荐）：DSH → 设置 → 插件 → 从本地安装 → 选这个目录。
-2. **命令行装**（先关掉 DSH，运行中替换已加载的包会 EPERM）：
+**从 npm 装**——推荐，一条命令，不用先下载，也不用关掉 DSH：
 
 ```
-"<DSH>/resources/runtime/cli/bin/dsh.cmd" plugin --profile <profile> add "link:<本目录绝对路径>"
+"<DSH>/resources/runtime/cli/bin/dsh.cmd" plugin --profile <profile> add "@ssamurias/dsh-fish"
 ```
 
-3. **直接从 GitHub 装**（不用先下载）：
+不想经过 npm 就直接从 GitHub 装，同样不用关 DSH：
 
 ```
 "<DSH>/resources/runtime/cli/bin/dsh.cmd" plugin --profile <profile> add "github:ssamurias/dsh-fish"
 ```
 
-打算改代码用 `link:` 指向自己的工作目录；只是想用，用 `github:` 这条。
+要改代码才用源码目录，而且**必须先关掉 DSH**——运行中替换已被加载的包会 `EPERM`，包目录会被留成「已删除」，下次启动缺包：
 
-无论哪种，都要保证 profile 的 `package.json` 里 **`dependencies` 与 `dsh.profile.bundles` 都有 `dsh-fish`** —— 只有一边会在下次 `pnpm` 清理时把包删掉，表现为「重启后 DSH 崩了 / 设置页没有鱼」。包名必须与 `cordis.patch.yml` 里的 `name` 完全一致（都是 `dsh-fish`）。
+```
+"<DSH>/resources/runtime/cli/bin/dsh.cmd" plugin --profile <profile> add "link:<本目录绝对路径>"
+```
+
+> 升级已有的安装也等于「替换已被加载的包」：DSH 开着的时候先关掉再装，或者直接用设置页里的插件管理器升级。
+
+无论哪种，都要保证 profile 的 `package.json` 里 **`dependencies` 与 `dsh.profile.bundles` 都有 `@ssamurias/dsh-fish`** —— 只有一边会在下次 `pnpm` 清理时把包删掉，表现为「重启后 DSH 崩了 / 设置页没有鱼」。包名必须与 `cordis.patch.yml` 里的 `name` 完全一致（都是 `@ssamurias/dsh-fish`，**带 scope 的全名，写短名客户端那半会静默不加载**）。
 
 **全新 profile 还要有 `@deepseek-ai/dsh-web-app`**：只装 `dsh-base` 的话，插件会停在 `pending (waiting for services: sessionController, webServer)`，页面根本起不来。`dsh plugin add` 只会自动加 `dsh-base`，`dsh-web-app` 要自己补进 `bundles`。
 
@@ -395,17 +419,45 @@ ffmpeg 写文件这件事不需要额外权限：抽帧和拼图都从 stdout �
 
 **查到新版可以直接在这儿升级**（0.6.14 起）：点「下载 vX」→ 下载并校验 → 点「现在重启并安装」→ 应用自己关掉、换包、重开。中间有两次确认，没点确认什么都不会发生：第一次只下载，不碰现有安装；第二次才关应用。
 
-- 下载走 GitHub 的 tag 包（`codeload` 直连；`ghproxy.net` / `ghfast.top` 两个镜像走 `github.com/…/archive/refs/tags/v<ver>.tar.gz`——镜像不认 codeload 地址，会回 403。单源 25 秒、整批 60 秒，断了换下一个）。下载完**先解开验包**——包名、版本、`lib/index.js` 都在才算成功；镜像回个 HTML 错误页、或缓存滞后给了旧版本，都会被拒，半截文件不落盘。
-- 失败会写清哪条源、什么原因，卡片里留「重试下载」，不用刷新页面。
-- 安装交给一个独立脚本做（数据目录 `updates/install-v<ver>.cmd`）：等应用退出 → 备份 profile 的 `package.json` / `pnpm-lock.yaml` / 插件目录 → 用应用自带的 node/pnpm 装**刚才下载并验过的那只本地包**（`add "file:<数据目录>/updates/dsh-fish-v<ver>.tgz"`）→ 核对装上的版本 → 失败就还原备份 → 重开应用。日志在 `updates/last.log`，界面上能看到最后几行。不直接写 `github:` spec，是因为 pnpm 得跑 `git ls-remote` 打 `github.com:443`，国内实测 `Connection was reset`；本地包零网络。那个 `.tgz` 会留在 `updates/` 里，之后 `pnpm install` 还要用它。
+- **0.8.10 起走 npm 装**（`add "@ssamurias/dsh-fish@x.y.z"`），不再用 `file:<临时 tgz>`——那条路会把依赖记成一个临时路径，下次升级时连自己都认不出来，被当成「开发版」拒掉。下载那一步保留，只用来确认这个版本真的在、内容没被换掉（先解开验包名、版本、`lib/index.js`，镜像回 HTML 错误页或给了旧版本都会被拒）。
+- **不再弹黑窗口**。以前用 detached 起 `cmd.exe`，Windows 会给它另开一个控制台，用户看到一块黑的、关不掉。现在同一份批处理由 VBS 启动器经 `wscript //B` 藏起来跑：窗口不显示，脚本照常等宿主退出、装、校验、失败回滚、再把它拉起来。日志仍在 `updates/last.log`，界面上能看到最后几行。
+- 版本号走三条源并发取（npm 官方源、npmmirror 镜像，加上 GitHub 那几条），国内通哪条算哪条。失败会写清哪条源、什么原因，卡片里留「重试下载」，不用刷新页面。
 - **开发版不升级**：依赖写的是 `link:` / `file:`（装到源码目录那种）时按钮不会出现，服务端也会拒——那会把源码目录换成下载包。非桌面版（拿 `node` 跑起来的）同样拒绝安装：换上去却没有能重开的 exe，等于把人关在门外。
 - 同一张卡里还有个 GitHub 入口（「或去 GitHub 手动下载」），代码、更新记录、怎么装都在那边。
 
+> **0.8.10 之前用 `link:` 装的人，先跑一次迁移。** 包名从 `dsh-fish` 改成了 `@ssamurias/dsh-fish`，插件自带的 `cordis.patch.yml` 条目名也跟着变成完整包名——而你 profile 的 `node_modules` 里只有裸名 `dsh-fish` 那条链接，条目 import 会失败，DSH 直接起不来。先关应用，然后：
+>
+> ```
+> node scripts/fix-legacy-link.mjs          # 先看它要改什么
+> node scripts/fix-legacy-link.mjs --write  # 真改（会备份 package.json）
+> ```
+>
+> 它会把 `node_modules/@ssamurias/dsh-fish` 建好、把依赖键改成新名、把老链接改名停用。从 npm / GitHub 装的人不受影响，不用跑。
+
 > 路径里带中文时，用 ASCII 目录联接（junction）指过去更稳：先 `fs.symlinkSync(真目录, ASCII 别名, 'junction')`，再 `link:<ASCII 别名>`。用 `mklink /J` 接中文目标路径常把目录名写成乱码，随后 `MODULE_NOT_FOUND`。
+
+## 从旧版升到 0.9.0（含改名与升级修复）
+
+0.8.9 把包名从 `dsh-fish` 改成了 `@ssamurias/dsh-fish`；0.9.0 又把原本准备在 0.8.10 发的升级修复一起带了进来。老安装分三种，走的路不一样：
+
+| 你当初怎么装的 | 怎么升 | 会发生什么 |
+| --- | --- | --- |
+| npm / GitHub | 设置 → 大肥鱼 → 插件 → 检查更新 → 下载 → 重启安装 | 脚本装完新包会先收拾现场：删旧的裸名依赖键、删旧 `bundles` 条目、把旧的 `node_modules/dsh-fish` 改名成 `.disabled-<时间戳>` 收起来（不删，能回退），改 `package.json` 前先备份。全程不弹窗口，日志在 `~/.dsh-fish/updates/last.log` |
+| `link:` 源码目录 | 先跑 `node scripts/fix-legacy-link.mjs --write`，再启动 | 不跑就起不来：条目名是全名，你本地只有裸名链接，import 失败会让 DSH 直接崩 |
+| 0.8.9 从 npm 装（包名已经是 `@ssamurias/dsh-fish`） | 手动一条命令：`plugin --profile <profile> add "@ssamurias/dsh-fish@0.9.0"` | 0.8.9 的升级代码只认裸名 `dsh-fish`，自动检查更新会把它判成「开发版 / 不归我管」；客户端半边也还是短 id，设置页可能空着 |
+| 还停在 0.8.8 或更早（GitHub 装） | 手动一条命令：`plugin --profile <profile> add "@ssamurias/dsh-fish@0.9.0"` | 0.8.8 及更早的升级脚本还是老代码（用 `file:` 装临时 tgz），大概率装不上新名字，卡在旧版本 |
+
+升级完自检三行，缺一行就会「重启后崩 / 设置页没有鱼」：
+
+```
+package.json 的 dependencies           里有 "@ssamurias/dsh-fish"
+package.json 的 dsh.profile.bundles    里有 "@ssamurias/dsh-fish"
+node_modules 里                       没有裸名 dsh-fish 目录
+```
 
 ## 卸载 / 停用
 
-- **卸载**：设置 → 插件 → 卸载（或 `dsh plugin --profile <profile> remove dsh-fish`），然后重启。`~/.dsh-fish/` 不会被动，她的记忆留在那儿。
+- **卸载**：设置 → 插件 → 卸载（或 `dsh plugin --profile <profile> remove @ssamurias/dsh-fish`），然后重启。`~/.dsh-fish/` 不会被动，她的记忆留在那儿。
 - **只想让她歇着**：设置 → 大肥鱼 → 把「每天醒几次」设成 0。关掉后定时器不唤她、不刷 B 站、不写任何事件——零后台活动。
 
 ## 现在的状态
@@ -413,19 +465,22 @@ ffmpeg 写文件这件事不需要额外权限：抽帧和拼图都从 stdout �
 P1（骨架）：事件流、派生、阶段门、生物钟、工具、冷落检测、日记、观测台。
 P2（她真的会刷 B 站并写报告）：`lib/bili.js` 只读客户端 + `lib/browse.js` 选题筛读 + `lib/look.js` 的 `bili_look` 工具 + `lib/report.js` 写稿，已接进生物钟。
 
-**已有 1090 个测试全绿**，真接口跑通过一轮（10.8s，含首页+详情+评论+弹幕）。
+**已有 1441 个测试全绿**，真接口跑通过一轮（10.8s，含首页+详情+评论+弹幕）。
 
-`browse.enabled` 默认 **true**（装好就能用）；不想让她上网就在设置 → 大肥鱼里关掉，关掉后定时器一次都不会调 B 站接口。
+`browse.enabled` 默认 **false**（0.9.0 起不再由叫醒驱动）；想让她醒来顺带刷首页，在 `config.json` 里设回 `true`，关掉后定时器一次都不会调 B 站接口。`bili_*` 工具仍然可用，只是不再挂在唤醒上。
 
 ## 鸣谢
 
 这个插件不依赖任何第三方库（`package.json` 的三个依赖字段都是空的），但想法不是一个人想出来的。
 
 - **@吴晓观**（交流群 1 群群友）—— 记忆机制这一块的思路起点来自他。0.8.6 里「固化下来的认知也会随时间退下去」「翻旧事可以先只给清单再给全文」「记忆相关的数字要说得清它数的是什么」这几条，最初都是他在群里讲的。落进本插件时全部重新实现了一遍，没有代码或文字的直接搬运；具体的取舍与改法记在 [CHANGELOG](CHANGELOG.md) 的 0.8.6 一节。
+- **@无**（交流群 2 群群友）—— 主观能动性的思路起点来自对方在群里的一句话：「主动性不该是定时器，而是攒够了的冲动。」0.9.0 的「劲儿攒够才动、兴趣会回灌」就是把这句落成实现；代码全部自写，没有搬运。
 - **@Bacon-01** —— 0.8.6 的 B 站手机扫码登录（含自写的零依赖二维码编码器 `lib/qr.js`）由他贡献，见 [PR #17](https://github.com/ssamurias/dsh-fish/pull/17)。
+- **@BBleae**（晴猫）—— 从 0.8.6 起先后提了五个 PR：三个直接合入（[#10](https://github.com/ssamurias/dsh-fish/pull/10) 匿名 buvid3、[#11](https://github.com/ssamurias/dsh-fish/pull/11) 叫醒间隔、[#15](https://github.com/ssamurias/dsh-fish/pull/15) 叫醒那一轮不记成「他来过」）；[#23](https://github.com/ssamurias/dsh-fish/pull/23) 的复现与改法落进 0.8.8（日报/回忆分三种话、被推翻的话不再排第一）；[#26](https://github.com/ssamurias/dsh-fish/pull/26) 修掉回忆 `brief` 档的两处显示问题（已并入 0.9.0）。
+- **@BBleae**（晴猫）在 0.9.0 期间又提交了 #27–#31 五个 PR：宿主拼的上下文不算他来过、`wake-spacing` 假宿主探活、`her_note` 按她自己写的话划掉、没认领的聊天行、导出事件流只留元数据。这五个 PR 都已并入 0.9.0（合并提交 `85b5b9c`、`72aefed`、`d49738a`、`a21d472`、`c230109`）。
 
 原理页里引用的 Kolb / Piaget / Bowlby / Festinger / Bartlett / Dewey / Schön，只是思想引用（页底标了作者与年份），不含他人代码或文字。
 
 ## 许可
 
-MIT，见包内 `LICENSE`。**本项目没有上游代码派生**——`lib/` 全部为本项目新写；B 站接口的行为来自本机实测（见 `lib/bili.js` 头部注释），不是官方 API，也没有拷任何第三方库。原理页引用了 Kolb / Piaget / Bowlby / Festinger / Bartlett / Dewey / Schön 的理论，只是思想引用（页底标了作者与年份），不含他人代码或文字。插件不含第三方美术资源：头像由你自己上传到 `~/.dsh-fish/avatar.<ext>`；仓库里唯一的图片是 `media/fish.jpg`（本仓库作者提供的原图 + AI 生成）与 `media/` 下两张自绘 SVG。
+MIT，见包内 `LICENSE`（只放标准 MIT 全文，便于 GitHub / SPDX 识别）；第三方来源、思想引用与美术素材授权另见 `THIRD-PARTY-NOTICES.md`。**本项目没有上游代码派生**——`lib/` 全部为本项目新写；B 站接口的行为来自本机实测（见 `lib/bili.js` 头部注释），不是官方 API，也没有拷任何第三方库。原理页引用了 Kolb / Piaget / Bowlby / Festinger / Bartlett / Dewey / Schön 的理论，只是思想引用（页底标了作者与年份），不含他人代码或文字。插件不含第三方美术资源：头像由你自己上传到 `~/.dsh-fish/avatar.<ext>`；仓库里唯一的图片是 `media/fish.jpg`（本仓库作者提供的原图 + AI 生成）与 `media/` 下两张自绘 SVG。

@@ -13,7 +13,7 @@
  *   3. **频率是上限，不是行为要求**。每天最多 maxPerDay 次、两次之间至少隔
  *      cooldownHours；概率随"多久没人说话"缓慢上升，但不保证一定触发。
  *
- * 可见性：工具注册、提示词段、设置页卡片三处共用 devModeSync 的判据，
+ * 可见性：0.9.0 起公开（工具注册、提示词段、设置页卡片三处同时打开）。
  * 公开版既没有这个工具，也不会有这个回合。这是 0.6.10 的教训——不要用
  * 「安装路径里有没有 node_modules」去猜。
  */
@@ -25,7 +25,6 @@ import { defineTool } from './tool.js'
 import { guardWrite } from './tenant.js'
 import { logLine } from './log.js'
 import { tsMs, HER_TYPES } from './schema.js'
-import { randomUUID } from 'node:crypto'
 
 /** 一天的默认上限。 */
 export const PROACTIVE_DEFAULTS = Object.freeze({
@@ -46,8 +45,26 @@ export const PROACTIVE_REFS_MAX = 6
 export const PROACTIVE_MATERIAL = Object.freeze([
   'utterance', 'revise', 'reunion', 'narration', 'refusal', 'heard',
 ])
-/** 空手回合落进对话里的那一句。只说明"没人跟你说话"，不布置任务。 */
-export const PROACTIVE_TRIGGER = '（现在没有人跟你说话。）'
+/**
+ * 空手回合投进对话里的那一句（2026-11-04 用户 m00428 之后）。
+ *
+ * 以前是「（现在没有人跟你说话。）」—— 宿主的 sessionController.prompt() 把它按真人发言
+ * 画成用户气泡，用户怎么都能看见。现在改走 source.kind = 'fish-wake' 的
+ * agent.followup()（见 lib/deliver.js），前端把它画成一张默认收起的折叠条，
+ * 正文只在点开后出现。处境本来就走 system prompt 段，这里只留一个空投递信号。
+ */
+export const PROACTIVE_PING = ' '
+
+/**
+ * 「缺工具就开口要」（2026-11-05，用户 m02031）。
+ *
+ * 用户的诉求：她真想做某件事、但手上没有那个工具时，要敢问，而不是绕过去、
+ * 或者干脆放弃。缺工具不是失败，也不是她该自己硬扛的事。
+ *
+ * 写法上只说路径与许可，不派活：不问「你有没有想要什么工具」——那是逼她编。
+ */
+export const TOOL_ASK_NOTE = '（如果你想到要做什么、但手上没有那件工具：直接说你要它做什么，' +
+  '问主人能不能给你装上；也可以开一张 ask 卡问。缺工具不是失败，不用绕着走。）'
 
 /**
  * 读配置并夹紧。老配置没有 proactive 这一组，用默认值。
@@ -72,6 +89,28 @@ export function proactiveConfig(config = {}) {
   }
 }
 
+/**
+ * 静默回合的记账行前缀（2026-11-05，用户 m00803）。
+ *
+ * 与 `proactive-turn:` 分开记，是因为两件事在语义上完全不同：
+ *   - `proactive-turn:` = 她醒过来、**真的说了话**——占额度、起冷却；
+ *   - `proactive-silent:` = 她醒过来、看了一圈、没有开口——不占额度、不起冷却，
+ *     但要单独限个次数（见 `SILENT_MAX_PER_DAY`），否则「一直醒、一直不说」
+ *     会变成另一种刷屏：每一轮都往她的上下文里塞一段 reasoning。
+ *
+ * 0.8.8 及以前只有一个 `proactive-turn:`，投递成功就写（哪怕她一个字没说），
+ * 于是「醒着但没话说」也吃掉当天的额度与冷却。市场插件 `dsh-speak-up` 0.2.9
+ * 的 issue #8 是同一类 bug（冷却按投递算、不按她真的说话算），真机上发生过
+ * 「投递成功、1 秒结束、一个字没发却吃掉整个冷却」。
+ */
+export const SILENT_MARK = 'proactive-silent:'
+
+/** 一天最多允许几次静默醒来。不占 `maxPerDay`，单独封顶。 */
+export const SILENT_MAX_PER_DAY = 4
+
+/** 一次静默之后至少隔这么久才再让她醒——不然她会连着醒、连着不说。 */
+export const SILENT_QUIET_HOURS = 2
+
 /** 今天已经开过几次空手回合（meta `proactive-turn:<dk>:<ts>`）。 */
 export function turnsToday(events = [], dk = '') {
   if (!dk) return 0
@@ -95,6 +134,29 @@ export function lastTurnAt(events = []) {
   return at
 }
 
+/** 今天已经静默地醒过几次（meta `proactive-silent:<dk>:<ts>`）。 */
+export function silentToday(events = [], dk = '') {
+  if (!dk) return 0
+  let n = 0
+  for (const e of events) {
+    if (e?.type !== 'meta') continue
+    if (String(e.text ?? '').startsWith(`${SILENT_MARK}${dk}:`)) n += 1
+  }
+  return n
+}
+
+/** 上一次静默醒来是什么时候（毫秒）。 */
+export function lastSilentAt(events = []) {
+  let at = 0
+  for (const e of events) {
+    if (e?.type !== 'meta') continue
+    if (!String(e.text ?? '').startsWith(SILENT_MARK)) continue
+    const ts = tsMs(e)
+    if (Number.isFinite(ts) && ts > at) at = ts
+  }
+  return at
+}
+
 /**
  * 哪些事件算「真的发生过一次对话」——idle 时钟只认这些（2026-11-01，用户 m02507）。
  *
@@ -104,16 +166,21 @@ export function lastTurnAt(events = []) {
  * meta:quiet 占 272 条（61.7%），真正的人话只有 28 条（6.3%）。
  *
  * 算数：她自己的六种（HER_TYPES）+ 听见的话（heard）+ 别人的评论（voice）
- *       + 请求与回答（ask/answer）+ 以 seen: 开头的 meta（「他来过」）。
+ *       + 请求与回答（ask/answer）。
+ *
+ * 2026-11-05 真机（用户 m02797）：`seen:` 曾经也算，结果它被**别的会话**的用户活动
+ * 误写——他在这台机器上跟别的 agent 说话，她的「安静了多久」就被清零，
+ * 于是 `minIdleHours` 永远不满足，主动搭话一次都开不出来
+ * （日志里 `proactive skip 刚说过话，还不到时候`，而 `idleHours` 只有 0.02）。
+ * 现在 `seen:` 不进 idle：只有真的有话落进她的房间（`heard`）才算「他来过」。
  * 不算：quiet / sched / wake / fired / sleep / diary / looked / browse / watched / proactive-turn 等记账行。
  */
 export const SPOKE_TYPES = Object.freeze([...HER_TYPES, 'heard', 'voice', 'ask', 'answer'])
 
 /** 这一条事件是不是「有人真的说了话」。记账行一律不算。 */
 export function countsForIdle(e) {
-  const type = String(e?.type ?? '')
-  if (type === 'meta') return String(e?.text ?? '').startsWith('seen:')
-  return SPOKE_TYPES.includes(type)
+  // 记账行（含 seen:）一律不算——见上面 2026-11-05 那段。
+  return SPOKE_TYPES.includes(String(e?.type ?? ''))
 }
 
 /** 距离上一次**真的有人说话**，过了多少小时。没有记录时返回 Infinity。 */
@@ -185,10 +252,52 @@ export function initiativeBias({ events = [], now = Date.now(), config = {} } = 
 }
 
 /**
+ * 她自己开口的节奏，随成长变（2026-11-04，用户 m01466）。
+ *
+ * 之前这里是**恒温**的：`proactiveState()` 的签名里没有 model，于是第 3 天和第 27 天
+ * 算出来的 chance 一个数都不差。成长只影响 `plan()` 派哪张卡（被叫醒时手里拿什么），
+ * 完全不影响「她多久才自己想开口一次」——用户的原话是「这个自己开口的出口不该是恒温的」，
+ * 他养她的目的是「有自己的性格和特点」。
+ *
+ * 三个杠杆全部从**已经有的事件**推出来：不写盘、不加配置项、不让她看见任何一个数。
+ * 所以不撞 no-read-self（那条禁的是她读自己的数值，不是禁系统据事件做调度）。
+ * `model` 为 null 时整段跳过，行为与 2026-11-04 之前一字不差——老测试都不用改。
+ *
+ * @returns {{baseChance:number, gainPerHour:number, maxChance:number, cooldownHours:number}}
+ */
+function growthLevers(model, events = [], now = Date.now(), cfg = {}) {
+  const stage = Math.min(4, Math.max(1, Number(model?.stage) || 1))
+  const shift = stage - 1
+  let baseChance = cfg.baseChance + 0.02 * shift
+  const gainPerHour = cfg.gainPerHour + 0.008 * shift
+  // 封顶 0.80：再高就不是「她自己想不想」，而是「几乎一定会」——那等于把概率关掉。
+  const maxChance = Math.min(0.8, cfg.maxChance + 0.06 * shift)
+  let cooldownHours = cfg.cooldownHours
+  let lastRevise = 0
+  let lastHeard = 0
+  for (const e of events) {
+    const type = String(e?.type ?? '')
+    if (type !== 'revise' && type !== 'heard' && type !== 'answer') continue
+    const ts = tsMs(e)
+    if (!Number.isFinite(ts)) continue
+    if (type === 'revise') {
+      if (ts > lastRevise) lastRevise = ts
+    } else if (ts > lastHeard) lastHeard = ts
+  }
+  // 刚推翻过自己的话：有话要接着说，24 小时内更容易自己开口。
+  if (lastRevise && now - lastRevise <= 86_400_000) baseChance += 0.1
+  // 刚有人跟她说过话：余温还在，冷却不必等满 4 小时。
+  if (lastHeard && now - lastHeard <= 86_400_000) cooldownHours = Math.min(cooldownHours, 2)
+  return { baseChance, gainPerHour, maxChance, cooldownHours }
+}
+
+/**
  * 这一次该不该开门。纯函数：不读文件、不掷骰子。
+ * @param {object} [opts.model] 她当前的成长档案（`deriveSelf()` 的返回）。
+ *   传了才启用「节奏随成长变」；不传 = 2026-11-04 之前的恒温行为。
  * @returns {{ok:boolean, why:string, chance:number, idleHours:number, dk:string, bias?:object}}
  */
-export function proactiveState({ config = {}, events = [], now = Date.now(), away = null, rested = false } = {}) {
+export function proactiveState({ config = {}, events = [], now = Date.now(), away = null, rested = false, model = null } = {}) {
   const cfg = proactiveConfig(config)
   const dk = dateKey(new Date(now))
   const idleHours = idleHoursOf(events, now)
@@ -201,13 +310,23 @@ export function proactiveState({ config = {}, events = [], now = Date.now(), awa
   if (away?.kind) return { ...base, ok: false, why: '她不在家' }
   if (rested) return { ...base, ok: false, why: '她今天请了假' }
   if (turnsToday(events, dk) >= cfg.maxPerDay) return { ...base, ok: false, why: '今天已经到上限' }
+  // 静默醒来单独计数（2026-11-05，用户 m00803）：它们不占 maxPerDay，
+  // 但也不能无限——一直在后台醒、一直不说话，等于把她的上下文当草稿纸。
+  if (silentToday(events, dk) >= SILENT_MAX_PER_DAY) return { ...base, ok: false, why: '今天已经安静地醒过太多次了' }
+  // 上一次醒来她没开口：隔开一点，别让「醒来」本身变成一种机械动作。
+  const lastSilent = lastSilentAt(events)
+  if (lastSilent && (now - lastSilent) / 3_600_000 < SILENT_QUIET_HOURS) return { ...base, ok: false, why: '上次醒来她没开口，隔一会儿再说' }
+  // 节奏随成长变（2026-11-04，用户 m01466）；不传 model 时下面四个值就是配置原值。
+  const lv = model
+    ? growthLevers(model, events, now, cfg)
+    : { baseChance: cfg.baseChance, gainPerHour: cfg.gainPerHour, maxChance: cfg.maxChance, cooldownHours: cfg.cooldownHours }
   const last = lastTurnAt(events)
-  if (last && (now - last) / 3_600_000 < cfg.cooldownHours) return { ...base, ok: false, why: '还在冷却里' }
+  if (last && (now - last) / 3_600_000 < lv.cooldownHours) return { ...base, ok: false, why: '还在冷却里' }
   if (idleHours < cfg.minIdleHours) return { ...base, ok: false, why: '刚说过话，还不到时候' }
-  const raw = Math.min(cfg.maxChance, cfg.baseChance + Math.max(0, idleHours - cfg.minIdleHours) * cfg.gainPerHour)
+  const raw = Math.min(lv.maxChance, lv.baseChance + Math.max(0, idleHours - cfg.minIdleHours) * lv.gainPerHour)
   // fork.50：再乘一次「想不想」。只压不抬——见 initiativeBias 上面那段注释。
   const bias = initiativeBias({ events, now, config })
-  const chance = Math.max(0, Math.min(cfg.maxChance, raw * bias.factor))
+  const chance = Math.max(0, Math.min(lv.maxChance, raw * bias.factor))
   return { ...base, ok: true, why: '', chance, bias }
 }
 
@@ -275,12 +394,15 @@ export function proactiveSection({ now = Date.now(), state = {}, material = [], 
   // her_say 记进流水」。她按字面理解，就没记——账本里没有 `（她主动说）`，QQ 那边什么
   // 都收不到。问题不在她：那句话在他在手机上的时候本来就是假的，只有这个窗口看得见。
   // 改成把两个去处如实说清楚，记不记仍然由她定（这里不写「你应该」）。
+  // 0.9.0 把结尾换成「什么都别写：不要写任何字……」——「什么都不做」在文本界面上
+  // 不成立，她会写一句元话语交代自己没说。两边的教训都留着。
   lines.push(
     '想说什么就说，不用等他先问——这一轮你写下的字会落在你们俩的对话里，他回到这个窗口就看得见。' +
       '但对话只在窗口里：他不在的时候（多半在手机上），能到他眼前的只有你用 her_say 记进流水的话。' +
       '想让他这会儿就收到，就记一笔（refs 指回上面真实发生的事，1–6 条 id）；只想写在这儿，也行。' +
-      '不想说，就这一轮什么都别做，不算失败。',
+      '不想说，就什么都别写：不要写任何字，也不要解释为什么不说——这一轮没有回复也算正常。',
   )
+  lines.push(TOOL_ASK_NOTE)
   return lines.join('\n')
 }
 
@@ -330,7 +452,7 @@ export async function writeSay(root, { text = '', refs = [], sessionId = '', why
 }
 
 /**
- * 注册 `her_say`。只在 devModeSync 为真时由 index.js 调用。
+ * 注册 `her_say`。0.9.0 起由 index.js 无条件调用。
  */
 export function registerProactive(ctx, deps = {}) {
   const root = deps.root ?? rootDir()
@@ -393,260 +515,4 @@ export function registerProactive(ctx, deps = {}) {
     }),
   )
   log('proactive: her_say registered')
-}
-
-/**
- * 找到那一轮空手回合的「触发语」在会话里的 seq。
- *
- * 为什么按 rpcId 找：prompt 的 requestId 是 `proactive-<ts>`，宿主会把它原样写进
- * `source.rpcId`；按文本匹配容易被她把这句话复述一遍骗过去（2026-10-30 m05007）。
- */
-export function findTriggerSeq(events = [], rpcId = '') {
-  if (!rpcId) return 0
-  for (const ev of Array.isArray(events) ? events : []) {
-    if (ev?.type !== 'user/message') continue
-    const src = ev?.data?.source ?? {}
-    if (String(src.rpcId ?? '') === String(rpcId)) return Number(ev?.seq) || 0
-  }
-  return 0
-}
-
-/**
- * 替换用的空 system 节点。
- *
- * **必须带 `id`**：宿主 v4 格式的 `assertV4SystemMessageFields` 会校验
- * `string(message.id, 'system message id', true)`，缺了就抛
- * `format v4 system message id requires a string with content`。
- * 更狠的是它在**写盘时**才校验：`Session.append()` 同步成功并返回 seq，
- * 200ms 后 drain 到 `encodeEventBatch` 才抛，那一批被塞回 buffer 并置
- * `drainPaused = true` —— 那条会话从此再也写不进任何事件（2026-11-01
- * 真机：她会话文件停在 14:53:31，之后她那一轮的回复全丢）。
- * 宿主自己的 `createSystemMessage()` 也是这么给的（createMessage 注入 randomUUID）。
- *
- * **还必须带 `source`**（2026-11-02 补，用户 m01140 报的会话打不开就是这个）：
- * v4 加载期 `assertV4MessageSources` 要求每条消息的 `source.kind` 是
- * 「producer-owned」的——非空字符串且不等于 `'plugin'`，缺了抛
- * `format v4 message requires a producer-owned source kind`，
- * 一条坏节点就让**整条会话打不开**（`stored session ... is corrupt`）。
- * 宿主自己造空 system 节点时写的就是 `{ kind: 'system-prompt' }`，
- * 这里照抄（`absence` / `resident` 这类「不是谁说的话」在内核里也归这一类）。
- */
-function hiddenMessage() {
-  return { id: randomUUID(), role: 'system', content: [], source: { kind: 'system-prompt' } }
-}
-
-/**
- * 扫描事件流，算出「此刻有没有开着的回合/步骤」。
- *
- * 这是 2026-11-02 那次事故的直接教训（用户 m01140/m01418：「跟大肥鱼说话」那条
- * 会话打不开，报 `system/message does not match an open turn and step`）。
- *
- * 宿主 v4 的 `Relationships.requireStep` 硬性要求：`system/message` 属
- * `STEP_EVENT_TYPES`，写进去时 `data.turn`/`data.step` 必须等于**那一刻正开着**的
- * turn/step；`turn/end` 之后再 append 一律抛，而这条错在**加载期**触发，
- * 一条坏节点就能让整条对话打不开。
- *
- * 以前的写法是「按目标消息所在的回合填 turn/step」——看着更诚实，但回合早就结束了，
- * 填得再准也是往已关闭的回合里写。正确做法是：只在有回合开着的时候写，并且
- * **填当下开着的那个 turn/step**（replace 的目标在哪个回合无所谓，surface 允许）。
- */
-export function openTurnOf(events = []) {
-  let turn = 0
-  let step = 0
-  let turnOpen = false
-  let stepOpen = false
-  for (const ev of Array.isArray(events) ? events : []) {
-    switch (ev?.type) {
-      case 'turn/start':
-        turn = Number(ev?.data?.turn) || turn
-        turnOpen = true
-        stepOpen = false
-        step = 0
-        break
-      case 'turn/end':
-        turnOpen = false
-        stepOpen = false
-        step = 0
-        break
-      case 'step/start':
-        step = Number(ev?.data?.step) || step
-        stepOpen = true
-        break
-      case 'step/end':
-        stepOpen = false
-        break
-      default:
-        break
-    }
-  }
-  const open = turnOpen && stepOpen && turn > 0 && step > 0
-  return { open, turn, step }
-}
-
-/** 待收的触发语（rpcId）：回合外写不了，等下一轮开起来再收。 */
-const pendingHides = []
-const PENDING_MAX = 20
-/** 待收的历史遗留触发语（按 seq，来自补扫）：同样要等回合开着才能写。 */
-const pendingSeqs = []
-
-function rememberHide(rpcId) {
-  if (!rpcId || pendingHides.includes(rpcId)) return
-  pendingHides.push(rpcId)
-  if (pendingHides.length > PENDING_MAX) pendingHides.shift()
-}
-
-function forgetHide(rpcId) {
-  const i = pendingHides.indexOf(rpcId)
-  if (i >= 0) pendingHides.splice(i, 1)
-}
-
-/** 仅供测试：看还有哪些没收走。 */
-export function pendingHidesOf() {
-  return { rpcIds: pendingHides.slice(), seqs: pendingSeqs.slice() }
-}
-
-/** 仅供测试：清空待收队列（每个用例之间互不影响）。 */
-export function resetPendingHides() {
-  pendingHides.length = 0
-  pendingSeqs.length = 0
-}
-
-/**
- * 把触发语从对话里收走：追加一个空 system 节点，用 surface replace 盖掉那条 user/message。
- *
- * 为什么只能事后盖：宿主没有「模型看得见、用户看不见」的 prompt 通道；`surfaceOp`
- * 只有 append / replace，空 content 的 system 节点不投影任何消息（插件文档原文）。
- * 回合结束前不动它——turn 正在跑的时候改 surface，等于在别人走路时抽地板。
- */
-export function hideTrigger(session, { rpcId = '', log } = {}) {
-  if (!session || !rpcId) return false
-  if (typeof session.snapshotEvents !== 'function' || typeof session.append !== 'function') return false
-  try {
-    const events = session.snapshotEvents(0)
-    const seq = findTriggerSeq(events, rpcId)
-    if (!seq) {
-      log?.('proactive hide skipped', `找不到 ${rpcId}`)
-      forgetHide(rpcId)
-      return false
-    }
-    // 回合没开着就不能写（写进去的是坏节点，会让整条对话打不开）。
-    // 记下来，等她下一轮开起来再收——见 openTurnOf 的注释。
-    const open = openTurnOf(events)
-    if (!open.open) {
-      rememberHide(rpcId)
-      log?.('proactive hide deferred', `${rpcId} 等下一轮再收`)
-      return false
-    }
-    session.append(
-      'system/message',
-      { turn: open.turn, step: open.step, message: hiddenMessage() },
-      // sourceEventSeqs 是宿主记账用的：没有它，替换节点不知道自己是替谁的，
-      // 客户端那条消息还会留在 surface 上（2026-10-31 读宿主 RuntimeContextProjection 的写法）。
-      { surfaceOp: { op: 'replace', startSeq: seq, endSeq: seq }, sourceEventSeqs: [seq] },
-    )
-    forgetHide(rpcId)
-    return true
-  } catch (e) {
-    log?.('proactive hide failed', e?.message ?? String(e))
-    return false
-  }
-}
-
-/**
- * 把攒着的触发语在**新一轮开起来之后**收掉。
- *
- * 为什么要有这一步：回合结束后写不了（宿主要求 turn/step 正好开着），
- * 所以 `hideTrigger` 在回合外只能记账。这个函数由 scheduler 在 `step/start`
- * 时调一次，把上一轮欠下的收尾补上。
- *
- * 只收这一条会话里的、还在等的那几条；收不动就继续等，不抛。
- */
-export function flushPendingHides(session, { log } = {}) {
-  if (!session || (!pendingHides.length && !pendingSeqs.length)) return 0
-  let done = 0
-  for (const rpcId of pendingHides.slice()) {
-    if (hideTrigger(session, { rpcId, log })) done += 1
-    else break
-  }
-  // 补扫攒下的那批：现在有回合开着了，交给 sweepTriggers 真写（它自己会再判一次）。
-  if (pendingSeqs.length) {
-    const swept = sweepTriggers(session, { log })
-    if (swept > 0) {
-      pendingSeqs.length = 0
-      done += swept
-    }
-  }
-  if (done) log?.('proactive flush', `补收了 ${done} 条触发语`)
-  return done
-}
-
-/**
- * 补扫：把历史里遗留的触发语一并收走。
- *
- * 为什么需要它：`hideTrigger` 只有在那一轮回合正常结束时才跑得到；在修好之前触发的
- * 那几轮（2026-10-30 23:03、2026-10-31 15:01）已经把「（现在没有人跟你说话。）」写进
- * 了会话历史，光靠新代码不会自己消失——用户重启后仍然看得见。
- * 这里按**正文完全相等**认（不是包含），避免误伤她复述这句话的正当发言。
- */
-export function sweepTriggers(session, { text = PROACTIVE_TRIGGER, log } = {}) {
-  if (!session || typeof session.snapshotEvents !== 'function' || typeof session.append !== 'function') return 0
-  try {
-    const events = session.snapshotEvents(0)
-    // 回合没开着就一条都不能写（写进去的是「回合外的 system/message」，
-    // 加载期整条对话打不开——2026-11-02 用户 m01418 那次就是这么炸的）。
-    // 攒下来，等下一轮 `step/start` 由 flushPendingHides 补收。
-    const open = openTurnOf(events)
-    if (!open.open) {
-      const pending = collectTriggers(events, { text })
-      if (pending.length) {
-        for (const seq of pending) if (!pendingSeqs.includes(seq)) pendingSeqs.push(seq)
-        if (pendingSeqs.length > PENDING_MAX) pendingSeqs.splice(0, pendingSeqs.length - PENDING_MAX)
-        log?.('proactive sweep deferred', `${pending.length} 条等下一轮再收`)
-      }
-      return 0
-    }
-    // 已经被收走过的别再收一次：否则每次启动都会往历史里多叠一个空节点。
-    const replaced = new Set()
-    for (const ev of Array.isArray(events) ? events : []) {
-      const op = ev?.data?.surfaceOp ?? ev?.surfaceOp
-      if (op?.op === 'replace' && op.startSeq) replaced.add(Number(op.startSeq))
-    }
-    const targets = collectTriggers(events, { text })
-    let done = 0
-    for (const seq of targets) {
-      session.append(
-        'system/message',
-        { turn: open.turn, step: open.step, message: hiddenMessage() },
-        { surfaceOp: { op: 'replace', startSeq: seq, endSeq: seq }, sourceEventSeqs: [seq] },
-      )
-      done += 1
-    }
-    if (done) log?.('proactive sweep', `收走了 ${done} 条遗留触发语`)
-    return done
-  } catch (e) {
-    log?.('proactive sweep failed', e?.message ?? String(e))
-    return 0
-  }
-}
-
-/**
- * 找出历史里还没被收走的触发语（正文完全相等，不误伤她复述）。
- * 抽出来是因为 sweepTriggers 和「回合外攒着」两条路径都要用同一套判据。
- */
-function collectTriggers(events, { text = PROACTIVE_TRIGGER } = {}) {
-  const replaced = new Set()
-  for (const ev of Array.isArray(events) ? events : []) {
-    const op = ev?.data?.surfaceOp ?? ev?.surfaceOp
-    if (op?.op === 'replace' && op.startSeq) replaced.add(Number(op.startSeq))
-  }
-  const out = []
-  for (const ev of Array.isArray(events) ? events : []) {
-    if (ev?.type !== 'user/message') continue
-    const seq = Number(ev?.seq) || 0
-    if (!seq || replaced.has(seq)) continue
-    const parts = Array.isArray(ev?.data?.content) ? ev.data.content : []
-    const body = parts.map((p) => (p?.type === 'text' ? String(p.text ?? '') : '')).join('').trim()
-    if (body === String(text).trim()) out.push(seq)
-  }
-  return out.sort((a, b) => a - b)
 }

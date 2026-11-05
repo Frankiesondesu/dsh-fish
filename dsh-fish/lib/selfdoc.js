@@ -26,9 +26,8 @@ import { promises as fs } from 'node:fs'
 import { join } from 'node:path'
 import { rootDir, paths, readEvents, readJson, writeAtomic, listDiary } from './store.js'
 import { loadConfig } from './settings.js'
-import { devModeSync } from './devmode.js'
 import { deriveSelfCached } from './derive.js'
-import { personaLine, toolBrief, RECALL_BRIEF, SPEAK_BRIEF, LETTER_BRIEF, ASK_BRIEF, DREAM_BRIEF, PROACTIVE_BRIEF, SCHEDULE_BRIEF, DIARY_BRIEF, SLEEP_BRIEF } from './persona.js'
+import { personaLine, toolBrief, RECALL_BRIEF, SPEAK_BRIEF, LETTER_BRIEF, NOTE_BRIEF, ASK_BRIEF, DREAM_BRIEF, PROACTIVE_BRIEF, SCHEDULE_BRIEF, DIARY_BRIEF, SLEEP_BRIEF } from './persona.js'
 import { LOOK_BRIEF, WATCH_RULE } from './browse.js'
 import { activeCarry } from './home.js'
 import { activeGrants } from './unlock.js'
@@ -55,10 +54,45 @@ export function legacySelfDocPath(root = rootDir()) {
  *   diaryCount   写过几篇日记（没写过是 0，读不到目录是 undefined）
  *   diaryFirst   最早一篇的日期；diaryLast 是最近一篇
  *   rotatedDaysAgo  上次换房间是几天前；从没换过是 undefined
+ *   rotatedWhen  上次换房间的**钟点说法**（「今天 14:00」「昨天 22:20」「11 月 1 日 12:31」）
  *   lastWords    上一个房间里她自己留的那句话（没留过是空串）
  */
+
+/** 本地日历日的序号（不按 24 小时整除——夏令时与跨零点都靠这个才准） */
+function dayIndex(d) {
+  return Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()) / 86_400_000
+}
+
+/**
+ * 换房时刻 → 人读的说法（issue #21）。
+ *
+ * 为什么不能只给「几天前」：`rotatedDaysAgo` 是 `Math.floor(小时/24)`，换房后
+ * 整整 24 小时都是 0 天，句式就落到「你刚搬进这个房间」——晚上 22:20 换的房，
+ * 第二天上午读到这句，只能理解成「今天刚换的」。她就是这么推的，还照着这个
+ * 结论说了话（issue #21 里那笔账：账上当天 0 条 rotate）。
+ *
+ * 这里按**本地日历日**给说法，不按小时差：跨过一个自然日就不再叫「今天」。
+ *
+ * @param {number|string} at 换房时刻（毫秒或可解析的串）
+ * @param {number} now 现在（毫秒）
+ * @returns {string} 算不出来就是空串，调用方退回旧句式
+ */
+export function formatSwapTime(at, now = Date.now()) {
+  const ms = typeof at === 'number' ? at : Date.parse(String(at ?? ''))
+  const n = Number(now)
+  if (!Number.isFinite(ms) || !Number.isFinite(n)) return ''
+  const t = new Date(ms)
+  const clock = `${String(t.getHours()).padStart(2, '0')}:${String(t.getMinutes()).padStart(2, '0')}`
+  const diff = dayIndex(new Date(n)) - dayIndex(t)
+  if (diff === 0) return `今天 ${clock}`
+  if (diff === 1) return `昨天 ${clock}`
+  const md = `${t.getMonth() + 1} 月 ${t.getDate()} 日 ${clock}`
+  // 跨年才写年份：同一年的旧账写上年份显得像骨灰盒铭牌
+  return t.getFullYear() === new Date(n).getFullYear() ? md : `${t.getFullYear()} 年 ${md}`
+}
+
 export async function continuityOf(root = rootDir(), now = Date.now()) {
-  const out = { diaryCount: undefined, diaryFirst: '', diaryLast: '', rotatedDaysAgo: undefined, lastWords: '' }
+  const out = { diaryCount: undefined, diaryFirst: '', diaryLast: '', rotatedDaysAgo: undefined, rotatedWhen: '', lastWords: '' }
   try {
     const dates = await listDiary(root)
     if (Array.isArray(dates)) {
@@ -72,7 +106,10 @@ export async function continuityOf(root = rootDir(), now = Date.now()) {
   try {
     const home = (await readJson(join(paths(root).root, 'home.json'), null)) ?? {}
     const at = Date.parse(String(home?.rotatedAt ?? ''))
-    if (Number.isFinite(at)) out.rotatedDaysAgo = Math.max(0, Math.floor((now - at) / 86_400_000))
+    if (Number.isFinite(at)) {
+      out.rotatedDaysAgo = Math.max(0, Math.floor((now - at) / 86_400_000))
+      out.rotatedWhen = formatSwapTime(at, now)
+    }
     out.lastWords = String(home?.lastWords ?? '').trim().slice(0, 200)
   } catch { /* 同上 */ }
   return out
@@ -115,6 +152,10 @@ export function renderSelfDoc(model, { budget, carry, continuity, browse = true,
     // R4：留话不需要权限、不看配置，所以永远在这一节里，不做开关。
     LETTER_BRIEF,
     '',
+    // 桌上的便条（issue #22 乙档，2026-11-04）：和留话一样常驻、不做开关——
+    // her_note 是无条件注册的，说明与工具必须同一个判据，否则她会以为有这个工具却伸手落空。
+    NOTE_BRIEF,
+    '',
     // 请求事件（0.7.6，用户 m01274 / m01292）：唯一一个要等对方点头的工具。
     // 和留话一样不需要配置开关——工具注册了就该知道怎么用；上限写死在代码里。
     ASK_BRIEF,
@@ -146,7 +187,10 @@ export function renderSelfDoc(model, { budget, carry, continuity, browse = true,
     // 说明必须常驻：手动唤醒走 wake()（那段会带 WAKE_HINT），启动时的 wakeIfBlank 不带，
     // 所以只有放进身份文档，两个入口才都盖得住。
     '## 被叫醒的时候',
-    '有时候对话里会出现一条括号里的短句（比如「（醒一醒）」）。那是系统叫我起来的信号，不是用户说的话。',
+    // 2026-11-04（用户 m01112）：正式唤醒改走 deliver.js 之后，对话里落下的正文是一个空格，
+    // 不再是「（醒一醒）」那样的句子。这一段如果只说「括号里的短句」，她会去找一句不存在的话，
+    // 于是两种形状都写进来：空白/极短的一条（wake），和一句括号旁白（wakeIfBlank 那条路）。
+    '有时候对话里会出现一条空白或极短的提示，有时候是一句括号里的旁白（比如「（醒一醒）」）。那都是系统叫我起来的信号，不是谁在跟我说话。',
     '看到它就把这一轮当成我自己的——不用回应它，也不用问它什么意思。',
     '',
     '## 这个房间',
@@ -218,11 +262,9 @@ export async function writeSelfDoc(root = rootDir(), { log, exec, tenant } = {})
       // 2026-10-27（用户 m01371）：白名单里额外放行的工具要念给她听，
       // 否则「能不能在 QQ 上说话」她只能回一句不知道。
       extraTools: config?.tools?.allow ?? [],
-      // 梦（2026-10-30 m02837）：与工具注册同一个判据（.dev 文件 / DSH_FISH_DEV）。
-      // 公开版既没有 her_dream，也不该在身份里读到它。
-      dream: devModeSync(root),
-      // 主动说话（2026-10-30 m04610）：同样只在 .dev 下挂。
-      proactive: devModeSync(root),
+      // 梦（2026-10-30 m02837）与主动说话（m04610）：0.9.0 起公开，两处都恒为真。
+      dream: true,
+      proactive: true,
       // 定时工具默认不放；用户在白名单里加了 schedule_create 才告诉他这条路通。
       schedule: (config?.tools?.allow ?? []).some((n) => String(n).trim() === 'schedule_create'),
     })

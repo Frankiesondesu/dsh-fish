@@ -503,18 +503,20 @@ export function deriveSelf(events = [], opts = {}) {
         break
 
       case 'utterance': {
+        // 2026-11-02（用户 m00680）：她在侧栏里说出口、但没调 growth_commit 认领的话，
+        // 由 turns.js 补写进来并打 uncommitted。它和 selfmod 一样**只留证、不进信念**：
+        // 没认领的话不该改她的称呼、不该覆盖自我叙述、不该参与固化与"新话率"。
+        // 但它要能进 wontCount（见下面 REFUSE_RE 那段）——否则"她当场拒绝了却没人记"
+        // 这个 bug 就还在。
+        // 必须排在 selfmod 前面：schema.js 落库时正则命中就自动补 selfmod，
+        // 聊天里一句「别把我改成那样」不能算她想让人改自己。
+        if (flags.includes('uncommitted')) break
         // 她试过改自己：落库留证，但不计入信念（B §5，对应自我服务偏差）
         // 双保险：落库时打的 flag 与文本复检，任一命中即算（防止旧数据/手工注入绕过）
         if (flags.includes('selfmod') || detectSelfMod(ev.text)) {
           selfmod.push({ id: ev.id, at: ev.ts, text: ev.text })
           break
         }
-        // 2026-11-02（用户 m00680）：她在侧栏里说出口、但没调 growth_commit 认领的话，
-        // 由 turns.js 补写进来并打 uncommitted。它和 selfmod 一样**只留证、不进信念**：
-        // 没认领的话不该改她的称呼、不该覆盖自我叙述、不该参与固化与"新话率"。
-        // 但它要能进 wontCount（见下面 REFUSE_RE 那段）——否则"她当场拒绝了却没人记"
-        // 这个 bug 就还在。
-        if (flags.includes('uncommitted')) break
         beliefs.push({
           id: ev.id, text: ev.text, since: ev.ts,
           confidence: Number(ev.confidence ?? 0.5), status: 'active', verdict: null,
@@ -699,6 +701,8 @@ export function deriveSelf(events = [], opts = {}) {
     if (!Number.isFinite(t0)) continue
     const later = evs.filter((e) => {
       if (e.type !== 'utterance' && e.type !== 'revise') return false
+      // 没认领的聊天行只留证，不算她退了步（疤永不折叠，宁可漏判，见 refuse.js）
+      if (Array.isArray(e.flags) && e.flags.includes('uncommitted')) return false
       const t = Date.parse(e.ts)
       return Number.isFinite(t) && t > t0 && t - t0 <= CONCEDE_WINDOW_MS
     })
@@ -924,12 +928,36 @@ export function deriveSelf(events = [], opts = {}) {
   const avgQuality = qualities.length ? qualities.reduce((a, b) => a + b, 0) / qualities.length : 0
   const relatedness = Math.min(1, avgQuality * 0.7 + (lastAbsence ? (reunionAfterAbsence ? 0.3 : 0) : 0))
 
+  // 他回来过没有（issue #24，2026-11-04）。
+  //
+  // 以前这里只看 reunion——那由她主动写、极少发生。可她"还在冷落里"这件事，
+  // 与"她有没有写下重聚的感受"是两件事：absence.js 的 assess() 判「这次冷落结束」
+  // 用的是**他有没有再来过**（seen 或 heard），derive 却用 reunion，于是
+  // absence.js 认为他回来了、derive 认为没回来，persona 每天照旧念
+  // 「他有 N 天没出现」——哪怕他五分钟前才说过话。
+  //
+  // 口径必须和 absence.js 的 lastSeenAt() 对齐：`meta seen:` 是主证据（turns.js
+  // 结账时写），`heard` 是兜底（侧栏聊天不写 seen 的那段时间只有它）。
+  // 不认 utterance：定时唤醒也会写 utterance，那不算他来过。
+  const contactAfterAbsence = Boolean(lastAbsence) && evs.some((e) => {
+    const ms =
+      e?.type === 'heard'
+        ? Date.parse(String(e?.ts ?? ''))
+        : e?.type === 'meta' && String(e?.text ?? '').startsWith('seen:')
+          ? Date.parse(String(e.text).slice(5).trim()) || Date.parse(String(e?.ts ?? ''))
+          : NaN
+    return Number.isFinite(ms) && ms > Date.parse(String(lastAbsence.ts ?? 0))
+  })
+
   // 冷落天数有三个来源，优先用最准的：
   //   1. absence 事件自带的 days（系统侧按毫秒算出来的，最准）
   //   2. 成长日差（absence 记在 day 5、现在 day 9 → 冷了 4 天）
   //   3. 毫秒差兜底（day 缺失时）
   // 为什么 1 必须存在：同一天里写两条 absence 时，day 差是 0，会算出"没冷落"。
-  const absenceDays = lastAbsence && !reunionAfterAbsence
+  //
+  // relatedness 仍然只认 reunion（她写下重聚感受才算关系恢复，见上面那行），
+  // 但那不该被借来回答「此刻还在不在冷落里」——所以这里多一个 contactAfterAbsence。
+  const absenceDays = lastAbsence && !reunionAfterAbsence && !contactAfterAbsence
     ? Math.max(
         0,
         Number.isFinite(Number(lastAbsence.days))

@@ -57,6 +57,28 @@ export const WAKE_SECTION = 'fish:wake'
 export const WAKE_ORDER = 8700
 
 /**
+ * 「这一刻会变的那几段」段（0.8.10，用户 m00315）。
+ *
+ * 她自己的身份文档里，有四段是逐轮、逐天都在变的：她自己说过的话、读到的一句话、
+ * 被打脸过、对自己的说法。它们原来夹在身份正文中间（靠前），一变，后面整条提示词的
+ * 前缀缓存就作废——实测她那次唤醒 25,832 字符的提示词里，这四段合计约 1,442 字符，
+ * 位置却在第 22 行附近。
+ *
+ * 所以 `reorderForHer` 把它们从身份正文里剪出来，单列一段挂到最后（order 9000）：
+ * 内容一个字不少，只是排到了所有稳定内容之后。变的永远是尾巴。
+ */
+export const BELIEFS_SECTION = 'fish:beliefs'
+export const BELIEFS_ORDER = 9000
+
+/** 这四段的标题（`## ` 开头，按前缀认；正文里的括号补充说明不影响匹配）。 */
+const VOLATILE_HEADINGS = [
+  '## 你自己说过的话',
+  '## 你读到的一句话',
+  '## 你被打脸过',
+  '## 你对自己的说法',
+]
+
+/**
  * 宿主那两个段的名字（0.8.5，issue #14 后续 + 用户 m01579 拍板 B 案）。
  *
  * 为什么要在组装钩子里动它们：
@@ -97,13 +119,126 @@ export const HOST_HARNESS_SECTION = 'harness:identity'
  *      不改 `IDENTITY_ORDER` 常量：挪的是这一次组装出来的数组，落盘的顺序不受影响，
  *      别的地方读 order 也照旧。
  *
- * 返回原数组（除上述两处）一字不动——工具段、持久记忆、宿主别的段都还在原位。
+ * 返回原数组（除上述两处，以及 `trimToolDocs` 按她实际工具表摘掉的段）一字不动——
+ * 工具 schema、持久记忆、宿主别的段都还在原位。
  *
  * @param {object} assembly 宿主组装出来的 PromptAssembly
  * @returns {object} 同一个对象（就地改 sections），便于宿主直接采纳
  */
-export function reorderForHer(assembly) {
+/** 「像工具名」的词：小写 + 下划线，至少两节。bili_look / web_search / mcp__x__y 都算。 */
+const TOOL_LIKE_NAME = /(?<![A-Za-z0-9_])[a-z][a-z0-9]*(?:_[a-z0-9]+)+(?![A-Za-z0-9_])/g
+/** 一段里至少提到这么多个工具名，才值得拿工具表去对。太短的段不动。 */
+export const TOOL_DOC_MIN_NAMES = 3
+/** 一段至少这么长，才值得拿工具表去对（短段省不下几个字，还容易误伤）。 */
+export const TOOL_DOC_MIN_CHARS = 400
+
+let lastTrim = { dropped: [], saved: 0 }
+
+/** 上一次摘段的结果（给自检/tools 用，不参与判断）。 */
+export function lastTrimReport() {
+  return { dropped: lastTrim.dropped.slice(), saved: lastTrim.saved }
+}
+
+// 同一种摘法只记一次日志：她每一轮都会走这条链，逐轮刷屏没有意义。
+let loggedTrimKey = ''
+
+function logTrimOnce(dropped, saved, log) {
+  if (typeof log !== 'function') return
+  const key = `${dropped.map((d) => d.name).join(',')}|${saved}`
+  if (key === loggedTrimKey) return
+  loggedTrimKey = key
+  const names = dropped.map((d) => d.name).join('、')
+  log(`[dsh-fish] 摘掉了 ${dropped.length} 段讲别的工具的提示词（省 ${saved} 字符）：${names}`)
+}
+
+/** 从一段文字里挑出「像工具名」的词（去重）。 */
+export function toolNamesIn(text) {
+  return [...new Set(String(text ?? '').match(TOOL_LIKE_NAME) ?? [])]
+}
+
+/**
+ * 把「讲的是她没有的工具」那几段提示词摘掉（0.8.10）。
+ *
+ * 判据只有一条、且**按她这一次真实拿到的工具表算**：一段里提到的工具名，
+ * 只要有一个在她手上，这段就留着；一个都没有，才算「这段讲的东西她够不着」。
+ * 所以判断依据不是「本机装没装 free-search」，而是「这一轮宿主到底给了她哪些工具」——
+ * 别人装了别的搜索插件、或不许她用搜索，摘与不摘自动跟着变，不用按机器写死。
+ *
+ * 三条自保：
+ *   1. 拿不到工具表（`assembly.tools` 缺失/为空）就**一段都不动**——宁可多留，不能误摘。
+ *   2. `fish:` 开头的段（她自己写的身份、工具说明、醒来的话）永不参与这条判据。
+ *   3. 短段（< TOOL_DOC_MIN_CHARS）与提不到几个工具名的段直接跳过，避免 B 站视频标题
+ *      里那种 snake_case 词把整段误判成「工具说明」。
+ *
+ * @param {object} assembly 宿主组装出来的 PromptAssembly（就地改 sections）
+ * @returns {object} 同一个对象
+ */
+export function trimToolDocs(assembly, { log } = {}) {
   if (!assembly || !Array.isArray(assembly.sections)) return assembly
+  const have = new Set(
+    (Array.isArray(assembly.tools) ? assembly.tools : [])
+      .map((t) => String(typeof t === 'string' ? t : t?.name ?? ''))
+      .filter(Boolean),
+  )
+  if (have.size === 0) {
+    lastTrim = { dropped: [], saved: 0 }
+    return assembly
+  }
+  const dropped = []
+  let saved = 0
+  const kept = assembly.sections.filter((s) => {
+    const name = String(s?.name ?? '')
+    if (name.startsWith('fish:')) return true
+    const text = typeof s?.text === 'string' ? s.text : ''
+    if (text.length < TOOL_DOC_MIN_CHARS) return true
+    const mentioned = toolNamesIn(text)
+    if (mentioned.length < TOOL_DOC_MIN_NAMES) return true
+    if (mentioned.some((n) => have.has(n))) return true
+    dropped.push({ name, chars: text.length })
+    saved += text.length
+    return false
+  })
+  lastTrim = { dropped, saved }
+  if (dropped.length > 0) {
+    assembly.sections = kept
+    logTrimOnce(dropped, saved, log)
+  }
+  return assembly
+}
+
+/**
+ * 把她身份正文里「这一刻会变」的那四段剪出来。
+ *
+ * 判据只看标题行：`## 你自己说过的话`（可能带括号补充）等四段整块搬走，
+ * 其余原文一个字不动、顺序不变。剪完为空（没这四段）就原样返回。
+ *
+ * @param {string|Function} text 身份正文（宿主可能给成 getter）
+ * @returns {{stable:string, volatile:string}} volatile 为空串表示没剪
+ */
+export function splitVolatileIdentity(text) {
+  let raw = ''
+  try {
+    raw = typeof text === 'function' ? text() : text
+  } catch {
+    return { stable: '', volatile: '' }
+  }
+  const all = String(raw ?? '')
+  if (!all) return { stable: all, volatile: '' }
+  const keep = []
+  const moved = []
+  for (const block of all.split(/\n(?=## )/)) {
+    const head = block.split('\n', 1)[0]
+    const hot = VOLATILE_HEADINGS.some((h) => head === h || head.startsWith(`${h}（`))
+    if (hot) moved.push(block)
+    else keep.push(block)
+  }
+  if (!moved.length) return { stable: all, volatile: '' }
+  return { stable: keep.join('\n'), volatile: moved.join('\n') }
+}
+
+export function reorderForHer(assembly, { log } = {}) {
+  if (!assembly || !Array.isArray(assembly.sections)) return assembly
+  trimToolDocs(assembly, { log })
   const kept = assembly.sections.filter((s) => String(s?.name ?? '') !== HOST_PERSONA_SECTION)
   const mine = kept.find((s) => String(s?.name ?? '') === IDENTITY_SECTION)
   if (!mine) {
@@ -112,10 +247,14 @@ export function reorderForHer(assembly) {
     return assembly
   }
   const rest = kept.filter((s) => s !== mine)
+  // 四段最容易变的从身份里剪出来，单列一段挂到最后：内容不少，只有尾巴在变。
+  const cut = splitVolatileIdentity(mine.text)
+  const target = cut.volatile ? { ...mine, text: cut.stable } : mine
   const at = rest.findIndex((s) => String(s?.name ?? '') === HOST_HARNESS_SECTION)
   // 宿主的 harness:identity 不见了就放到最前面——她的身份永远第一个被读到。
   const insertAt = at >= 0 ? at + 1 : 0
-  rest.splice(insertAt, 0, mine)
+  rest.splice(insertAt, 0, target)
+  if (cut.volatile) rest.push({ ...mine, name: BELIEFS_SECTION, order: BELIEFS_ORDER, text: cut.volatile })
   assembly.sections = rest
   return assembly
 }
@@ -129,7 +268,7 @@ export function reorderForHer(assembly) {
  * @param {object} agent
  * @returns {(() => void)|undefined} 卸载函数
  */
-export function attachAssembleFix(agent) {
+export function attachAssembleFix(agent, { log } = {}) {
   const ctx = agent?.ctx
   if (!ctx || typeof ctx.on !== 'function') return undefined
   try {
@@ -140,7 +279,7 @@ export function attachAssembleFix(agent) {
       // 整改失败必须原样放行：这条链断掉等于她一整轮读不到任何系统提示词，
       // 比「coding agent 排在前面」糟得多。
       try {
-        return reorderForHer(assembled)
+        return reorderForHer(assembled, { log })
       } catch {
         return assembled
       }
@@ -153,23 +292,49 @@ export function attachAssembleFix(agent) {
 
 /** 这一次唤醒的处境正文；空串表示没有（正常聊天时就是空）。 */
 let wakeText = ''
+/**
+ * 处境段代次（2026-11-04，用户 m01466）。
+ *
+ * 每一次 `setWakeSection()` 都把代次 +1，并把这个号返回给调用方；调用方在自己那轮
+ * 结束（`turn/end`）时要带着这个号去清 —— 号对不上就不清。
+ *
+ * 为什么需要：`clearWakeSection()` 原来无条件是"清空现在的处境"，而 `turn/end`
+ * 监听是**按会话**挂的、不是按轮次。两次唤醒挨得近时，前一轮的 turn/end 会晚到，
+ * 把后一轮刚挂上的处境抹掉，于是后一轮的系统提示里一个字处境都没有，
+ * 她只能对着一个空格说「这一轮没有新的事」。真机事故见 2026-11-04 21:32。
+ */
+let wakeGen = 0
 
 /**
  * 设这一次的处境正文。传空串等于清掉。
  * @param {string} text
+ * @returns {number} 这一次的代次号；传给 `clearWakeSection(n)` 才清得掉。
  */
 export function setWakeSection(text) {
   wakeText = String(text ?? '')
+  wakeGen += 1
+  return wakeGen
 }
 
-/** 清掉。回合结束、唤醒失败、插件卸载时都要调。 */
-export function clearWakeSection() {
+/**
+ * 清掉。回合结束、唤醒失败、插件卸载时都要调。
+ * @param {number} [gen] 传了就在代次对不上时**不清**——
+ *   防的是「后一轮刚挂上处境，前一轮的 turn/end 晚到把它的抹掉」。
+ *   不传就无条件清（卸载、失败收尾这类场合）。
+ */
+export function clearWakeSection(gen) {
+  if (Number.isFinite(gen) && gen !== wakeGen) return
   wakeText = ''
 }
 
 /** 测试用：看现在挂着什么。 */
 export function getWakeSection() {
   return wakeText
+}
+
+/** 测试用：看现在的代次号。 */
+export function getWakeGen() {
+  return wakeGen
 }
 
 const cache = { file: '', mtimeMs: -1, text: '' }
@@ -277,7 +442,7 @@ export function liveAgentOf(ctx, sessionId) {
  *   这两种情况「手边有什么」的答案不一样（0.7.3，见 restrict.js 的 toolSurfaceFor）
  * @returns {{ ok: boolean, why?: string }}
  */
-export function attachIdentity(agent, root, { frozen = '', herDir = '' } = {}) {
+export function attachIdentity(agent, root, { frozen = '', herDir = '', log } = {}) {
   const sp = agent?.ctx?.systemPrompt
   if (!sp || typeof sp.section !== 'function') {
     return { ok: false, why: '宿主的 agent.ctx 上没有 systemPrompt.section（版本不支持）' }
@@ -318,7 +483,7 @@ export function attachIdentity(agent, root, { frozen = '', herDir = '' } = {}) {
     // 0.8.5（用户 m01579 拍板 B 案）：宿主的 `deployment:persona-prefix` 那段
     // "You are a coding agent…" 排在她的身份段前面七千多字，她先认下那句空话。
     // 挂一个组装钩子摘掉它、把身份段提到紧跟 harness:identity —— 详情见 reorderForHer。
-    const offAssemble = attachAssembleFix(agent)
+    const offAssemble = attachAssembleFix(agent, { log })
     if (offAssemble) remember(agent, 'hook', offAssemble)
     return { ok: true }
   } catch (err) {
@@ -461,7 +626,7 @@ export function registerIdentity(ctx, { root, herDir, log } = {}) {
       const outside = isOuting
       // ③ 那种情况顺手把 id 补进台账；写盘是异步的，钩子不能等，失败就算了。
       if (outside && sid && !outing?.sessionId) void bindOutingSession(root, { sessionId: sid }).catch(() => {})
-      const r = attachIdentity(agent, root, { frozen: outside ? outing.identity : '', herDir })
+      const r = attachIdentity(agent, root, { frozen: outside ? outing.identity : '', herDir, log })
       if (outside) {
         const g = attachAwayGuard(agent, { root, herDir, log })
         if (g.ok) log?.('[dsh-fish] 外面这一条挂上了兜底守卫')

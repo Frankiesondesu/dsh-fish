@@ -32,18 +32,29 @@ import { riskState, browsePlan, noteRisk, isRiskCode } from './risk.js'
 import { scanReplies, renderReplies } from './comment.js'
 import { flushReport } from './report.js'
 import { talkSessionId } from './home.js'
-import { WAKE_TRIGGER } from './wakeconst.js'
 import { refreshSelfDoc } from './selfdoc.js'
-import { setWakeSection, clearWakeSection, liveAgentOf } from './identity.js'
+import { setWakeSection, clearWakeSection, getWakeSection } from './identity.js'
 import { awayNow, awayLine } from './outing.js'
 import { askInChat, picked } from './askinchat.js'
 import { restedToday, settleStaleAsks } from './ask.js'
 import { takeDueAlarm, markAlarmFired } from './alarm.js'
 import { devModeSync } from './devmode.js'
 import { readPause } from './pause.js'
-import { proactiveState, proactiveSection, recentMaterial, looseEnds, hideTrigger, sweepTriggers, flushPendingHides, PROACTIVE_TRIGGER } from './proactive.js'
+import { proactiveState, proactiveSection, recentMaterial, looseEnds, TOOL_ASK_NOTE } from './proactive.js'
+import { deliverWake, ensureSessionLive, WAKE_PING } from './deliver.js'
+import { followWake, planWakeCompaction, compactWake, looksLikeNothingSaid } from './compact.js'
 import { logLine } from './log.js'
 import { recordGrant } from './grant.js'
+import { readNotes, renderNotes } from './note.js'
+import { curiosityOf, renderEcho } from './curiosity.js'
+import { deskFor } from './desk.js'
+import { driveOf, deskHasMaterial } from './drive.js'
+import { interestOf, topicLabel } from './interest.js'
+import { lastLeaveAt, lastSeenAt } from './curiosity.js'
+import { dreamOn } from './dream.js'
+import { hoursSinceLastWake, staleForDesk, staleLines, tableFor } from './dreamtable.js'
+import { freeWakeFor } from './freewake.js'
+import { readOutings, readPossessions } from './outing.js'
 
 // fork.30：唤醒节奏的纯计算搬进 wake-math.js；这里 import 回来自用，并原样转出去
 import { todayCounts, isLastWakeOfDay, nextWakeAt, gapSinceLastWake, gapSqueeze, shouldLogSkip, wakeTimeLine } from './wake-math.js'
@@ -51,12 +62,38 @@ export {
   todayCounts, isLastWakeOfDay, nextWakeAt, gapSinceLastWake, gapSqueeze, shouldLogSkip, wakeTimeLine,
 } from './wake-math.js'
 
+/**
+ * 今天最后一次叫醒是什么时候（毫秒；0 表示今天还没醒过）。
+ *
+ * 2026-11-04（0.9.0 用户 m01466）新加：手动叫醒也要认最小间隔。原来看「上一次是什么时候」
+ * 只有 `nextWakeAt()` 一处，而它只服务定时器那条路 —— 于是设置页那个按钮
+ * 点多少次就投多少次。真机事故：13:32:38 叫醒一次，11 秒后又被点一次，
+ * 第二轮的系统提示里一个字处境都没有，她只能回「这一轮没有新的事，我不再往下续」。
+ *
+ * （0.9.0 起这是 scheduler 的本地函数；fork.30 搬进 wake-math.js 的那七个不含它。）
+ */
+export function lastWakeAt(events = [], dk = dateKey()) {
+  let last = 0
+  for (const e of events) {
+    if (e?.type !== 'meta') continue
+    const text = String(e.text ?? '')
+    if (!text.startsWith('wake:')) continue
+    const [head] = text.slice(5).trim().split(/\s+/)
+    if (head !== dk) continue
+    const at = Date.parse(e.ts || '') || 0
+    if (at > last) last = at
+  }
+  return last
+}
+
 const TICK_MS = 60_000
 const INITIAL_DELAY_MS = 20_000
 const WAKE_TIMEOUT_MS = 5 * 60_000
 // 等她的回合结束时最多等这么久。一次唤醒的思考通常 10–40 秒，
 // 90 秒足够；再久就说明卡住了，先把报告写出去，别让用户干等。
 const REPORT_WAIT_MS = 90_000
+// 一天的第二次及以后的叫醒，离上一次至少隔这么久（见 nextWakeAt / lastWakeAt）
+const WAKE_MIN_GAP_MS = 45 * 60_000
 // 她正在某一轮里时先等她说完，最多等这么久
 const IDLE_WAIT_MS = 10 * 60_000
 // turn/start 之后迟迟等不到 turn/end（宿主重启、事件丢了），超过这么久就不再当她在忙
@@ -65,10 +102,15 @@ const BUSY_STALE_MS = 15 * 60_000
 // 2026-10-26（用户 m00507）：她看不懂对话里那句「……」。
 // 真机 reasoning 原话是「用户发来的只有一个省略号，没有实质请求」，接着猜
 // 「用户的意思是让我留一句话、写日记」——把系统叫醒当成了用户的请求。
-// 这句说明只进 system prompt 的 fish:wake 段（用户看不见），把性质讲清楚；
-// 触发语本身也换成了括号旁白（见 wakeconst.js）。两处必须一起在，只有其一
-// 她仍会去猜。
-const WAKE_HINT = '对话里那条括号里的短句不是用户说的话，是叫醒你的信号。不用回应它，也不用问它什么意思——这一轮是你自己的。'
+// 这句说明只进 system prompt 的 fish:wake 段（用户看不见），把性质讲清楚。
+//
+// 2026-11-04（用户 m01112）：投递改走 `lib/deliver.js`（自建来源 + followup）后，
+// 落在对话里的正文是一个空格，「括号里的短句」这个说法已经对不上现实——
+// 她自己醒来的那一轮里，对话中根本没有可读的句子。照旧说「括号里的短句」
+// 等于给她一条假线索，她会去找一句不存在的话。所以改成把两种入口都说清：
+// 叫醒的信号有时是空白/极短的一条提示（scheduler.js 的 wake），
+// 有时是一句括号旁白（home.js 的 wakeIfBlank，那条仍走 sc.prompt）。
+const WAKE_HINT = '叫醒你的信号在对话里可能只是一条空白或极短的提示，有时是一句括号里的旁白——那都不是谁在跟你说话。不用回应它，也不用问它什么意思：这一轮是你自己的。'
 
 // 当天最后一次叫醒里多给一句处境（2026-10-29，用户 m01296 B）。
 // 只给「到今天了」这个时间感，不派活、不提日记——写不写由她自己决定。
@@ -144,16 +186,9 @@ export function startScheduler(ctx, deps = {}) {
     // 上一轮欠下的触发语收尾：宿主要求 system/message 落在**正开着**的 turn/step 里
     // （2026-11-02 用户 m01418 那次「历史加载失败」就是回合外写进去的）。
     // 所以留到新一轮 `step/start` 之后再收；同样挪到下一拍，别在 commit 里重入 append。
-    else if (event?.type === 'step/start') {
-      setTimeout(() => {
-        try {
-          const live = liveAgentOf(ctx, id)
-          flushPendingHides(live?.session ?? session, { log: (a, b) => log(a, b) })
-        } catch (err) {
-          log('proactive flush failed', err?.message ?? String(err))
-        }
-      }, 0).unref?.()
-    }
+    // 2026-11-04（用户 m00428）：触发语的收尾链整条删掉了 —— 现在投递用的是
+    // `source.kind = 'fish-wake'`，宿主动手就把它画成一张收起的折叠条，
+    // 没有「要盖掉的东西」。详见 lib/deliver.js 的文件头。
   })
   const isBusy = (id) => {
     const t = busy.get(id)
@@ -177,17 +212,7 @@ export function startScheduler(ctx, deps = {}) {
    * 处境走 system prompt 段，对话里只留一句「现在没有人跟你说话」。
    * 她可以选择开口，也可以什么都不做——不写任何「你应该」。
    */
-  // 每次启动补扫一遍历史里的遗留触发语（修好之前触发的那几轮还留在对话里）。
-  let sweptSession = ''
-
   async function maybeProactive({ events, config, dk, now, forced = false }) {
-    if (!devModeSync(root)) return false
-    // 2026-11-02：这一路原来是全静默的，真机上「一条日志都没有」既可能是
-    // 没进函数、也可能是卡在下面某个 return，分不清。进门记一次就够了。
-    if (!proactiveEntered) {
-      proactiveEntered = true
-      log('proactive', '调度器已进入主动说话检查')
-    }
     // fork.49：PAUSE 在时不开任何「叫醒」。闹钟（forced）默认照响——那是她自己
     // 定下的约定，不是系统给的机会；要连闹钟一起静音，在 PAUSE 文件里写 mute-alarm。
     const pause = await readPause(root)
@@ -203,22 +228,39 @@ export function startScheduler(ctx, deps = {}) {
       pauseSkip = ''
       log('proactive', 'PAUSE 已解除，恢复叫醒')
     }
-    if (!sweptSession) {
-      try {
-        const sid = await talkSessionId(ctx, { root, log })
-        const live = sid ? liveAgentOf(ctx, sid) : null
-        if (live) {
-          sweepTriggers(live.session, { log: (a, b) => log(a, b) })
-          sweptSession = sid
-        }
-      } catch {}
+    // 2026-11-02：这一路原来是全静默的，真机上「一条日志都没有」既可能是
+    // 没进函数、也可能是卡在下面某个 return，分不清。进门记一次就够了。
+    if (!proactiveEntered) {
+      proactiveEntered = true
+      log('proactive', '调度器已进入主动说话检查')
     }
+    // 开关（0.9.0，用户 m02634）：config.proactive.enabled 是正门（默认关）。
+    // devMode（fork，坑 #13）仍当总门：.dev 在就照旧开着——这台机器的行为不变；
+    // 正门留给以后撤 .dev 时用（改配置就行，不用再靠隐藏文件）。
+    if (!forced && config?.proactive?.enabled !== true && !devModeSync(root)) {
+      if (proactiveSkip !== '主动说话是关着的') {
+        proactiveSkip = '主动说话是关着的'
+        log('proactive skip', '主动说话是关着的（config.proactive.enabled 没开，.dev 也不在）')
+      }
+      return false
+    }
+    // 0.9.0（用户 m02634）：「主动性」另一道闸。关着 = 她不会自己攒劲儿开一轮；
+    // 日程唤醒与手动叫醒都不经过这里，照样能用。
+    if (config?.drive?.enabled === false) {
+      if (proactiveSkip !== '主动性关着') { proactiveSkip = '主动性关着'; log('proactive skip', '主动性关着') }
+      return false
+    }
+    // 2026-11-04（0.9.0 用户 m01466）：把她的成长档案交给判定函数。
+    // 之前这里是 `proactiveState({ config, events, now })` —— 它收不到 model，
+    // 于是第 3 天和第 27 天算出来的概率一模一样（「自己开口的出口不该是恒温的」）。
+    // fork.27：走分钟桶缓存，语义与现算一致；下面 wake 的 meta 也用它。
+    const model = deriveSelfCached(events, { growthDays: config.growthDays })
     // forced = 她自己定的闹钟（fork.43）：只可能来自 takeDueAlarm，
     // 时间点已经由工具保证在作息窗口内，所以这里不再走 proactiveState 的闸门
     // ——配额、冷却、空闲时长都不看，那是"系统给的机会"，不是她自己的约定。
     const st = forced
       ? { ok: true, chance: 1, why: '', idleHours: 0, dk }
-      : proactiveState({ config, events, now })
+      : proactiveState({ config, events, now, model })
     if (!st.ok) {
       if (st.why && st.why !== proactiveSkip) {
         proactiveSkip = st.why
@@ -227,22 +269,58 @@ export function startScheduler(ctx, deps = {}) {
       return false
     }
     // fork.41（2026-11-04）：间隔从写死的 30 分钟改成可配。
-    // 用户要的是「尽量多叫醒她，但说不说由她」——提示词里本来就写着
-    // 「不想说，就这一轮什么都别做，不算失败」，所以这里只动频率。
-    // rollsPerHour 是"每小时最多掷几次"，间隔取 60/N 分钟并留 25% 抖动，
-    // 免得每次都卡在整点/半点。
-    // forced（她自己定的闹钟）不看这个，也不掷骰子——到点就是到点。
+    // rollsPerHour 是"每小时最多看几次"，间隔取 60/N 分钟并留 25% 抖动，
+    // 免得每次都卡在整点/半点。forced（她自己定的闹钟）不看这个——到点就是到点。
     if (!forced) {
       const rollsPerHour = Math.max(1, Math.min(12, Number(config?.proactive?.rollsPerHour ?? 2)))
       if (now - lastProbe < ((60 * 60_000) / rollsPerHour) * 0.75) return false
       lastProbe = now
-      // fork.50：概率被「想不想」压过时，日志里要看得见压了多少、为什么。
-      const biasNote = st.bias?.factor < 1 ? `（×${st.bias.factor.toFixed(2)}：${st.bias.note}）` : ''
-      if (Math.random() > st.chance) {
-        log('proactive roll', `${st.chance.toFixed(2)}${biasNote} 没摇上`)
+    }
+    // ---- 劲儿（0.9.0，用户 m02031）----
+    // 用户的定案：把「什么时候开这一轮」从掷骰子换成攒劲儿。
+    //   底噪：每小时 0.12，攒到 0.8 想动一次，两次至少隔两小时；
+    //   冲动：桌上有没答的问题 +0.06、有新句子 +0.04、他回了她留的话 +0.12（封顶 +0.3）；
+    //   折扣：她上一次开口没人接，底噪 ×0.7（打扰成本，Horvitz）。
+    // 骰子退役（fork.50 之前的那套 chance 掷签不再用）——劲儿决定「该不该醒」，
+    // 醒来说什么仍旧是模型的事。fork.50 的「想不想」保留，折在劲儿值上（见下）。
+    // 这张桌子是**判据用的摘要**，不是正文那段（正文那段在 wake() 里现算现摆）。
+    let drv = null
+    if (!forced) {
+      const gaps = curiosityOf(events, now)
+      // 兴趣也算一笔冲动（0.9.0，用户 m02031 的目标）：手上有惦记的事，
+      // 更容易想开口——兴趣不只排桌面，也回灌到劲儿里。
+      const interest = interestOf(events, now)
+      const leave = lastLeaveAt(events)
+      const seen = lastSeenAt(events)
+      const echoBack = !!(leave && seen && seen >= leave && now - leave <= 72 * 3600_000)
+      const driveDesk = { gaps: gaps.length, stale: 0, echo: echoBack, favorite: interest.length > 0 }
+      drv = driveOf({ events, now, stage: model.stage, desk: driveDesk })
+      // 空桌不醒（0.9.0，用户 m02937）：桌上什么都没有时，劲儿再满也不起——
+      // 否则她只能回一句「没什么要说的」，既占额度又在对话里留一条噪音。
+      if (!deskHasMaterial(driveDesk)) {
+        const why = `桌上没有可说的东西（劲儿 ${drv.value.toFixed(2)}）`
+        if (why !== proactiveSkip) {
+          proactiveSkip = why
+          log('drive', why)
+        }
         return false
       }
-      if (biasNote) log('proactive roll', `${st.chance.toFixed(2)}${biasNote} 摇上了`)
+      // fork.50（2026-11-05）：「想不想」折进劲儿里——只压不抬。
+      // 劲儿自带的折扣只认「上次没人接」；刚拒绝过一件事、主动了两次没人接、
+      // 今天聊够了，这三样在这里乘进去（系数全 ≤1，地板 0.25）。
+      // 同一条立场：被冷落时她会退回一点，不是更黏。
+      if (st.bias && st.bias.factor < 1) {
+        const v = drv.value * st.bias.factor
+        drv = { ...drv, value: v, ready: v >= drv.threshold, why: v >= drv.threshold ? '' : `还没攒够（${v.toFixed(2)} / ${drv.threshold}）` }
+        log('drive', `想不想 ×${st.bias.factor.toFixed(2)}（${st.bias.note}）→ ${v.toFixed(2)}`)
+      }
+      if (!drv.ready) {
+        if (drv.why && drv.why !== proactiveSkip) {
+          proactiveSkip = `drive ${drv.value.toFixed(2)} · ${drv.why}`
+          log('drive', proactiveSkip)
+        }
+        return false
+      }
     }
     const sc = ctx.sessionController
     if (!sc?.prompt) {
@@ -264,64 +342,116 @@ export function startScheduler(ctx, deps = {}) {
     const material = recentMaterial(events, { now })
     const loose = looseEnds(events, { now })
     const text = proactiveSection({ now, state: st, material, loose })
-    const model = deriveSelfCached(events, { growthDays: config.growthDays })
 
-    const ac = new AbortController()
-    const kill = setTimeout(() => ac.abort(), WAKE_TIMEOUT_MS)
     const requestId = `proactive-${now}`
-    // 回合结束：先把处境抽走（跟唤醒同一条清理路径），再把那条触发语从对话里收走。
-    // 2026-10-30 真机（m05007）：不收走的话，用户对话框里会多出一条「自己发的」
-    // 「（现在没有人跟你说话。）」——那只是 prompt 正文，不是谁真的说了话。
-    // 这一轮她写的话不算他来过：唤醒时间窗开到 turn/end（prompt() 入队就返回，见 wakewin.js），
+    // 这一轮她写的话不算他来过：唤醒时间窗开到 turn/end（投递只等入队，见 wakewin.js），
     // turn/end 一直不来就最迟 WAKE_TIMEOUT_MS 关上。
     const releaseWake = holdWake()
     setTimeout(releaseWake, WAKE_TIMEOUT_MS).unref?.()
+    // 处境代次（2026-11-04，用户 m01466）：turn/end 监听是按**会话**挂的，
+    // 两次叫醒挨得近时前一轮的 turn/end 会晚到，把后一轮刚挂的处境抹掉。
+    // 所以清的时候带着自己那次挂上去时拿到的号，对不上就不清。
+    let gen = 0
     const watcher = watchTurnEnd(ctx, sessionId, () => {
       releaseWake()
-      clearWakeSection()
-      // 收触发语**必须挪到下一拍**：这个回调正在 `Session.commit()` 里被派发，
-      // 那一整段时间 `entry.appending === true`，同步 append 会抛
-      // `session append cannot reenter while another append is being published`
-      // （2026-10-31 19:09:05、2026-11-01 14:54:28 两次真机都是这一条）。
-      // 之前一直收不掉，用户就在对话框里看见自己「发」了那句「（现在没有人跟你说话。）」。
-      setTimeout(() => {
-        try {
-          const live = liveAgentOf(ctx, sessionId)
-          const hidden = hideTrigger(live?.session, { rpcId: requestId, log: (a, b) => log(a, b) })
-          log('proactive', hidden ? '触发语已从对话里收走' : '触发语没能收走（会话不在线或找不到那条消息）')
-        } catch (err) {
-          log('proactive hide failed', err?.message ?? String(err))
-        }
-      }, 0).unref?.()
+      clearWakeSection(gen)
     })
     try {
-      await sc.create({ sessionId, cwd: await ensureHer(root) }).catch(() => {})
-      setWakeSection(text)
-      await sc.prompt(
-        {
-          requestId,
-          sessionId,
-          mode: 'queue',
-          content: [{ type: 'text', text: PROACTIVE_TRIGGER }],
-        },
-        ac.signal,
-      )
-      await appendEvent(
-        { type: 'meta', text: `proactive-turn:${dk}:${now}` },
-        { day: model.day, stage: model.stage, source: 'timer' },
-        root,
-      ).catch(() => {})
-      log('proactive', forced ? '按她定的点开了一次空手回合' : `开了一次空手回合（概率 ${st.chance.toFixed(2)}）`)
+      // 2026-11-05（0.9.0 用户 m03265）：原来这里是 `sc.create({ sessionId, cwd })`，
+      // 而 deliverWake 下面自己就会 resolveLiveAgent —— 这次 create 除了在宿主侧
+      // 多堆一条空白会话之外什么都没做（跑过 turn 的会话给不出来，宿主静默另开一条）。
+      // 现在先探活；探不通才退回建（老宿主没有 resolveAgent 时也走这条）。
+      const live = await ensureSessionLive(sc, sessionId)
+      if (!live.live) {
+        log('proactive: 会话探活没通过，退回新建一条', live.why ?? '')
+        await sc.create({ sessionId, cwd: await ensureHer(root) }).catch(() => {})
+      }
+      gen = setWakeSection(text)
+
+      // 投递之前先把这一轮盯起来（0.9.0 用户 m00803）。认领信号是 rpcId：
+      // 每次投递一个唯一值，命中之前一律当「还没开始」，所以早挂不会认错轮。
+      const follow = followWake(ctx, { rpcId: requestId, log })
+
+      // 2026-11-04（0.9.0 用户 m00428）：投递换成正解 —— 自建 `source.kind='fish-wake'`
+      // 的消息交给 `agent.followup()`。宿主把它画成一张默认收起的折叠条，
+      // 对话里不再出现「（现在没有人跟你说话。）」那一句。
+      // 原来那条「先 sc.prompt 发出去、等 turn/end 再用 surfaceOp.replace 盖掉」
+      // 的路子整条删了：宿主源码注释写明替换副本只改模型侧、不进人类对话记录，
+      // 所以那两次「已收走」从来没生效过（详见 lib/deliver.js 文件头）。
+      // 2026-11-05（0.9.0 用户 m02223 真机复核）：这条消息在对话里就是一行「回合触发条」，
+      // 标题只由 source.kind 决定（`TurnTriggerNodeView`），form/summary 对它无效；
+      // 正文写什么会被她当成别人说的话。详见 lib/deliver.js 文件头。
+      const sent = await deliverWake(ctx, sc, sessionId, {
+        text: WAKE_PING,
+        rpcId: requestId,
+        log,
+      })
+      if (!sent.ok) {
+        // 没送进去就没有这一轮：处境和窗口当场收掉，监听也摘掉，
+        // 不然要等到别的哪一轮结束才清，那一轮开头还挂着这次的处境（跟 wake() 失败时一样）
+        try { follow.off() } catch { /* ignore */ }
+        clearWakeSection(gen)
+
+        releaseWake()
+        try { watcher.off?.() } catch { /* ignore */ }
+        log('proactive deliver failed', sent.why ?? '')
+        return false
+      }
+      // 这一拍已经花掉了劲儿：投递成功就记（失败上面已经 return，不会白扣）。
+      // 只记在 `drive-spend:` 上，不占每天几次开口的额度——额度仍按「她真的说了话」算。
+      // fork.43：闹钟那一拍没花劲儿（那是她自己约的，不是攒出来的），不记。
+      if (!forced) {
+        await appendEvent({ type: 'meta', text: `drive-spend:${dk}:${now}` }, { day: model.day, stage: model.stage, source: 'timer' }, root).catch(() => {})
+      }
+      // 记在哪一条上，等这一轮**真的结束**再说（0.9.0 用户 m00803）。
+      // 以前投递成功就写 `proactive-turn:`（额度+冷却），于是「醒着但没话说」也扣额度——
+      // 市场插件 dsh-speak-up 0.2.9 的 issue #8 是同一类 bug（冷却按投递算，不按她真的说话算）。
+      // 现在她说了话才记 `proactive-turn:`；只是醒了一下，记 `proactive-silent:`，
+      // 并把这一轮从模型看到的历史里折成一行墓碑（省上下文，人类对话记录不动）。
+      void follow.done.then(async (out) => {
+        try {
+          // 没认出那条 ping / 投递本身失败了：这一轮根本不存在，一个字都不该记。
+          if (!Number.isSafeInteger(out.startSeq) || out.startSeq < 0) {
+            log('proactive', `投递没有落成，这一轮不记账（${out.why ?? '没有区间'}）`)
+            return
+          }
+          const meta = { day: model.day, stage: model.stage, source: 'timer' }
+          // 「没什么要说的」不是开口（0.9.0 用户 m02937）：她写一句元话语
+          // 交代「这轮没话说」，在文本界面上几乎不可避免；按静默记、折掉，别当一次开口。
+          const quiet = out.spoke !== true || looksLikeNothingSaid(out.said)
+          // fork.43：她自己定的闹钟不占主动配额、不起冷却——turn / silent 两行都不写。
+          if (!forced) {
+            if (!quiet) {
+              await appendEvent({ type: 'meta', text: `proactive-turn:${dk}:${now}` }, meta, root).catch(() => {})
+              log('proactive', `开了一次空手回合，她开口了${drv ? `（劲儿 ${drv.value.toFixed(2)}）` : ''}`)
+              return
+            }
+            await appendEvent({ type: 'meta', text: `proactive-silent:${dk}:${now}` }, meta, root).catch(() => {})
+          }
+          // 折叠只在拿到闭合区间时做：超时、或没认出那条 ping，out.endSeq 都是 -1。
+          const plan = out.endSeq >= 0
+            ? planWakeCompaction(out.events, { startSeq: out.startSeq, endSeq: out.endSeq, rpcId: requestId })
+            : null
+          // 一轮可能被宿主的投影切成几段：各段单独换，边界节点原样留着。
+          let folded = 0
+          if (plan) for (const run of plan.runs) if (await compactWake(out.session, run, { log })) folded += 1
+          const tail = out.spoke === true ? '，只说了句没什么要说的' : ''
+          const head = forced ? '按她定的点醒了一次' : '醒了一次'
+          log('proactive', folded > 0
+            ? `${head}，没有开口${tail}（这一轮折成 ${folded} 行，盖住 ${plan.shadowed} 个节点）`
+            : `${head}，没有开口${tail}（${out.ok ? '这轮没什么可折' : out.why}）`)
+        } catch (err) {
+          log('proactive settle', err?.message ?? err)
+        }
+      }).catch(() => {})
       return true
     } catch (err) {
       // 没送进去就没有这一轮：处境和窗口当场收掉，监听也摘掉，
       // 不然要等到别的哪一轮结束才清，那一轮开头还挂着这次的处境（跟 wake() 失败时一样）
-      clearWakeSection()
+      clearWakeSection(gen)
       releaseWake()
       try { watcher.off?.() } catch { /* ignore */ }
       throw err
-    } finally {
-      clearTimeout(kill)
     }
   }
 
@@ -470,7 +600,7 @@ export function startScheduler(ctx, deps = {}) {
 
       running = true
       try {
-        await wake(ctx, root, model, config, decision, dk, log, { ...deps, events, isBusy, waitIdle })
+        await wake(ctx, root, model, config, decision, dk, log, { ...deps, events, isBusy, waitIdle, isDisposed: () => disposed })
       } finally {
         running = false
       }
@@ -623,17 +753,76 @@ async function wake(ctx, root, model, config, decision, dk, log, deps = {}) {
   // 唤醒消息里任何"你是谁/你能做什么"的复述都是重复，交给身份文档。
   // 先给时间与缘由，再给处境：她至少不会把自己醒着这件事解释成「出了错」。
   const now = deps.now instanceof Date ? deps.now : new Date()
+
+  // ---- 醒来看的那张便条（issue #22 乙档，2026-11-04）----
+  // 她的原话：「它该挂在『醒』上：每次醒过来，先看一眼有没有到期的东西，
+  // 有就摆在我最前面。」所以它是正文**第一段**，比「现在是几点」还前。
+  // 没有便条时 renderNotes 返回空串，filter(Boolean) 把它跳过，一个字都不多。
+  // 读失败也绝不拖垮一次唤醒——她醒着这件事比桌上的纸条重要。
+  const notesLine = await readNotes(root)
+    .then((list) => renderNotes(list, now))
+    .catch(() => '')
+
+  // ---- 空醒（2026-11-05，用户 m00684）----
+  // 见 lib/freewake.js 文件头。摆料要出现的那一次、或者到日子了的那一次，
+  // 这一轮不派模板任务：正文里只有时间、世界的动静、几行旧句子，最后一句说清「没有待办」。
+  // 只在本机开发副本里生效；公开版看到的仍是原来那张卡。
+  // 旧句子一天只摆一次（记 `table:<dk>`），而且今天还没记过梦才摆——记过了再摆就成了复盘材料。
+  // 措辞上不提「梦」、不派活：她要不要把这些句子重新拼起来，是她的事。
+  // 读失败绝不拖垮一次唤醒，所以整段包在 try 里。
+  let tableText = ''
+  // 旧句子：判「要不要空醒」要用渲染好的那段，摆桌子要的是原始行——一次算好两处都用。
+  let staleRows = []
+  let free = null
+  {
+    try {
+      const { events: evs } = await readEvents(root)
+      if (!dreamOn(evs, model.day).length) {
+        const shownToday = evs.some((e) => e?.type === 'meta' && String(e.text ?? '').startsWith(`table:${dk}`))
+        const [{ outings }, { possessions }] = await Promise.all([readOutings(root), readPossessions(root)])
+        const tripSessions = new Set(
+          [...outings.map((o) => o.sessionId), ...possessions.map((p) => p.sessionId)]
+            .map((s) => String(s ?? ''))
+            .filter(Boolean),
+        )
+        staleRows = staleLines(evs, { now: now.getTime(), tripSessions })
+        tableText = tableFor({
+          rows: staleRows,
+          gapHours: hoursSinceLastWake(evs, now.getTime()),
+          shownToday,
+        })
+      }
+      free = freeWakeFor({ tableText, events: evs, dk, now: now.getTime(), config })
+    } catch (err) {
+      log('dream table', err?.message ?? err)
+    }
+  }
+
   const parts = [
+    notesLine,
     wakeTimeLine(now, { manual: deps.manual === true, insideWindow: inWindow(config, now) }),
     '',
-    decision.prompt,
   ]
+  // 空醒时材料站在原本「任务」的位置上；不是空醒就照旧先派这一轮的活。
+  if (free) {
+    if (tableText) parts.push(tableText)
+  } else {
+    parts.push(decision.prompt)
+  }
 
   // ---- P2：醒之前先让她"看见点东西" ----
   // 顺序是刻意的：先看，再想。如果先出事件提示再塞素材，
   // 她就会先按模板说话、再拿素材硬套——那是模板，不是她。
   // 反过来（先看见世界的动静，再问她怎么想）才像一个人醒来的样子。
-  const look = await lookBeforeWake(root, model, config, dk, deps, log)
+  //
+  // 2026-11-05（用户 m01128）：摆料那一轮不摆世界。这一轮只该有一张桌子——
+  // 旧句子 + 「这一轮没有待办」。B 站动静与惦记清单都会替她提供「最像活的那件事」，
+  // 18:44 真机她就是挑了旧句子里唯一像活的一条去核对，没往梦里想。
+  // 手动「让她去刷 B 站」（forceBrowse）本来就指定了这一轮做什么，不跟着空醒一起收。
+  // 2026-11-05（用户 m02562）：刷站不再挂在唤醒上。所有醒来都只有桌子与世界之外的事，
+  // 想上网由她自己调工具（bili_*），不再由唤醒替她决定看什么。
+  const showWorld = false
+  const look = showWorld ? await lookBeforeWake(root, model, config, dk, deps, log) : { text: '', intro: '', picks: [] }
   if (look.text) {
     parts.push('', look.intro, '', look.text)
     // 带链接的清单（2026-10-23 用户提）：她能说出"有一条是一个人跑不起来了"，
@@ -656,6 +845,45 @@ async function wake(ctx, root, model, config, decision, dk, log, deps = {}) {
   }
   if (look.riskNote) parts.push('', look.riskNote)
 
+  // ---- 桌子：她惦记的口子、回音（主观能动性 步 0，2026-11-05，用户 m01512）----
+  // 用户定下的顺序是「先把桌子摆满（好奇 + 回音）→ 再上劲儿」。
+  // 2026-11-05 合并（见 docs/L-空醒-方案与兼容约定.md 第五节）：原来 curiosity 与
+  // dreamtable 各推一段，空醒那一轮会并排出现两摞清单。现在「想知道的」与「写下的旧句子」
+  // 交给 deskFor 并成一段，配额与去重都在那个纯函数里；回音是另一件事（他有没有来过），
+  // 仍然单独一句话，不并进桌子。
+  // 只摆**事实**：不派活、不写「你可以去想想」、不给任何数字——派活了就又变成任务清单。
+  // 2026-11-05（用户 m02634）：「兴趣」有开关。关掉 = 桌子那几行（好奇/旧句子/回音）
+  // 一概不摆；缺工具那句仍留着，它不是活、是她世界里的常量。
+  // 读失败绝不拖垮一次唤醒：她醒着这件事比桌上的东西重要。
+  if (config?.interest?.enabled !== false) {
+    try {
+      // 摆料那一轮不摆桌子：这一轮只留旧句子（用户 m01128）。
+      {
+        const { events: evc } = await readEvents(root)
+        // 兴趣（2026-11-05，用户 m02031）：反复出现的那件事排进同一张桌子，
+        // 不另起一段——「一张桌子」是 L 文档定下的约定。
+        const favItem = interestOf(evc, now.getTime())[0]
+        const fav = favItem ? topicLabel(favItem.text) : ''
+        const desk = deskFor({
+          gaps: curiosityOf(evc, now),
+          // 摆料那一轮 tableText 已经把旧句子摆出来了，桌子别再摆第二遍
+          // （2026-11-05 真机 18:44：同三句原话出现了两次）。
+          stale: staleForDesk(tableText, staleRows),
+          free: !!free,
+          favorite: fav,
+          at: now,
+        })
+        if (desk) parts.push('', desk)
+        const echo = renderEcho(evc, now)
+        if (echo) parts.push('', echo)
+      }
+      // 缺工具就开口要：每次醒来都摆这一句，不派活，只给路径。
+      // 摆料那一轮也留着——它不是活，是她世界里的常量（用户 m01128）。
+      parts.push('', TOOL_ASK_NOTE)
+    } catch (err) {
+      log('curiosity', err?.message ?? err)
+    }
+  }
   // 工具说明与上网说明不在这里重复：那两段在身份文档里（selfdoc.js 的
   // 「我手上有什么」「上网」两节，随配置现渲染，\`speak\` 关着时整节不写），
   // 而这整份文档每轮都以 system prompt 的形式在场。这里再写一遍 = 同一件事说两遍。
@@ -693,7 +921,8 @@ async function wake(ctx, root, model, config, decision, dk, log, deps = {}) {
   // 做法写在身份文档（SLEEP_BRIEF），这里只给一句时机标记。
   const every = Number(config?.memory?.sleepEveryDays ?? 0)
   let askedSleep = false
-  if (every > 0 && model.day > 1 && model.day % every === 0) {
+  // 空醒里不再叠一句「停下来想一想」：那一轮本来就是空的，多一句就成了安排。
+  if (!free && every > 0 && model.day > 1 && model.day % every === 0) {
     const events0 = (await readEvents(root).catch(() => ({ events: [] }))).events
     const doneToday = events0.some((e) => e?.type === 'meta' && String(e.text ?? '').startsWith(`sleep:${dk}`))
     if (!doneToday) { parts.push('', SLEEP_TODAY); askedSleep = true }
@@ -707,7 +936,8 @@ async function wake(ctx, root, model, config, decision, dk, log, deps = {}) {
   // 为什么不能在这里直接问：此刻还在拼正文，会话还没建、agent 还没醒，
   // 宿主只认 live root agent（见 askinchat.js 的说明），问出去必得 CALLER_NOT_LIVE。
   let offered = null
-  if (config?.rules?.offers !== false) {
+  // 空醒里不递规则申请：那是一张要她表态的卡，会把「没有待办」重新变成待办。
+  if (!free && config?.rules?.offers !== false) {
     const ev2 = (await readEvents(root).catch(() => ({ events: [] }))).events
     if (!pendingOffer(ev2, Date.now())) {
       for (const r of grantableRules()) {
@@ -751,8 +981,12 @@ async function wake(ctx, root, model, config, decision, dk, log, deps = {}) {
   // 手动唤醒不占这个「最后一段」的位置太多说，照常参与判断即可。
   try {
     const evs = deps.events ?? (await readEvents(root).catch(() => ({ events: [] }))).events
-    if (isLastWakeOfDay(config, todayCounts(evs, dk))) parts.push('', DAY_END_CUE)
+    if (!free && isLastWakeOfDay(config, todayCounts(evs, dk))) parts.push('', DAY_END_CUE)
   } catch { /* 一句时机不该拖垮一次唤醒 */ }
+
+  // 空醒的最后一句：把「没有活」说清，不指着她做任何事。
+  // 放在最后而不是像模板那样放第一段——整段处境的落点应该停在这里。
+  if (free) parts.push('', free.note)
 
   const content = parts.filter(Boolean).join('\n').trim()
   // 空正文就别唤醒：没有处境可讲，起了也是空转。
@@ -800,12 +1034,21 @@ async function wake(ctx, root, model, config, decision, dk, log, deps = {}) {
   // 的全部历史、配置、黑名单读一遍——B 文档 §N3 声称做不到，实现却在放水。
   // 现在她在一个空目录里，状态库是父目录，要碰得主动 `cd ..`。
   const herDir = deps.herDir ?? await ensureHer(root)
-  try {
-    await sc.create({ sessionId, cwd: herDir })
-  } catch { /* 已存在，继续用 */ }
+  // 2026-11-05（用户 m03265）：同 maybeProactive —— create({ sessionId }) 只会在
+  // 宿主侧多堆一条空白会话，投递本身走的是 deliverWake 里的 resolveLiveAgent。
+  // 先探活，探不通才退回建一条。
+  const live = await ensureSessionLive(sc, sessionId)
+  if (!live.live) {
+    log('wake: 会话探活没通过，退回新建一条', live.why ?? '')
+    try {
+      await sc.create({ sessionId, cwd: herDir })
+    } catch { /* 已存在，继续用 */ }
+  }
 
-  const ac = new AbortController()
-  const kill = setTimeout(() => ac.abort(), WAKE_TIMEOUT_MS)
+  // 2026-11-04：`AbortController` 与那个 5 分钟 kill 定时器一起删掉了。
+  // 原来它们只服务于 `sc.prompt(req, ac.signal)`；现在投递走 `agent.followup()`，
+  // 那是个同步入队调用（没有 signal 参数，也不会挂住），留着就是两件死代码，
+  // 而且超时 abort 还会被人读成「唤醒一定会在 5 分钟内回滚」——它不是。
 
   // ---- 报告的两种写法 ----
   // 先写一次：让用户在等回复的这段时间里就能看到"她今天看了什么"。
@@ -835,16 +1078,44 @@ async function wake(ctx, root, model, config, decision, dk, log, deps = {}) {
 
   // 这一轮她写的话不算他来过：唤醒时间窗开到 turn/end，不是开到入队（见 wakewin.js）。
   // turn/end 不来时跟处境一起由下面的兜底关；没送进去就在 catch 里关。
+  // 处境代次（2026-11-04，用户 m01466）：见 maybeProactive 里的同一处注释。
+  // watcher 认的是会话不是这一轮，所以清的时候要带着自己挂上去时拿到的号。
+  let gen = 0
   const releaseWake = holdWake()
-  const watcher = watchTurnEnd(ctx, sessionId, () => { releaseWake(); void writeReport(); clearWakeSection() })
+  const watcher = watchTurnEnd(ctx, sessionId, () => { releaseWake(); void writeReport(); clearWakeSection(gen) })
 
-  // 处境走 system prompt 段；对话里只留这一句（她看到的是「有人来了」，不是剧本）。
-  setWakeSection(wakeText)
+  // 处境走 system prompt 段；对话里只留一个空投递（她看到的是「有人来了」，不是剧本）。
+  gen = setWakeSection(wakeText)
+  // 2026-11-04（用户 m01466）：投递前的最后一道护栏。
+  //
+  // 真机事故里出现过「消息投出去了、system prompt 里一个字处境都没有」的一轮：
+  // `clearWakeSection()` 挂在 `turn/end` 上，而 system prompt 是**轮次真正开始时**
+  // 才组装的（不是投递那一刻）。两次唤醒挨得太近时，前一轮的 turn/end 会晚到，
+  // 把后一轮刚挂上的处境抹掉——她就收到一个空格，对着空气说一句「没有新的事」。
+  //
+  // 治本是上面的最小间隔（不该有两次挨这么近的唤醒）；这里只是兜底：
+  // 万一处境真的空了，宁可不叫，也别投一条空壳让她自己找台阶下。
+  if (!getWakeSection().trim()) {
+    clearWakeSection(gen)
+    releaseWake()
+    try { watcher.off?.() } catch { /* ignore */ }
+    log('wake skipped: 处境是空的')
+    return
+  }
   try {
-    await sc.prompt(
-      { requestId: `wake-${dk}-${Date.now()}`, sessionId, mode: 'queue', content: [{ type: 'text', text: WAKE_TRIGGER }] },
-      ac.signal,
-    )
+    // 2026-11-04（用户 m00428）：投递换成正解 —— 自建 `source.kind='fish-wake'`
+    // 的消息交给 `agent.followup()`，宿主把它画成一张默认收起的折叠条。
+    // 原来那句「（醒一醒）」以 user 气泡出现在对话里，跟主动开口是同一个毛病；
+    // 详见 lib/deliver.js 的文件头。
+    // 2026-11-05（用户 m02223 真机复核）：叫醒那行是回合触发条，form/summary 无效，
+    // 正文保持空白信号（详见 lib/deliver.js 文件头）。
+    const sent = await deliverWake(ctx, sc, sessionId, {
+      text: WAKE_PING,
+      rpcId: `wake-${dk}-${Date.now()}`,
+      log,
+    })
+    // 递不进去就没有这一轮：抛出去，让下面的 catch 把处境、窗口、监听一起收掉。
+    if (!sent.ok) throw new Error(sent.why ?? '投递失败')
     // ---- 在会话里问她那个人（0.7.5，用户 m00239）----
     // 申请已经落盘（pendingOffer 从此看得见），这里补的是「让她当面问出来」：
     // 卡片弹在她那条会话的输入框上方，人选「可以 / 这次不行」当场落成一条 grant。
@@ -854,15 +1125,24 @@ async function wake(ctx, root, model, config, decision, dk, log, deps = {}) {
     if (offered) void askOfferInChat(ctx, root, { sessionId, offer: offered, log })
 
     await appendEvent(
-      { type: 'meta', text: `wake:${dk} ${decision.template?.id ?? '?'}` },
+      { type: 'meta', text: `wake:${dk} ${free ? free.kind : (decision.template?.id ?? '?')}` },
       { day: model.day, stage: model.stage, source: 'timer' },
       root,
     )
     // 每条模板都要落 fired 标记（2026-10-24 起）：once 靠它判断用没用过，
     // 可重复的模板靠它的时间戳算冷却（repeat.everyDays）——光有 id 算不出"隔了多久"。
-    if (decision.template?.id) {
+    // 空醒没有动用任何模板，就不该替谁记这一笔。
+    if (!free && decision.template?.id) {
       await appendEvent(
         { type: 'meta', text: `fired:${decision.template.id}` },
+        { day: model.day, stage: model.stage, source: 'timer' },
+        root,
+      )
+    }
+    // 空醒也要记账：`table:<dk>` 让摆料一天只摆一次，`think:<dk>` 让想一想一天只空一次。
+    if (free) {
+      await appendEvent(
+        { type: 'meta', text: `${free.kind === 'table' ? 'table' : 'think'}:${dk}` },
         { day: model.day, stage: model.stage, source: 'timer' },
         root,
       )
@@ -875,7 +1155,7 @@ async function wake(ctx, root, model, config, decision, dk, log, deps = {}) {
         root,
       )
     }
-    log('woke', sessionId, decision.template?.id)
+    log('woke', sessionId, free ? `free:${free.kind}` : decision.template?.id)
 
     // 第一版报告：这时她大概还没说完，所以"她说了什么"多半是空的。
     // 先写一版是为了用户点完按钮立刻就能看到"今天看了什么"。
@@ -894,18 +1174,29 @@ async function wake(ctx, root, model, config, decision, dk, log, deps = {}) {
     // 兜底只管「turn/end 一直不来」：她还在这一轮里（读字幕、看画面常常超过 90 秒）
     // 就别把处境抽走，过一会儿再看；isBusy 自带过期，不会一直拖下去。
     const fallback = () => {
+      // 调度器已经收摊：兜底不再重排，当场把窗口与处境一起收掉。
+      // 原来缺这一条：dispose 之后兜底还在跑，而 isBusy 是**按调度器实例**记的，
+      // 收摊之后 busy 表不会再被 turn/end 清掉，于是一直「她还在忙」→ 一直重排，
+      // 叫醒窗口（进程级）就一直开着。2026-11-05 CI ubuntu 抓到的正是这个跨用例泄漏：
+      // 上一个调度器留下的窗口没关，下一轮 turn/end 之后 inWake() 仍是 true。
+      if (deps.isDisposed?.()) {
+        try { watcher.off?.() } catch { /* ignore */ }
+        clearWakeSection(gen)
+        releaseWake()
+        return
+      }
       if (!watcher.fired && typeof deps.isBusy === 'function' && deps.isBusy(sessionId)) {
         setTimeout(fallback, 30_000).unref?.()
         return
       }
       try { watcher.off?.() } catch { /* ignore */ }
-      if (!watcher.fired) clearWakeSection()
+      if (!watcher.fired) clearWakeSection(gen)
       releaseWake()
     }
     setTimeout(fallback, REPORT_WAIT_MS).unref?.()
   } catch (err) {
     // 这一次没起来，处境要立刻清掉，唤醒时间窗也关上。
-    clearWakeSection()
+    clearWakeSection(gen)
     releaseWake()
     await appendEvent(
       { type: 'meta', text: `wakefail:${dk} ${String(err?.message ?? err).slice(0, 120)}` },
@@ -914,8 +1205,6 @@ async function wake(ctx, root, model, config, decision, dk, log, deps = {}) {
     ).catch(() => {})
     log('wake failed', err?.message ?? err)
     try { watcher.off?.() } catch { /* ignore */ }
-  } finally {
-    clearTimeout(kill)
   }
 }
 
@@ -971,7 +1260,7 @@ async function askOfferInChat(ctx, root, { sessionId, offer, log = () => {} } = 
  *
  * 2026-10-26（用户 m00507）：**手动唤醒也走屋子会话**。
  * 原来的实现每次手动唤醒都伪造一个 `fish-wake-<dk>-manual-<ts>` 的 id，
- * 宿主不认识这个 id → `sc.create({ sessionId, cwd: herDir })` 按 cwd 建一条
+ * 宿主不认识这个 id → `sc.create({ cwd: herDir })` 按 cwd 建一条
  * 新会话，而她的房间（`~/.dsh-fish/home/her`）是工作区 `~/.dsh-fish/home`
  * 的**子目录**，匹配不上工作区路径 → 侧栏把它丢进「未分组」。
  * 用户看到的就是「叫醒之后，对话到了未分组」。
@@ -1007,15 +1296,30 @@ export async function wakeNow(ctx, deps = {}) {
   const model = deriveSelfCached(events, { growthDays: config.growthDays })
   const dk = dateKey()
   const counts = { dateKey: dk, sent: 0, questions: 0, proactive: 0 }
-  // focus='browse'：设置页那个「让她去刷 B 站」按钮（**仅本机测试版**，2026-10-26）。
-  // 不走 plan()——plan 判的是「今天该不该醒」，而这个按钮是人工要求她醒一次去看站；
-  // 语气也别写成"任务"，她看到"去看一眼"会自己决定看不看。
-  const forcedBrowse = deps.focus === 'browse'
-  if (forcedBrowse) deps = { ...deps, forceBrowse: true }
-  let decision = forcedBrowse
-    ? { action: 'wake', prompt: '（现在，去看一眼 B 站首页在推什么。）', template: { id: 'manual-browse' } }
-    : plan(model, config, counts, events, { squeeze: gapSqueeze(gapSinceLastWake(events)) })
+  // 2026-11-05（用户 m02562）：「让她去刷 B 站」这个按钮砍掉了，
+  // 手动叫醒一律走 plan()，和定时那条一样。
+  let decision = plan(model, config, counts, events, { squeeze: gapSqueeze(gapSinceLastWake(events)) })
   const log = deps.log ?? (() => {})
+  // 2026-11-04（用户 m01466）：手动叫醒也要认最小间隔。
+  //
+  // 原来这条路上**一次间隔检查都没有**：`WAKE_MIN_GAP_MS` 只写在 `nextWakeAt()` 里，
+  // 而那个函数只服务定时器。于是设置页那个按钮点两下就投两次。
+  // 真机事故（2026-11-04 21:32）：13:32:38 叫醒一次，她 11 秒写完正文、turn/end
+  // 把处境段清掉；13:33:05 又投一次 —— 这一轮的系统提示里一个字处境都没有，
+  // 她只能写「上一句已经说完了。这一轮没有新的事，我不再往下续」。
+  // 白烧一轮不算，还逼她对着空气说话。
+  //
+  // `deps.force` 留给测试和「就是要连叫」的场合，用户界面不传。
+  if (!deps.force) {
+    const nowMs = Date.now()
+    const last = lastWakeAt(events, dk)
+    if (last && nowMs - last < WAKE_MIN_GAP_MS) {
+      const mins = Math.max(1, Math.round((nowMs - last) / 60_000))
+      const why = `刚叫过（${mins} 分钟前），再等一会儿——两次叫醒之间至少隔 ${Math.round(WAKE_MIN_GAP_MS / 60_000)} 分钟。`
+      log(`手动叫醒被间隔挡住：${why}`)
+      return { ok: false, why, lastAt: last }
+    }
+  }
   // 2026-10-31（用户 m02943 / m03076）：手动点叫醒，卡池空了也照醒。
   //
   // 原来的行为是「手动也叫不动」：plan() 里除了当天配额，还有模板冷却和 cond，
