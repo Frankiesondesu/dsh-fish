@@ -59,12 +59,14 @@ export function parsePushLine(line) {
   // 用 meta 不用 utterance —— utterance 会进 beliefs，而"她说出声"不是"她判断了什么"。
   if (ev.type === 'meta') {
     const raw = String(ev.text ?? '')
-    if (!raw.startsWith('voice:')) return null
-    const rest = raw.slice('voice:'.length)
+    // 语音 / 表情（2026-11-05）：同一种形状——meta + 文件路径，桥只按 kind 发不同的段。
+    const kind = raw.startsWith('voice:') ? 'voice' : raw.startsWith('meme:') ? 'meme' : ''
+    if (!kind) return null
+    const rest = raw.slice(kind.length + 1)
     const bar = rest.indexOf('|')
     const file = (bar >= 0 ? rest.slice(0, bar) : rest).trim()
     if (!file) return null
-    return { id: String(ev.id ?? ''), kind: 'voice', text: file, ts: String(ev.ts ?? '') }
+    return { id: String(ev.id ?? ''), kind, text: file, ts: String(ev.ts ?? '') }
   }
   if (ev.type !== 'utterance' || ev.source !== 'tool') return null
   const raw = String(ev.text ?? '')

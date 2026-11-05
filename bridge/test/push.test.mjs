@@ -75,6 +75,19 @@ test('标记表里每一类都认得出来（陪看将来直接可用）', () =>
   assert.equal(parsePushLine(JSON.stringify({ type: 'utterance', source: 'tool', text: '（陪你看）这段笑了。' }))?.kind, 'watch')
 })
 
+test('表情和语音同一种形状：meta + 文件路径，按前缀分 kind', () => {
+  const v = parsePushLine(JSON.stringify({ type: 'meta', text: 'voice:C:////a////v.mp3|她说的话' }))
+  assert.equal(v?.kind, 'voice')
+  assert.equal(v?.text, 'C:////a////v.mp3')
+
+  const m = parsePushLine(JSON.stringify({ type: 'meta', text: 'meme:C:////a////无语.png|无语' }))
+  assert.equal(m?.kind, 'meme')
+  assert.equal(m?.text, 'C:////a////无语.png')
+
+  assert.equal(parsePushLine(JSON.stringify({ type: 'meta', text: 'meme:' })), null, '没有路径不推')
+  assert.equal(parsePushLine(JSON.stringify({ type: 'meta', text: 'seen:2026' })), null, '别的 meta 不推')
+})
+
 // ---------------------------------------------------------------- 增量读
 
 test('第一次跑只记末尾，不补推历史', () =>

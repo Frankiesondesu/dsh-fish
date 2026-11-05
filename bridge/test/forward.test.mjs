@@ -45,7 +45,7 @@ test('短的直接贴、长的落盘给路径（上下文不能被一段群聊�
   assert.match(src, /FORWARD_INLINE_MAX = 3000/, '门槛写死在常量里，方便以后调')
   assert.match(src, /body\.length <= FORWARD_INLINE_MAX/, '短的走内联')
   assert.match(src, /聊天记录-\$\{stamp\}\.txt/, '长的落成 txt')
-  assert.match(src, /想看得调 her_open/, '要说清怎么读——她只有这一个开文件的口')
+  assert.match(src, /her_open 能打开它/, '要说清怎么读——她只有这一个开文件的口')
 })
 
 test('只转发不写字也是合法消息（不能只放行 files）', () => {

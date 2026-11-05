@@ -543,12 +543,12 @@ async function forwardNote(forwards) {
     }
     if (body.length <= FORWARD_INLINE_MAX) {
       log(`聊天记录：${msgs.length} 条 / ${body.length} 字，直接递给她`)
-      blocks.push(`（他转发了一段聊天记录，${msgs.length} 条：\n${body}\n）`)
+      blocks.push(`（他转过来一段聊天记录，${msgs.length} 条：\n${body}\n）`)
     } else {
       const stamp = new Date().toISOString().replace(/[:.]/g, '-')
       const saved = saveInbox(`聊天记录-${stamp}.txt`, Buffer.from(body, 'utf8'))
       log(`聊天记录：${msgs.length} 条 / ${body.length} 字 → ${saved.path}`)
-      blocks.push(`（他转发了一段聊天记录，${msgs.length} 条，太长没全贴。存在 ${saved.path}。想看得调 her_open。）`)
+      blocks.push(`（他转过来一段聊天记录，${msgs.length} 条，太长没全贴。在 ${saved.path}。her_open 能打开它。）`)
     }
   }
   if (forwards.length > FORWARD_MAX_SEGS) {
@@ -857,14 +857,14 @@ async function flush(p) {
       let buf = bufs[0] ?? null
       if (bufs.length > 1) {
         const stamp = new Date().toISOString().replace(/[:.]/g, '-')
-        const lines = [`（他一次发来 ${bufs.length} 张图，都存到你屋里了：`]
+        const lines = [`（他一次递过来 ${bufs.length} 张图，都在你屋里：`]
         bufs.forEach((b, i) => {
           const ext = isGif(b) ? '.gif' : (b[0] === 0x89 && b[1] === 0x50 ? '.png' : '.jpg')
           const saved = saveInbox(`图-${stamp}-${i + 1}${ext}`, b)
           log(`收到图 ${i + 1}/${bufs.length}：${saved.name} ${(saved.bytes / 1024).toFixed(0)}KB → ${saved.path}`)
           lines.push(` ${i + 1}. ${saved.path}（${(saved.bytes / 1024).toFixed(0)}KB）`)
         })
-        lines.push('要看哪张就 read_image 读它；不看也行。）')
+        lines.push('看哪张、看不看，你自己定。read_image 能打开它们。）')
         imgNote = lines.join('\n') + '\n'
         buf = null // 多张时不直传，全走路径
       }
@@ -900,12 +900,12 @@ async function flush(p) {
         const nm = String(seg?.data?.name ?? seg?.data?.file ?? '文件')
         const buf = await loadFileSeg(seg, ev)
         if (!buf) {
-          lines.push(`（他发来一个文件「${nm}」，我这边没取到——QQ 没给下载地址，或者链接已经过期。）`)
+          lines.push(`（他递过来一个文件「${nm}」，没到你手上——QQ 没给下载地址，或者链接已经过期。）`)
           continue
         }
         const saved = saveInbox(nm, buf)
         log(`收到文件：${saved.name} ${(saved.bytes / 1024).toFixed(0)}KB → ${saved.path}`)
-        lines.push(`（他发来一个文件：${saved.name}，${(saved.bytes / 1024).toFixed(0)}KB。存在 ${saved.path}。想看就调 her_open。）`)
+        lines.push(`（他递过来一个文件，搁在你手边：${saved.name}，${(saved.bytes / 1024).toFixed(0)}KB。在 ${saved.path}。her_open 能打开它。）`)
       }
       if (files.length > 3) lines.push(`（另外还有 ${files.length - 3} 个文件，这次只转了前 3 个。）`)
       fileNote = lines.join('\n') + '\n\n'
@@ -983,6 +983,22 @@ function pushDeliver(item) {
           message: [{ type: 'record', data: { file: item.text } }],
         })
         log(`发了语音：${item.text}`)
+        continue
+      }
+      // 表情（2026-11-05）：item.text 是图片文件的绝对路径。
+      // 用 base64 而不是 file:// 或绝对路径——不同 OneBot 实现对本地路径的支持不一致，
+      // base64 在哪都能走。表情包一般几百 KB，转完远在 ws 消息上限内。
+      if (item.kind === 'meme') {
+        try {
+          const buf = readFileSync(item.text)
+          await sendAction('send_private_msg', {
+            user_id: uid,
+            message: [{ type: 'image', data: { file: `base64://${buf.toString('base64')}` } }],
+          })
+          log(`发了表情：${item.text.replace(/^.*[\\/]/, '')}（${(buf.length / 1024).toFixed(0)}KB）`)
+        } catch (err) {
+          log(`表情没发出去（${item.text}）：${String(err?.message ?? err)}`)
+        }
         continue
       }
       await reply({ message_type: 'private', user_id: uid }, item.text, { strict: true })
