@@ -46,7 +46,7 @@ test('一次最多记六张，其余说清没带', () => {
 })
 
 test('这些路径要真的进到这一轮的话里', () => {
-  assert.match(src, /fishSay\(imgNote \+ fwdNote \+ fileNote \+ text, image\)/,
+  assert.match(src, /fishSay\(imgNote \+ fwdNote \+ fileNote \+ voiceNote \+ text, image\)/,
     '顺序：图路径 → 转发 → 文件 → 他说的话')
 })
 

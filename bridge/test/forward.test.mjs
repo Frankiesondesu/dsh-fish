@@ -49,14 +49,14 @@ test('短的直接贴、长的落盘给路径（上下文不能被一段群聊�
 })
 
 test('只转发不写字也是合法消息（不能只放行 files）', () => {
-  assert.match(src, /!forwards\.length\) \{[\s\S]{0,80}这条既没文字也没图/,
+  assert.match(src, /!audios\.length\) \{[\s\S]{0,80}这条既没文字也没图/,
     '放行条件漏掉 forwards，整条转发会被静默丢掉——这次要钉死')
 })
 
 test('fetch 回来的东西要真的进到这一轮的话里', () => {
   assert.match(src, /const fwdNote = await forwardNote\(forwards\)/,
     '算出来不拼进去等于没做')
-  assert.match(src, /fishSay\(imgNote \+ fwdNote \+ fileNote \+ text, image\)/,
+  assert.match(src, /fishSay\(imgNote \+ fwdNote \+ fileNote \+ voiceNote \+ text, image\)/,
     '顺序：图说明 → 转发 → 文件 → 他说的话')
 })
 

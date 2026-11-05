@@ -26,8 +26,11 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createPusher } from './push.mjs'
 import { batchWait } from './batch-wait.mjs'
+import { readAsrConfig, ensureServer, transcribe } from './asr.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
+/** 本机听写配置（~/.dsh/asr.json）。没有就是 null——这台机器没装听写。 */
+const ASR_CFG = readAsrConfig()
 const CONFIG_PATH = join(HERE, 'config.json')
 const LOG_PATH = join(HERE, 'bridge.log')
 
@@ -216,6 +219,7 @@ function readMessage(ev) {
   const images = []
   const files = []
   const forwards = []
+  const audios = []
   for (const s of segs) {
     if (s?.type === 'text') text += String(s.data?.text ?? '')
     else if (s?.type === 'at') {
@@ -226,6 +230,9 @@ function readMessage(ev) {
     } else if (s?.type === 'file') {
       // 2026-11-05：他发文件时，落到她的收件箱，路径交给她自己决定要不要开
       files.push(s)
+    } else if (s?.type === 'record') {
+      // 2026-11-05：他的语音。她没有耳朵，收到之后要转成字（见 flush 里的 voiceNote）。
+      audios.push(s)
     } else if (s?.type === 'forward' || s?.type === 'node') {
       // 2026-11-05：合并转发的聊天记录。段里通常**只有一个 id**，内容要拿它去换
       // （跟 file 段同一个坑：消息里不放正文，只放一个句柄）。
@@ -239,7 +246,7 @@ function readMessage(ev) {
     if (sum) text = sum
   }
   if (!segs.length && typeof ev.raw_message === 'string') text = ev.raw_message
-  return { text: text.trim(), atMe, images, files, forwards }
+  return { text: text.trim(), atMe, images, files, forwards, audios }
 }
 
 /** 她的通路收图上限是 6MB（media.js 的 MAX_IMAGE_BYTES），超了直接不发 */
@@ -407,6 +414,37 @@ async function bufferFromPayload(data) {
       /* 换下一个字段 */
     }
   }
+  return null
+}
+
+/**
+ * 他的语音（2026-11-05）：QQ 的 record 段给的是 silk/amr，本机听写要 mp3。
+ * 先试段里的 url / file，再让 LLBot 转一道（get_record 内部会 decode silk）。
+ */
+async function loadAudio(seg) {
+  const d = seg?.data ?? {}
+  const tried = []
+  for (const key of ['url', 'file']) {
+    try {
+      const buf = await bufferFromValue(d[key])
+      if (buf?.length) return buf
+    } catch (err) {
+      tried.push(`${key}: ${String(err?.message ?? err)}`)
+    }
+  }
+  const ids = [...new Set([d.file, d.file_id].filter((v) => typeof v === 'string' && v))]
+  for (const id of ids) {
+    try {
+      const r = await sendAction('get_record', { file: id, out_format: 'mp3' })
+      const buf = await bufferFromPayload(r?.data)
+      if (buf?.length) return buf
+      tried.push(`get_record: 应答里没有音频（${Object.keys(r?.data ?? {}).join('/') || '空'}）`)
+    } catch (err) {
+      tried.push(`get_record: ${String(err?.message ?? err)}`)
+    }
+  }
+  log(`取语音失败：${tried.join('；') || '段里没有可下载字段'}`)
+  log(`  段内容：${JSON.stringify(d).slice(0, 400)}`)
   return null
 }
 
@@ -791,7 +829,7 @@ function schedule(ev, part) {
   let p = pendingChats.get(key)
   const now = Date.now()
   if (!p) {
-    p = { ev, texts: [], images: [], files: [], forwards: [], timer: null, imageAt: 0 }
+    p = { ev, texts: [], images: [], files: [], forwards: [], audios: [], timer: null, imageAt: 0 }
     pendingChats.set(key, p)
   }
   if (part.text) p.texts.push(part.text)
@@ -802,6 +840,7 @@ function schedule(ev, part) {
   }
   if (part.files?.length) p.files.push(...part.files)
   if (part.forwards?.length) p.forwards.push(...part.forwards)
+  if (part.audios?.length) p.audios.push(...part.audios)
   p.ev = ev
   if (p.timer) clearTimeout(p.timer)
 
@@ -835,9 +874,10 @@ async function flush(p) {
   const images = p.images
   const files = p.files ?? []
   const forwards = p.forwards ?? []
+  const audios = p.audios ?? []
   const who = ev.message_type === 'group' ? `群 ${ev.group_id} / ${ev.user_id}` : `私聊 ${ev.user_id}`
-  const only = files.length ? '（只发了文件）' : forwards.length ? '（只转了聊天记录）' : '（只发了图）'
-  log(`${who}: ${text.slice(0, 80) || only}${images.length ? ` [图 ${images.length}]` : ''}${files.length ? ` [文件 ${files.length}]` : ''}${forwards.length ? ` [转发 ${forwards.length}]` : ''}${p.texts.length > 1 || images.length > 1 ? `（合批 ${p.texts.length} 句 / ${images.length} 图）` : ''}`)
+  const only = files.length ? '（只发了文件）' : forwards.length ? '（只转了聊天记录）' : audios.length ? '（只发了语音）' : '（只发了图）'
+  log(`${who}: ${text.slice(0, 80) || only}${images.length ? ` [图 ${images.length}]` : ''}${files.length ? ` [文件 ${files.length}]` : ''}${forwards.length ? ` [转发 ${forwards.length}]` : ''}${audios.length ? ` [语音 ${audios.length}]` : ''}${p.texts.length > 1 || images.length > 1 ? `（合批 ${p.texts.length} 句 / ${images.length} 图）` : ''}`)
 
   return enqueue(async () => {
     const t0 = Date.now()
@@ -888,6 +928,28 @@ async function flush(p) {
       }
       if (images.length > 1) log(`他一次发了 ${images.length} 张图：${bufs.length} 张落盘，${image ? '另带一张直传' : '不直传'}`)
     }
+    // 他的语音（2026-11-05）：她没有耳朵，这里替她把话听成字。
+    // **转不出来就说转不出来**——不许猜，也不许把"嗯"编成一句话。
+    let voiceNote = ''
+    if (audios.length) {
+      const lines = []
+      for (const seg of audios.slice(0, 2)) {
+        const buf = await loadAudio(seg)
+        if (!buf) { lines.push('（他发来一条语音，没取到音频。）'); continue }
+        const ready = await ensureServer(ASR_CFG, { log })
+        if (!ready.ok) { lines.push(`（他发来一条语音，我这边听不了：${ready.why}）`); continue }
+        const tr = await transcribe(buf, ASR_CFG, { log })
+        if (tr.ok) {
+          log(`语音 ${(buf.length / 1024).toFixed(0)}KB → ${tr.text.length} 字`)
+          lines.push(`（他发来一条语音，说的是：「${tr.text}」）`)
+        } else {
+          log(`语音没听清：${tr.why}`)
+          lines.push(`（他发来一条语音，我这边没听清：${tr.why}）`)
+        }
+      }
+      if (audios.length > 2) lines.push(`（另外还有 ${audios.length - 2} 条语音，这次没转。）`)
+      voiceNote = lines.join('\n') + '\n\n'
+    }
     // 合并转发的聊天记录（2026-11-05）：段里只有一个 id，得拿它去换正文。
     // 短的直接贴给她，长的落盘给路径——她自己会调 her_open。
     const fwdNote = await forwardNote(forwards)
@@ -910,7 +972,7 @@ async function flush(p) {
       if (files.length > 3) lines.push(`（另外还有 ${files.length - 3} 个文件，这次只转了前 3 个。）`)
       fileNote = lines.join('\n') + '\n\n'
     }
-    const r = await fishSay(imgNote + fwdNote + fileNote + text, image)
+    const r = await fishSay(imgNote + fwdNote + fileNote + voiceNote + text, image)
     const ms = Date.now() - t0
     if (!r?.ok) {
       log(`没送到（${ms}ms）：${r?.note ?? '未知'}`)
@@ -946,17 +1008,17 @@ function onMessage(ev) {
     log(`陌生人 ${ev.user_id} 说话，没转（不在 ownerIds 里）`)
     return
   }
-  const { text, atMe, images, files, forwards = [] } = brief
+  const { text, atMe, images, files, forwards = [], audios = [] } = brief
   if (ev.message_type === 'group' && !(cfg.allowGroup && atMe)) {
     log('群消息，但没 @ 她 / 没开 allowGroup，跳过')
     return
   }
   // 只发图不写字也是合法的（他自己也常这么干）；只发文件、只转聊天记录同样合法
-  if (!text && !images.length && !files.length && !forwards.length) {
+  if (!text && !images.length && !files.length && !forwards.length && !audios.length) {
     log('这条既没文字也没图（表情/戳一戳之类），跳过')
     return
   }
-  schedule(ev, { text, images, files, forwards })
+  schedule(ev, { text, images, files, forwards, audios })
 }
 
 // ---------------------------------------------------------------- 她的主动话 → QQ
