@@ -56,8 +56,8 @@ test('只转发不写字也是合法消息（不能只放行 files）', () => {
 test('fetch 回来的东西要真的进到这一轮的话里', () => {
   assert.match(src, /const fwdNote = await forwardNote\(forwards\)/,
     '算出来不拼进去等于没做')
-  assert.match(src, /fishSay\(fwdNote \+ fileNote \+ text, image\)/,
-    '顺序：转发 → 文件 → 他说的话')
+  assert.match(src, /fishSay\(imgNote \+ fwdNote \+ fileNote \+ text, image\)/,
+    '顺序：图说明 → 转发 → 文件 → 他说的话')
 })
 
 test('合批窗口要带上 forwards，且一次不处理太多段', () => {
