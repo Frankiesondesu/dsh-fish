@@ -129,8 +129,64 @@ export function idleHoursOf(events = [], now = Date.now()) {
 }
 
 /**
+ * 主动的「想不想」：只往下压，不往上抬（fork.50，2026-11-05）
+ *
+ * 为什么只压：现在的公式是 chance 随 idle 单调上升——越久没人说话越容易开口。
+ * 那是「她会想你」，成立。但它只有一个方向，于是「不想说」这件事永远不发生：
+ * 她刚拒绝过一件事、上次主动的话还悬着、今天已经聊了一整天，概率一模一样。
+ *
+ * 这里补的是**抑制**。所有信号都来自账本里已经发生的事实，不引入任何情绪数值
+ * ——那会变成「算出来的心情」，和「不读自身数值」撞。
+ *
+ * 每个系数都 <= 1：系统只能让机会变少，不能逼她更频繁。
+ * 这也是一条立场：被冷落时她会退回一点，不是更黏。
+ *
+ * @returns {{factor:number, factors:Array<{key:string,factor:number,why:string}>, note:string}}
+ */
+export function initiativeBias({ events = [], now = Date.now(), config = {} } = {}) {
+  const H = 3_600_000
+  const factors = []
+  const add = (key, factor, why) => { if (factor < 1) factors.push({ key, factor, why }) }
+  const meta = (e, prefix) => e?.type === 'meta' && String(e.text ?? '').startsWith(prefix)
+  const latest = (pred) => {
+    let at = 0
+    for (const e of events) {
+      if (!pred(e)) continue
+      const t = tsMs(e)
+      if (Number.isFinite(t) && t > at) at = t
+    }
+    return at
+  }
+
+  // 1. 她刚说过「不」：36 小时内不去追问。拒绝是她的判断，不是撒娇。
+  const refusalAt = latest((e) => e?.type === 'refusal')
+  if (refusalAt && now - refusalAt < 36 * H) add('refusal', 0.6, '她刚拒绝过一件事')
+
+  // 2. 上次主动说的话还没人接：她会等，不会追着说第二遍。
+  const saidAt = latest((e) => meta(e, 'proactive-say:') || String(e?.text ?? '').startsWith('（她主动说）'))
+  const talkAt = latest((e) => meta(e, 'talk:'))
+  if (saidAt && saidAt <= now && (!talkAt || talkAt < saidAt)) {
+    add('unanswered', 0.75, '上次她主动说的话还没人接')
+  }
+
+  // 3. 48 小时内主动了两次以上、一直没人接：再退一步（不是更黏）。
+  const turns48 = events.filter((e) => meta(e, 'proactive-turn:') && (now - tsMs(e)) < 48 * H && tsMs(e) <= now).length
+  const talkRecently = talkAt && now - talkAt < 48 * H
+  if (turns48 >= 2 && !talkRecently) add('ignored', 0.5, `她主动了 ${turns48} 次都没人接`)
+
+  // 4. 今天已经聊够了：不必再找话。
+  const dk = dateKey(new Date(now))
+  const talksToday = events.filter((e) => meta(e, `talk:${dk}`)).length
+  if (talksToday >= 8) add('enough', 0.8, `今天已经说了 ${talksToday} 轮`)
+
+  const raw = factors.reduce((n, f) => n * f.factor, 1)
+  const factor = Math.max(0.25, Math.min(1, raw))
+  return { factor, factors, note: factors.map((f) => f.why).join('、') }
+}
+
+/**
  * 这一次该不该开门。纯函数：不读文件、不掷骰子。
- * @returns {{ok:boolean, why:string, chance:number, idleHours:number, dk:string}}
+ * @returns {{ok:boolean, why:string, chance:number, idleHours:number, dk:string, bias?:object}}
  */
 export function proactiveState({ config = {}, events = [], now = Date.now(), away = null, rested = false } = {}) {
   const cfg = proactiveConfig(config)
@@ -148,8 +204,11 @@ export function proactiveState({ config = {}, events = [], now = Date.now(), awa
   const last = lastTurnAt(events)
   if (last && (now - last) / 3_600_000 < cfg.cooldownHours) return { ...base, ok: false, why: '还在冷却里' }
   if (idleHours < cfg.minIdleHours) return { ...base, ok: false, why: '刚说过话，还不到时候' }
-  const chance = Math.min(cfg.maxChance, cfg.baseChance + Math.max(0, idleHours - cfg.minIdleHours) * cfg.gainPerHour)
-  return { ...base, ok: true, why: '', chance }
+  const raw = Math.min(cfg.maxChance, cfg.baseChance + Math.max(0, idleHours - cfg.minIdleHours) * cfg.gainPerHour)
+  // fork.50：再乘一次「想不想」。只压不抬——见 initiativeBias 上面那段注释。
+  const bias = initiativeBias({ events, now, config })
+  const chance = Math.max(0, Math.min(cfg.maxChance, raw * bias.factor))
+  return { ...base, ok: true, why: '', chance, bias }
 }
 
 /** 最近几天可以用作材料的条目（她自己的话、听见的话）。 */

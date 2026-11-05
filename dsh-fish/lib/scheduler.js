@@ -236,10 +236,13 @@ export function startScheduler(ctx, deps = {}) {
       const rollsPerHour = Math.max(1, Math.min(12, Number(config?.proactive?.rollsPerHour ?? 2)))
       if (now - lastProbe < ((60 * 60_000) / rollsPerHour) * 0.75) return false
       lastProbe = now
+      // fork.50：概率被「想不想」压过时，日志里要看得见压了多少、为什么。
+      const biasNote = st.bias?.factor < 1 ? `（×${st.bias.factor.toFixed(2)}：${st.bias.note}）` : ''
       if (Math.random() > st.chance) {
-        log('proactive roll', `${st.chance.toFixed(2)} 没摇上`)
+        log('proactive roll', `${st.chance.toFixed(2)}${biasNote} 没摇上`)
         return false
       }
+      if (biasNote) log('proactive roll', `${st.chance.toFixed(2)}${biasNote} 摇上了`)
     }
     const sc = ctx.sessionController
     if (!sc?.prompt) {
