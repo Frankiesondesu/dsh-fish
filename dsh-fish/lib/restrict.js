@@ -59,6 +59,7 @@ export const FISH_TOOLS = Object.freeze([
   'her_alarm', // 自己定一个时刻（fork.43，2026-11-04）
   'her_help', // 查工具说明（fork.44，2026-11-04）
   'her_voice', // 把一句话说成声音（fork.46，2026-11-04）
+  'her_meme', // 发一张表情（fork.53，2026-11-05）
   'her_dream', // 醒来记一句梦（本机实验 A 案，2026-10-30 m02837）
 ])
 
