@@ -25,6 +25,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createPusher } from './push.mjs'
+import { batchWait } from './batch-wait.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const CONFIG_PATH = join(HERE, 'config.json')
@@ -45,7 +46,7 @@ const DEFAULTS = {
   // 同一人连发几条时，等这么久再合并成一次递话（0 = 不合批，一条一轮）
   mergeMs: 1500,
   // 带图的消息压这么久，等一句补充说明接上来（真机上 5~10 秒很常见）
-  imageHoldMs: 8000,
+  imageHoldMs: 10000,
   fishRoot: 'C:/Users/<用户名>/.dsh-fish',
   fishPort: 0, // 0 = 自动发现
   // fork.23（2026-11-02）：她看视频现在要下整条片子，一条消息两条链接就是 80 秒起。
@@ -771,8 +772,9 @@ function enqueueStrict(task) {
  * 她没记错，是这两句真的被拆进了两轮。
  *
  * 两档等待，按内容区别对待：
- *   · **带图的**：压 `imageHoldMs`（默认 8 秒）。真机上"发图 → 补一句"通常隔 5~10 秒，
- *     压太短合不上，压太长每条都慢。带图的慢一点可以接受——她本来就要花时间看图。
+ *   · **带图的**：从**第一张图**开始算 `imageHoldMs`（默认 10 秒）。连发几张不重置。
+ *     但**文字一到就立刻发**——他的习惯是先发图再补一句，等他补完比等满窗口值。
+ *     没补文字才让窗口自然到期。
  *   · **纯文字**：只压 `mergeMs`（默认 1.5 秒），够粘住连发的几行，不至于让对话变迟钝。
  *   · 如果图上已经压着一批、文字随后到了：立刻合并发出，不再等第二档。
  *
@@ -787,13 +789,17 @@ function chatKey(ev) {
 function schedule(ev, part) {
   const key = chatKey(ev)
   let p = pendingChats.get(key)
-  const hadPending = Boolean(p)
+  const now = Date.now()
   if (!p) {
-    p = { ev, texts: [], images: [], files: [], forwards: [], timer: null }
+    p = { ev, texts: [], images: [], files: [], forwards: [], timer: null, imageAt: 0 }
     pendingChats.set(key, p)
   }
   if (part.text) p.texts.push(part.text)
-  if (part.images?.length) p.images.push(...part.images)
+  if (part.images?.length) {
+    p.images.push(...part.images)
+    // 计时起点是**第一张图**：连发几张时，不该每张都把 10 秒重新数一遍
+    if (!p.imageAt) p.imageAt = now
+  }
   if (part.files?.length) p.files.push(...part.files)
   if (part.forwards?.length) p.forwards.push(...part.forwards)
   p.ev = ev
@@ -801,8 +807,16 @@ function schedule(ev, part) {
 
   const mergeMs = Number(cfg.mergeMs) || 0
   const imageHoldMs = Number(cfg.imageHoldMs) || 0
-  // 图还没等到文字 → 继续等；文字接上了压着的图 → 立刻发；其余按自己的档等
-  const wait = part.images?.length ? imageHoldMs : hadPending && p.images.length ? 0 : mergeMs
+  // 规则在 batch-wait.mjs 里（纯函数，有单测）：
+  // 有图从第一张图算 10 秒、连发不重置、文字一到立刻发、纯文字压 mergeMs。
+  const wait = batchWait({
+    hasImage: p.imageAt > 0,
+    hasText: Boolean(part.text),
+    imageAt: p.imageAt,
+    now,
+    mergeMs,
+    imageHoldMs,
+  })
 
   if (wait <= 0) {
     pendingChats.delete(key)
