@@ -20,10 +20,27 @@ const DAY_MS = 86_400_000
 export const STALE_DAYS = 21
 /** 矛盾最多列几条。 */
 export const HEALTH_TOP = 3
-/** 冷掉 / 快固化各最多列几条。 */
+/** 冷掉 / 快固化 / 可疑自述各最多列几条。 */
 export const HEALTH_LIST = 5
 /** 类型构成最多列几行。 */
 export const HEALTH_TYPES = 8
+
+/**
+ * 可疑自述（2026-11-05）。
+ *
+ * 来自 dafeiyu 踩坑合集第 16 条：自动生成的日记写成「他晚饭一直没吃，我念叨了好几回」——
+ * 把事实记反了，而且写的是**行为自述**。被 her_recall 捞出来时，它直接变成她
+ * 「继续这么做」的动力：她不是记得"他没吃饭"，是记得"我是个催他吃饭的人"。
+ *
+ * 这里只**列出来给人复查**：不改、不删、不打分。账本只增不改，动她的自述要人来决定。
+ *
+ * 判据故意窄——第一人称 + 反复/持续：
+ *   ✓ 我催了他一整天 / 我念叨了好几回 / 我提醒了三次
+ *   ✗ 我做了一张图 / 我看了会儿视频（一次动作不算行为自述）
+ */
+export const SELF_CLAIM_RE =
+  /我(?:催|念|问|提醒|说|喊|等|找|哄|劝)(?:了|着|过)?[^，。！？；\n]{0,10}(?:好几|一整天|一天|一直|反复|好久|半天|[二三四五六七八九十几两]次)/
+export const SELF_CLAIM_TYPES = Object.freeze(['narration', 'diary'])
 
 function tsOf(ev) {
   const t = Date.parse(String(ev?.ts ?? ''))
@@ -69,7 +86,7 @@ export function examine(events = [], { now = Date.now(), growthDays = 30, staleD
   if (!list.length) {
     return {
       ok: true, empty: true, events: 0, days: 0, beliefs: 0, solid: 0,
-      byType, tensions: [], stale: [], nearSolid: [], staleDays,
+      byType, tensions: [], stale: [], nearSolid: [], selfClaims: [], staleDays,
     }
   }
 
@@ -129,6 +146,17 @@ export function examine(events = [], { now = Date.now(), growthDays = 30, staleD
     })))
     .slice(0, HEALTH_LIST)
 
+  const selfClaims = dedupeByText(list
+    .filter((ev) => SELF_CLAIM_TYPES.includes(String(ev?.type ?? '')))
+    .filter((ev) => SELF_CLAIM_RE.test(String(ev?.text ?? '')))
+    .map((ev) => ({
+      text: String(ev.text ?? '').trim().slice(0, 160),
+      type: String(ev.type ?? ''),
+      at: ev.ts ?? null,
+    })))
+    .slice(-HEALTH_LIST)
+    .reverse()
+
   return {
     ok: true,
     // 连一条判断都还没形成时，别说「一切正常」——说还太早。
@@ -142,6 +170,7 @@ export function examine(events = [], { now = Date.now(), growthDays = 30, staleD
     tensions,
     stale,
     nearSolid,
+    selfClaims,
     staleDays,
     solidStaleDays: Number(model?.facts?.solidStaleDays ?? 0),
   }
