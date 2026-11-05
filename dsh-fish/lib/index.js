@@ -20,6 +20,7 @@ import { registerRecall } from './recall.js'
 import { registerHerDiary } from './herdiary.js'
 import { registerWatch } from './watch.js'
 import { registerZoom } from './zoom.js'
+import { registerHerOpen } from './herfile.js'
 import { registerLetter } from './letter.js'
 import { registerBringBack } from './keep.js'
 import { registerAsk } from './ask.js'
@@ -366,6 +367,8 @@ export function apply(ctx, baseConfig = {}) {
         () => registerWatch(ctx, { root, tenant: tenancy }),
         // fork.35（2026-11-03）：看过之后把某一格放大重看。不占额度，同一条一天最多 3 次。
         () => registerZoom(ctx, { root, tenant: tenancy }),
+        // fork.47（2026-11-05）：他 QQ 递过来的文件落到 home/inbox，她调 her_open 自己读。
+        () => registerHerOpen(ctx, { root }),
         // R4：留话（不审批）。和 growth_commit 一样是纯追加，但收件人明确。
         () => registerLetter(ctx, { root, tenant: tenancy }),
         // 0.6.17：纪念品。她只能「问」，真带回去要那个人在出门页点头。

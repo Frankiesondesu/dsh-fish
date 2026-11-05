@@ -53,6 +53,7 @@ export const FISH_TOOLS = Object.freeze([
   'bili_look', // 看 B 站的列表
   'bili_watch', // 看一条视频的画面
   'bili_zoom', // 把某一格放大重看（fork.35）
+  'her_open', // 打开他 QQ 递过来的文件（fork.47）
   'bili_speak', // 在评论区说话
   'ask_owner', // 有事想征得同意（请求事件，2026-10-30 m01274）
   'her_alarm', // 自己定一个时刻（fork.43，2026-11-04）
