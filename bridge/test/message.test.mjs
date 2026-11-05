@@ -17,21 +17,21 @@ import { readFile } from 'node:fs/promises'
 
 const src = await readFile(new URL('../bridge.mjs', import.meta.url), 'utf8')
 
-test('readMessage 的返回值里带 files', () => {
-  assert.match(src, /return \{ text: text\.trim\(\), atMe, images, files \}/,
-    'readMessage 必须把 files 一起返回，否则下游拿不到')
+test('readMessage 的返回值里带 files / forwards', () => {
+  assert.match(src, /return \{ text: text\.trim\(\), atMe, images, files, forwards \}/,
+    'readMessage 必须把 files / forwards 一起返回，否则下游拿不到')
 })
 
-test('handleMessage 必须把 files 一起解构出来', () => {
-  assert.match(src, /const \{ text, atMe, images, files \} = brief/,
-    '漏解构 files → 一收到文件就 ReferenceError（2026-11-05 真踩过）')
+test('handleMessage 必须把 files / forwards 一起解构出来', () => {
+  assert.match(src, /const \{ text, atMe, images, files, forwards = \[\] \} = brief/,
+    '漏解构 → 一收到这类消息就 ReferenceError（2026-11-05 真踩过）')
 })
 
-test('「只有文件」的消息不能被当成空消息丢掉', () => {
-  assert.match(src, /if \(!text && !images\.length && !files\.length\) \{/,
-    '放行条件必须把 files 算进去，否则只发文件会被跳过')
-  assert.match(src, /schedule\(ev, \{ text, images, files \}\)/,
-    '合批入参也要带上 files')
+test('「只有文件 / 只有转发」的消息不能被当成空消息丢掉', () => {
+  assert.match(src, /if \(!text && !images\.length && !files\.length && !forwards\.length\) \{/,
+    '放行条件必须把 files 和 forwards 算进去，否则只发文件/只转记录会被跳过')
+  assert.match(src, /schedule\(ev, \{ text, images, files, forwards \}\)/,
+    '合批入参也要带上 files / forwards')
 })
 
 test('文件段要被识别，并落到收件箱', () => {

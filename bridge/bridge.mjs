@@ -214,6 +214,7 @@ function readMessage(ev) {
   let atMe = false
   const images = []
   const files = []
+  const forwards = []
   for (const s of segs) {
     if (s?.type === 'text') text += String(s.data?.text ?? '')
     else if (s?.type === 'at') {
@@ -224,6 +225,10 @@ function readMessage(ev) {
     } else if (s?.type === 'file') {
       // 2026-11-05：他发文件时，落到她的收件箱，路径交给她自己决定要不要开
       files.push(s)
+    } else if (s?.type === 'forward' || s?.type === 'node') {
+      // 2026-11-05：合并转发的聊天记录。段里通常**只有一个 id**，内容要拿它去换
+      // （跟 file 段同一个坑：消息里不放正文，只放一个句柄）。
+      forwards.push(s)
     }
     // face（QQ 小黄脸）是字体符号，没有可下载的图像，跳过
   }
@@ -233,7 +238,7 @@ function readMessage(ev) {
     if (sum) text = sum
   }
   if (!segs.length && typeof ev.raw_message === 'string') text = ev.raw_message
-  return { text: text.trim(), atMe, images, files }
+  return { text: text.trim(), atMe, images, files, forwards }
 }
 
 /** 她的通路收图上限是 6MB（media.js 的 MAX_IMAGE_BYTES），超了直接不发 */
@@ -458,6 +463,95 @@ function saveInbox(name, buf) {
   return { path: out, name: out.replace(/^.*[\\/]/, ''), bytes: buf.length }
 }
 
+
+/**
+ * 合并转发的聊天记录（2026-11-05）。
+ *
+ * QQ 的「聊天记录」卡片在 OneBot 里是 `{type:'forward', data:{id}}`——
+ * **只有一个 id，正文不在消息里**，要拿它调 get_forward_msg 才拿得到。
+ * 跟 file 段的 file_id 是同一个坑：消息里放的永远是句柄，不是内容。
+ *
+ * 渲染成 `昵称：内容` 的纯文本；图片/语音/嵌套转发写成 [图片] 这类记号——
+ * 她需要知道"那儿还有别的东西"，而不是以为那句话只有半截。
+ *
+ * 超过 FORWARD_INLINE_MAX 就落盘给她路径：一百条的群聊记录塞进一轮对话
+ * 会把这一轮的上下文吃光，而她自己有 her_open，读不读由她定。
+ */
+const FORWARD_INLINE_MAX = 3000
+/** 一次最多处理几段转发（他偶尔会连着转好几个）。 */
+const FORWARD_MAX_SEGS = 2
+
+function contentText(content) {
+  if (typeof content === 'string') return content
+  if (!Array.isArray(content)) return ''
+  const out = []
+  for (const s of content) {
+    const t = s?.type
+    if (t === 'text') out.push(String(s.data?.text ?? ''))
+    else if (t === 'image' || t === 'mface') out.push('[图片]')
+    else if (t === 'record') out.push('[语音]')
+    else if (t === 'video') out.push('[视频]')
+    else if (t === 'file') out.push(`[文件${s.data?.name ? ` ${s.data.name}` : ''}]`)
+    else if (t === 'forward' || t === 'node') out.push('[又一层转发]')
+    else if (t === 'at') out.push(`@${s.data?.qq ?? ''}`)
+    // face（小黄脸）是字体符号，写成 [表情] 反而更吵
+  }
+  return out.join('')
+}
+
+async function loadForward(seg) {
+  // 少数实现会把内容直接塞进段里（data.content / data.message），先看这个
+  const inline = seg?.data?.content ?? seg?.data?.message
+  if (Array.isArray(inline)) return inline
+  const id = String(seg?.data?.id ?? '').trim()
+  if (!id) return null
+  try {
+    const r = await sendAction('get_forward_msg', { id })
+    const msgs = r?.data?.messages ?? r?.data?.message
+    if (Array.isArray(msgs)) return msgs
+    const keys = Object.keys(r?.data ?? {})
+    log(`取聊天记录失败：应答里没有 messages（${keys.join('/') || '空'}）`)
+  } catch (err) {
+    log(`取聊天记录失败（${id}）：${String(err?.message ?? err)}`)
+  }
+  return null
+}
+
+async function forwardNote(forwards) {
+  if (!forwards?.length) return ''
+  const blocks = []
+  for (const seg of forwards.slice(0, FORWARD_MAX_SEGS)) {
+    const msgs = await loadForward(seg)
+    if (!msgs) {
+      blocks.push('（他转发了一段聊天记录，我这边没取到——QQ 没给内容。）')
+      continue
+    }
+    const lines = []
+    for (const m of msgs) {
+      const who = String(m?.sender?.card || m?.sender?.nickname || m?.sender?.user_id || '某人')
+      const t = contentText(m?.content ?? m?.message).replace(/\s+/g, ' ').trim()
+      if (t) lines.push(`${who}：${t}`)
+    }
+    const body = lines.join('\n')
+    if (!body) {
+      blocks.push(`（他转发了一段聊天记录，${msgs.length} 条，都是表情/图片这类。）`)
+      continue
+    }
+    if (body.length <= FORWARD_INLINE_MAX) {
+      log(`聊天记录：${msgs.length} 条 / ${body.length} 字，直接递给她`)
+      blocks.push(`（他转发了一段聊天记录，${msgs.length} 条：\n${body}\n）`)
+    } else {
+      const stamp = new Date().toISOString().replace(/[:.]/g, '-')
+      const saved = saveInbox(`聊天记录-${stamp}.txt`, Buffer.from(body, 'utf8'))
+      log(`聊天记录：${msgs.length} 条 / ${body.length} 字 → ${saved.path}`)
+      blocks.push(`（他转发了一段聊天记录，${msgs.length} 条，太长没全贴。存在 ${saved.path}。想看得调 her_open。）`)
+    }
+  }
+  if (forwards.length > FORWARD_MAX_SEGS) {
+    blocks.push(`（另外还有 ${forwards.length - FORWARD_MAX_SEGS} 段转发，这次只转了前 ${FORWARD_MAX_SEGS} 段。）`)
+  }
+  return blocks.join('\n') + '\n\n'
+}
 
 async function loadImage(seg) {
   const d = seg?.data ?? {}
@@ -692,12 +786,13 @@ function schedule(ev, part) {
   let p = pendingChats.get(key)
   const hadPending = Boolean(p)
   if (!p) {
-    p = { ev, texts: [], images: [], files: [], timer: null }
+    p = { ev, texts: [], images: [], files: [], forwards: [], timer: null }
     pendingChats.set(key, p)
   }
   if (part.text) p.texts.push(part.text)
   if (part.images?.length) p.images.push(...part.images)
   if (part.files?.length) p.files.push(...part.files)
+  if (part.forwards?.length) p.forwards.push(...part.forwards)
   p.ev = ev
   if (p.timer) clearTimeout(p.timer)
 
@@ -722,8 +817,10 @@ async function flush(p) {
   const text = p.texts.join('\n').trim()
   const images = p.images
   const files = p.files ?? []
+  const forwards = p.forwards ?? []
   const who = ev.message_type === 'group' ? `群 ${ev.group_id} / ${ev.user_id}` : `私聊 ${ev.user_id}`
-  log(`${who}: ${text.slice(0, 80) || (files.length ? '（只发了文件）' : '（只发了图）')}${images.length ? ` [图 ${images.length}]` : ''}${files.length ? ` [文件 ${files.length}]` : ''}${p.texts.length > 1 || images.length > 1 ? `（合批 ${p.texts.length} 句 / ${images.length} 图）` : ''}`)
+  const only = files.length ? '（只发了文件）' : forwards.length ? '（只转了聊天记录）' : '（只发了图）'
+  log(`${who}: ${text.slice(0, 80) || only}${images.length ? ` [图 ${images.length}]` : ''}${files.length ? ` [文件 ${files.length}]` : ''}${forwards.length ? ` [转发 ${forwards.length}]` : ''}${p.texts.length > 1 || images.length > 1 ? `（合批 ${p.texts.length} 句 / ${images.length} 图）` : ''}`)
 
   return enqueue(async () => {
     const t0 = Date.now()
@@ -748,6 +845,9 @@ async function flush(p) {
       if (buf) image = buf.toString('base64')
       if (images.length > 1) log(`他一次发了 ${images.length} 张图，这一轮只看第一张`)
     }
+    // 合并转发的聊天记录（2026-11-05）：段里只有一个 id，得拿它去换正文。
+    // 短的直接贴给她，长的落盘给路径——她自己会调 her_open。
+    const fwdNote = await forwardNote(forwards)
     // 文件（2026-11-05）：落到她的收件箱，只把路径和大小告诉她——
     // 能不能读、要不要读，由她调 her_open 自己试，我们不替她判断。
     let fileNote = ''
@@ -767,7 +867,7 @@ async function flush(p) {
       if (files.length > 3) lines.push(`（另外还有 ${files.length - 3} 个文件，这次只转了前 3 个。）`)
       fileNote = lines.join('\n') + '\n\n'
     }
-    const r = await fishSay(fileNote + text, image)
+    const r = await fishSay(fwdNote + fileNote + text, image)
     const ms = Date.now() - t0
     if (!r?.ok) {
       log(`没送到（${ms}ms）：${r?.note ?? '未知'}`)
@@ -796,24 +896,24 @@ function onMessage(ev) {
   // 出问题时只能看到"桥没反应"，分不清是消息没到、还是到了被规则挡了。
   const who = ev.message_type === 'group' ? `群 ${ev.group_id} / ${ev.user_id}` : `私聊 ${ev.user_id}`
   const brief = readMessage(ev)
-  log(`收到消息 [${ev.message_type}] ${who} self=${ev.self_id} 文字${brief.text.length}字 图${brief.images.length}`)
+  log(`收到消息 [${ev.message_type}] ${who} self=${ev.self_id} 文字${brief.text.length}字 图${brief.images.length}${brief.forwards?.length ? ` 转发${brief.forwards.length}` : ''}`)
 
   if (String(ev.user_id) === String(ev.self_id)) return // 自己发的
   if (!allowed(ev.user_id)) {
     log(`陌生人 ${ev.user_id} 说话，没转（不在 ownerIds 里）`)
     return
   }
-  const { text, atMe, images, files } = brief
+  const { text, atMe, images, files, forwards = [] } = brief
   if (ev.message_type === 'group' && !(cfg.allowGroup && atMe)) {
     log('群消息，但没 @ 她 / 没开 allowGroup，跳过')
     return
   }
-  // 只发图不写字也是合法的（他自己也常这么干）；只发文件同样合法
-  if (!text && !images.length && !files.length) {
+  // 只发图不写字也是合法的（他自己也常这么干）；只发文件、只转聊天记录同样合法
+  if (!text && !images.length && !files.length && !forwards.length) {
     log('这条既没文字也没图（表情/戳一戳之类），跳过')
     return
   }
-  schedule(ev, { text, images, files })
+  schedule(ev, { text, images, files, forwards })
 }
 
 // ---------------------------------------------------------------- 她的主动话 → QQ
