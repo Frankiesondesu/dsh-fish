@@ -40,6 +40,7 @@ import { askInChat, picked } from './askinchat.js'
 import { restedToday, settleStaleAsks } from './ask.js'
 import { takeDueAlarm, markAlarmFired } from './alarm.js'
 import { devModeSync } from './devmode.js'
+import { readPause } from './pause.js'
 import { proactiveState, proactiveSection, recentMaterial, looseEnds, hideTrigger, sweepTriggers, flushPendingHides, PROACTIVE_TRIGGER } from './proactive.js'
 import { logLine } from './log.js'
 import { recordGrant } from './grant.js'
@@ -167,6 +168,7 @@ export function startScheduler(ctx, deps = {}) {
   let lastProbe = 0
   let proactiveSkip = ''
   let proactiveEntered = false
+  let pauseSkip = ''
 
   /**
    * 开一次空手回合（她自己的回合，不是叫醒）。
@@ -185,6 +187,21 @@ export function startScheduler(ctx, deps = {}) {
     if (!proactiveEntered) {
       proactiveEntered = true
       log('proactive', '调度器已进入主动说话检查')
+    }
+    // fork.49：PAUSE 在时不开任何「叫醒」。闹钟（forced）默认照响——那是她自己
+    // 定下的约定，不是系统给的机会；要连闹钟一起静音，在 PAUSE 文件里写 mute-alarm。
+    const pause = await readPause(root)
+    if (pause.paused && (!forced || pause.muteAlarm)) {
+      const why = `PAUSE${pause.reason ? `：${pause.reason}` : ''}${pause.muteAlarm ? '（闹钟也静音）' : ''}`
+      if (pauseSkip !== why) {
+        pauseSkip = why
+        log('proactive skip', `她安静着（${why}）——不是被关掉，PAUSE 一删就恢复`)
+      }
+      return false
+    }
+    if (pauseSkip) {
+      pauseSkip = ''
+      log('proactive', 'PAUSE 已解除，恢复叫醒')
     }
     if (!sweptSession) {
       try {
