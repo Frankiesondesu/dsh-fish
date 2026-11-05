@@ -207,12 +207,13 @@ function sendAction(action, params = {}) {
   })
 }
 
-/** OneBot 消息段 → 纯文本 + 图；顺便告诉调用方有没有 @ 到自己 */
+/** OneBot 消息段 → 纯文本 + 图 + 文件；顺便告诉调用方有没有 @ 到自己 */
 function readMessage(ev) {
   const segs = Array.isArray(ev.message) ? ev.message : []
   let text = ''
   let atMe = false
   const images = []
+  const files = []
   for (const s of segs) {
     if (s?.type === 'text') text += String(s.data?.text ?? '')
     else if (s?.type === 'at') {
@@ -220,6 +221,9 @@ function readMessage(ev) {
     } else if (s?.type === 'image' || s?.type === 'mface') {
       // 表情包 / 图片 / 商城表情：都当成一张图递给她看
       images.push(s)
+    } else if (s?.type === 'file') {
+      // 2026-11-05：他发文件时，落到她的收件箱，路径交给她自己决定要不要开
+      files.push(s)
     }
     // face（QQ 小黄脸）是字体符号，没有可下载的图像，跳过
   }
@@ -229,7 +233,7 @@ function readMessage(ev) {
     if (sum) text = sum
   }
   if (!segs.length && typeof ev.raw_message === 'string') text = ev.raw_message
-  return { text: text.trim(), atMe, images }
+  return { text: text.trim(), atMe, images, files }
 }
 
 /** 她的通路收图上限是 6MB（media.js 的 MAX_IMAGE_BYTES），超了直接不发 */
@@ -320,6 +324,141 @@ function sheetFromGif(buf) {
  * 大多数情况那是服务器上的文件名，不是本机路径）。
  * 取不到就返回 null —— 退化成"她只知道你发了张图"，不因为一张图把整句话丢了。
  */
+
+// ---------------------------------------------------------------- 文件（2026-11-05）
+//
+// QQ **不会**把文件的下载直链放进消息里。私聊文件的 `file` 段通常只有
+// `{ file: '日历-课表.ics', file_id: '...' , file_size }`，真正的地址要拿
+// file_id 去调 OneBot 的 get_file / get_private_file_url 才换得出来。
+//
+// 第一版只认 `url` 和绝对路径的 `file`，所以两条都空 → 她那边显示
+// 「我没拿到——链接可能过期了」（11-05 06:45 真机）。这一版按下面的顺序试：
+//   ① 段里自带 url / base64 / 本机绝对路径（少数实现会给）
+//   ② get_file(file_id)          —— LLOneBot / NapCat 都支持，返回 base64:// 或路径
+//   ③ get_private_file_url / get_group_file_url —— 只给一条 http 链接
+// 全都不行时把段里到底有什么写进日志（值截断），下次一眼能看出该加哪个字段。
+
+const FILE_MAX_BYTES = 32 * 1024 * 1024
+
+/** 超过上限就不收（她那边也存不住），返回 null 并留一行日志 */
+function withinLimit(buf) {
+  if (!buf) return null
+  if (buf.length <= FILE_MAX_BYTES) return buf
+  log(`文件太大（${(buf.length / 1048576).toFixed(1)}MB > 32MB），不转`)
+  return null
+}
+
+/** `base64://…` 或 `data:…;base64,…` 解成 Buffer；不是这种形式返回 null */
+function inlineBuffer(v) {
+  const s = String(v ?? '')
+  let b64 = null
+  if (s.startsWith('base64://')) b64 = s.slice(9)
+  else if (s.startsWith('data:')) {
+    const i = s.indexOf(',')
+    if (i > 0 && /;base64/i.test(s.slice(0, i))) b64 = s.slice(i + 1)
+  }
+  if (!b64) return null
+  try {
+    const buf = Buffer.from(b64, 'base64')
+    return buf.length ? buf : null
+  } catch {
+    return null
+  }
+}
+
+async function readFromUrl(u) {
+  const r = await fetch(u, { signal: AbortSignal.timeout(30000) })
+  if (!r.ok) throw new Error(`HTTP ${r.status}`)
+  const buf = Buffer.from(await r.arrayBuffer())
+  return buf.length ? buf : null
+}
+
+async function readFromPath(f) {
+  const buf = readFileSync(f)
+  return buf.length ? buf : null
+}
+
+/** 一个「可能装着文件」的值：base64 / http / 本机路径，逐个当 */
+async function bufferFromValue(v) {
+  if (typeof v !== 'string' || !v) return null
+  const inline = inlineBuffer(v)
+  if (inline) return inline
+  if (/^https?:\/\//i.test(v)) return readFromUrl(v)
+  if (/^(?:[A-Za-z]:[\\/]|\/)/.test(v)) return readFromPath(v)
+  return null
+}
+
+/** OneBot 各种取文件接口的应答：`{ file }` / `{ url }` / `{ file_path }` 都可能 */
+async function bufferFromPayload(data) {
+  for (const key of ['file', 'url', 'file_path', 'path']) {
+    try {
+      const buf = await bufferFromValue(data?.[key])
+      if (buf) return buf
+    } catch {
+      /* 换下一个字段 */
+    }
+  }
+  return null
+}
+
+async function loadFileSeg(seg, ev) {
+  const d = seg?.data ?? {}
+  const name = String(d.name ?? d.file ?? '文件')
+  const tried = []
+
+  // ① 段里自带的
+  for (const key of ['url', 'file', 'path']) {
+    try {
+      const buf = withinLimit(await bufferFromValue(d[key]))
+      if (buf) return buf
+    } catch (err) {
+      tried.push(`${key}: ${String(err?.message ?? err)}`)
+    }
+  }
+
+  // ②③ 拿 file_id 去换。`file` 在有些实现里就是 file_id，一起当候选
+  const ids = [...new Set([d.file_id, d.file].filter((v) => typeof v === 'string' && v && !/^(?:[A-Za-z]:[\\/]|\/)/.test(v)))]
+  const calls = []
+  for (const id of ids) calls.push(['get_file', { file_id: id }])
+  if (ev?.message_type === 'group' && ev.group_id) {
+    for (const id of ids) calls.push(['get_group_file_url', { group_id: ev.group_id, file_id: id }])
+  } else if (ev?.user_id) {
+    for (const id of ids) calls.push(['get_private_file_url', { user_id: ev.user_id, file_id: id }])
+  }
+  for (const [action, params] of calls) {
+    try {
+      const r = await sendAction(action, params)
+      const buf = withinLimit(await bufferFromPayload(r?.data))
+      if (buf) return buf
+      const keys = Object.keys(r?.data ?? {})
+      tried.push(`${action}: 应答里没有可下载的东西（${keys.join('/') || '空'}）`)
+    } catch (err) {
+      tried.push(`${action}: ${String(err?.message ?? err)}`)
+    }
+  }
+
+  // 全都不行：把段里到底有什么写进日志，下次一眼能看出该补哪个字段
+  log(`取文件失败（${name}）：${tried.join('；') || '段里没有任何可下载字段'}`)
+  log(`  段内容：${JSON.stringify(d).slice(0, 500)}`)
+  return null
+}
+
+/** 落到她的收件箱（`<fishRoot>/home/inbox/`），返回路径与展示名 */
+function saveInbox(name, buf) {
+  const dir = join(cfg.fishRoot, 'home', 'inbox')
+  mkdirSync(dir, { recursive: true })
+  const raw = String(name ?? '').trim().replace(/^.*[\\/]/, '') || 'file'
+  const safe = raw.replace(/[\\/:*?"<>|\u0000-\u001f]/g, '_').slice(0, 120) || 'file'
+  const dot = safe.lastIndexOf('.')
+  const stem = dot > 0 ? safe.slice(0, dot) : safe
+  const ext = dot > 0 ? safe.slice(dot) : ''
+  let out = join(dir, safe)
+  if (existsSync(out)) out = join(dir, `${stem}-${Date.now()}${ext}`)
+  writeFileSync(out, buf)
+  return { path: out, name: out.replace(/^.*[\\/]/, ''), bytes: buf.length }
+}
+
+
 async function loadImage(seg) {
   const d = seg?.data ?? {}
   const tries = []
@@ -553,11 +692,12 @@ function schedule(ev, part) {
   let p = pendingChats.get(key)
   const hadPending = Boolean(p)
   if (!p) {
-    p = { ev, texts: [], images: [], timer: null }
+    p = { ev, texts: [], images: [], files: [], timer: null }
     pendingChats.set(key, p)
   }
   if (part.text) p.texts.push(part.text)
   if (part.images?.length) p.images.push(...part.images)
+  if (part.files?.length) p.files.push(...part.files)
   p.ev = ev
   if (p.timer) clearTimeout(p.timer)
 
@@ -581,8 +721,9 @@ async function flush(p) {
   const ev = p.ev
   const text = p.texts.join('\n').trim()
   const images = p.images
+  const files = p.files ?? []
   const who = ev.message_type === 'group' ? `群 ${ev.group_id} / ${ev.user_id}` : `私聊 ${ev.user_id}`
-  log(`${who}: ${text.slice(0, 80) || '（只发了图）'}${images.length ? ` [图 ${images.length}]` : ''}${p.texts.length > 1 || images.length > 1 ? `（合批 ${p.texts.length} 句 / ${images.length} 图）` : ''}`)
+  log(`${who}: ${text.slice(0, 80) || (files.length ? '（只发了文件）' : '（只发了图）')}${images.length ? ` [图 ${images.length}]` : ''}${files.length ? ` [文件 ${files.length}]` : ''}${p.texts.length > 1 || images.length > 1 ? `（合批 ${p.texts.length} 句 / ${images.length} 图）` : ''}`)
 
   return enqueue(async () => {
     const t0 = Date.now()
@@ -607,7 +748,26 @@ async function flush(p) {
       if (buf) image = buf.toString('base64')
       if (images.length > 1) log(`他一次发了 ${images.length} 张图，这一轮只看第一张`)
     }
-    const r = await fishSay(text, image)
+    // 文件（2026-11-05）：落到她的收件箱，只把路径和大小告诉她——
+    // 能不能读、要不要读，由她调 her_open 自己试，我们不替她判断。
+    let fileNote = ''
+    if (files.length) {
+      const lines = []
+      for (const seg of files.slice(0, 3)) {
+        const nm = String(seg?.data?.name ?? seg?.data?.file ?? '文件')
+        const buf = await loadFileSeg(seg, ev)
+        if (!buf) {
+          lines.push(`（他发来一个文件「${nm}」，我这边没取到——QQ 没给下载地址，或者链接已经过期。）`)
+          continue
+        }
+        const saved = saveInbox(nm, buf)
+        log(`收到文件：${saved.name} ${(saved.bytes / 1024).toFixed(0)}KB → ${saved.path}`)
+        lines.push(`（他发来一个文件：${saved.name}，${(saved.bytes / 1024).toFixed(0)}KB。存在 ${saved.path}。想看就调 her_open。）`)
+      }
+      if (files.length > 3) lines.push(`（另外还有 ${files.length - 3} 个文件，这次只转了前 3 个。）`)
+      fileNote = lines.join('\n') + '\n\n'
+    }
+    const r = await fishSay(fileNote + text, image)
     const ms = Date.now() - t0
     if (!r?.ok) {
       log(`没送到（${ms}ms）：${r?.note ?? '未知'}`)
@@ -643,17 +803,17 @@ function onMessage(ev) {
     log(`陌生人 ${ev.user_id} 说话，没转（不在 ownerIds 里）`)
     return
   }
-  const { text, atMe, images } = brief
+  const { text, atMe, images, files } = brief
   if (ev.message_type === 'group' && !(cfg.allowGroup && atMe)) {
     log('群消息，但没 @ 她 / 没开 allowGroup，跳过')
     return
   }
-  // 只发图不写字也是合法的（他自己也常这么干）
-  if (!text && !images.length) {
+  // 只发图不写字也是合法的（他自己也常这么干）；只发文件同样合法
+  if (!text && !images.length && !files.length) {
     log('这条既没文字也没图（表情/戳一戳之类），跳过')
     return
   }
-  schedule(ev, { text, images })
+  schedule(ev, { text, images, files })
 }
 
 // ---------------------------------------------------------------- 她的主动话 → QQ
