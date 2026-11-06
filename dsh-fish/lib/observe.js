@@ -533,7 +533,9 @@ export function registerObserve(ctx, deps = {}) {
         // persona 不在这里：它是导入动作的副产物（见 lib/import.js），
         // 不给「从设置页直接改」的入口——否则就等于给了一个「关掉那两条禁令」的开关。
         // proactive 是 2026-10-30 加的（本机实验，.dev 专属）：她主动开口的频率与概率。
-        const allowed = ['growthDays', 'wakesPerDay', 'window', 'daily', 'diary', 'absenceAfterDays', 'avoid', 'browse', 'bili', 'video', 'comment', 'notify', 'chat', 'rooms', 'memory', 'tools', 'observe', 'ui', 'proactive', 'drive', 'interest', 'dream']
+        // 2026-11-06：加 world（her_world 查天气的坐标）。
+        // 缺了它客户端整表提交会被 400 挡回来 —— p5 那条「防漂移」测试就是防这个的。
+        const allowed = ['growthDays', 'wakesPerDay', 'window', 'daily', 'diary', 'absenceAfterDays', 'avoid', 'browse', 'bili', 'video', 'comment', 'notify', 'chat', 'rooms', 'memory', 'tools', 'observe', 'ui', 'proactive', 'drive', 'interest', 'dream', 'world']
         const bad = Object.keys(patch).filter((k) => !allowed.includes(k))
         // 这句话会原样冒到界面上，所以写成人话（界面会把它放在「技术信息」那一行）：
         // 原来那句「不允许修改：bili」既不说人话，也让人以为自己填错了。

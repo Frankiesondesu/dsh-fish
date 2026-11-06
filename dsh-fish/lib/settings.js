@@ -41,6 +41,11 @@ export const DEFAULTS = {
   // 冷落：他多少天不出现才算"冷落"
   absenceAfterDays: 2,      // 1–30
 
+  // 外面（2026-11-06，her_world 查天气用的坐标）
+  // ⚠️ 这是**他那台机器在的城市**，不是「她的城市」——她住在文件里，没有地理位置。
+  // 空着只是查不了天气，她会如实说「不知道他在哪座城市」；date 不受影响（纯本地算）。
+  world: { city: '' },
+
   // 回忆的可及性门槛（fork.36，2026-11-04）
   // 账本只增不改，所以「遗忘」只能发生在取用这一层：线索不够就调不出来。
   //   线索够不够 = 命中词里最稀的那个有多稀（归一化 idf：0 = 到处都有，1 = 独一份）
@@ -358,6 +363,11 @@ export function normalizeConfig(raw = {}) {
 
   // 时间窗：两个合法 HH:MM 且 起 != 止；跨零点（22:00–02:00）也允许
   cfg.window = validWindow(cfg.window, DEFAULTS.window)
+
+  // 外面：城市只留一行干净的字。它只是查天气的一个坐标，不参与任何身份判断，
+  // 所以这里只做「去空白 + 限长」，不做白名单校验（她用中文城市名，也允许写拼音）。
+  cfg.world = { ...DEFAULTS.world, ...cfg.world }
+  cfg.world.city = String(cfg.world.city ?? '').trim().slice(0, 40)
 
   cfg.growthDays = Math.round(cfg.growthDays)
   cfg.diary = { ...DEFAULTS.diary, ...cfg.diary }

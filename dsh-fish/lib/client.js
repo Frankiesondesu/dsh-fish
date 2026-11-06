@@ -396,6 +396,9 @@ window.__ModuleLoader__.load({
       // 空醒开关（0.9.0 公开）：醒来时没派活、桌上也没东西，她可以自己找点事做。
       const [selfWakeOn, setSelfWakeOn] = useState(true)
       const [avoidText, setAvoidText] = useState('')
+      // 外面：her_world 查天气的坐标（2026-11-06）。
+      // 注意它不是「她的城市」——她住在文件里，没有地理位置；这里填的是他那台机器在哪。
+      const [worldCity, setWorldCity] = useState('')
       // 刷站（全是环境参数：她今天能不能出门、一次看见几条，不是她爱看什么）
       const [browseOn, setBrowseOn] = useState(true)
       const [browsePerDay, setBrowsePerDay] = useState(1)
@@ -688,6 +691,7 @@ window.__ModuleLoader__.load({
           setEventsPerDay(Number(cfg.daily?.events ?? 1))
           setQuestionsPerDay(Number(cfg.daily?.questions ?? 1))
           setAvoidText(((cfg.avoid?.keywords) || []).join('，'))
+          setWorldCity(String(cfg.world?.city ?? ''))
           setBrowseOn(cfg.browse?.enabled !== false)
           setBrowsePerDay(Number(cfg.browse?.perDay ?? 1))
           setBrowseTopN(Number(cfg.browse?.topN ?? 4))
@@ -833,6 +837,8 @@ window.__ModuleLoader__.load({
           minDuration: Number(avoidMinDur),
           upMids: avoidMids.split(/[,，\s]+/).map((x) => x.trim()).filter(Boolean),
         },
+        // 外面：一个坐标，不是身份。空着只是查不了天气，date 不受影响。
+        world: { city: worldCity.trim() },
         window: [wakeFrom, wakeTo],
         browse: { enabled: browseOn, perDay: Number(browsePerDay), topN: Number(browseTopN), deepRead: Number(browseDeepRead), danmaku: Number(browseDanmaku), voices: Boolean(browseVoices), window: [browseFrom, browseTo] },
         video: { enabled: videoOn, perDay: Number(videoPerDay), offPeakPerDay: Number(videoOffPeak) },
@@ -2530,6 +2536,17 @@ window.__ModuleLoader__.load({
             h('p', { className: 'hint' },
               '看画面走 dsh-video-storyboard 全管线：按镜头切开、每段挑最锐利的一帧、最多 4 张宫格，' +
               '并把每一格的台词一起给她。要下载整条视频，一次几十秒到几分钟。走不通就是没看成——不再退回九帧。'))),
+        // 外面（2026-11-06）：her_world 查天气要一个坐标。
+        // 这里放的是**你那台机器在哪儿**，不是「她的城市」——她住在文件里，没有地理位置。
+        // 用户 11-06 当场追问「什么叫她在的城市」，所以这段文案里把这件事说白。
+        // ⚠️ 这段是给**他**看的界面文案，所以人称用「你」；
+        //    工具返回给她的那句（world.js 的 note）才用「他」——两个读者，别混。
+        group('外面（天气）',
+          'her_world 查天气要一个城市。这是**你这台机器在的城市**，不是「她的城市」——她住在文件里，没有地理位置。填上她就能查到天气；不填她只会如实说「不知道你在哪座城市」，日期照常能查（那个不走网络）。',
+          h('div', { className: 'grid2' },
+            Text({ label: '城市', value: worldCity, onChange: setWorldCity,
+              placeholder: '中文城市名就行，比如：杭州', wide: true,
+              hint: '只用来当查天气的坐标，不参与任何身份判断。她查到的是你那边此刻的天气。' }))),
         // 请求节奏（issue #5）：机房/服务器 IP 与家宽的风控阈值差别很大。
         // 这里放的是**网络环境参数**，不是她看什么、怎么想。
         group('请求节奏（网络环境）',
