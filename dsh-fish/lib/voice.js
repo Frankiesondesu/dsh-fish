@@ -46,6 +46,25 @@ const PITCH = '-8Hz'
 const MAX_CHARS = 200
 
 /**
+ * 语调归一（fork.55，2026-11-06）。纯函数，导出给测试。
+ *
+ * 来自 AstrBot tts_emotion_router（88★）的理念，按 fish 的形状改：
+ * 那边是系统按情绪路由音色——那是替她挑嗓子。这里只把**这一副嗓子**
+ * 的语速和音高开给她自己调：急了快一点，懒了慢一点，不传就是平时的样子。
+ *
+ * 范围收得很窄：rate ±50%、pitch ±20Hz——够表达「劲儿不一样」，
+ * 调不出另一个人。越界的悄悄夹回边界（如实说话在返回文案里做不到逐条
+ * 复核，夹紧是最不撒谎的处理）。
+ */
+export function voiceTone(rate, pitch) {
+  const num = (v, d) => (Number.isFinite(Number(v)) ? Number(v) : d)
+  const r = Math.max(-50, Math.min(50, num(rate, -14)))
+  const q = Math.max(-20, Math.min(20, num(pitch, -8)))
+  const fmt = (v) => (v > 0 ? `+${v}` : `${v}`)
+  return { rate: `${fmt(r)}%`, pitch: `${fmt(q)}Hz` }
+}
+
+/**
  * 切句：把一段话切成 2–4 段，用来并发合成（fork.51，2026-11-05）。
  *
  * 为什么值得切：edge-tts 的耗时大头是连接开销 + 逐句合成，
@@ -85,10 +104,12 @@ export function splitForSpeech(text, { maxParts = 4, minChars = 8 } = {}) {
 }
 
 /** 合成一段。失败就抛，由调用方决定回退。 */
-async function tts(text, file) {
+async function tts(text, file, tone = {}) {
+  const r = tone.rate ?? RATE
+  const q = tone.pitch ?? PITCH
   await run(
     pythonExe(),
-    ['-m', 'edge_tts', '--voice', VOICE, `--rate=${RATE}`, `--pitch=${PITCH}`, '--text', text, '--write-media', file],
+    ['-m', 'edge_tts', '--voice', VOICE, `--rate=${r}`, `--pitch=${q}`, '--text', text, '--write-media', file],
     { timeout: 90_000, windowsHide: true },
   )
 }
@@ -144,6 +165,14 @@ export function registerVoice(ctx, deps = {}) {
           required: true,
           description: '你要说出口的那句话。不是汇报，就说你本来会打的字。',
         },
+        rate: {
+          type: 'number',
+          description: '语速微调，-50 到 50（百分比）。急了往快调，懒了往慢调；不传就是平时那个。',
+        },
+        pitch: {
+          type: 'number',
+          description: '音高微调，-20 到 20（Hz）。不传就是平时那个。',
+        },
       }),
       output: {
         schema: {
@@ -173,6 +202,9 @@ export function registerVoice(ctx, deps = {}) {
         const stamp = new Date().toISOString().replace(/[:.]/g, '-')
         const file = join(dir, `v-${stamp}.mp3`)
 
+        // fork.55：语速/音高她自己调（急了快一点，懒了慢一点）。
+        // 音色还是那一副——能调的是这一副嗓子当时的劲儿，不是换一个人。
+        const tone = voiceTone(args?.rate, args?.pitch)
         // fork.51：分句并发合成，再拼回一条。首声从「整段合成完」提前到
         // 「最长那一句合成完」。任何一步失败都退回整段——不做没验证过的花活。
         // 说话还是**一条**语音：分成好几条发，等于替她决定了几句话。
@@ -184,7 +216,7 @@ export function registerVoice(ctx, deps = {}) {
             const base = `v-${stamp}`
             const names = parts.map((_, i) => `${base}-${i}.mp3`)
             try {
-              await Promise.all(parts.map((p, i) => tts(p, join(dir, names[i]))))
+              await Promise.all(parts.map((p, i) => tts(p, join(dir, names[i]), tone)))
               await concatMp3(dir, names, `${base}.mp3`, ff.bin)
               made = existsSync(file) && statSync(file).size > 0
             } catch { /* 下面退回整段 */ }
@@ -197,7 +229,7 @@ export function registerVoice(ctx, deps = {}) {
         }
         if (!made) {
           try {
-            await tts(text, file)
+            await tts(text, file, tone)
           } catch (err) {
             try { if (existsSync(file)) unlinkSync(file) } catch { /* ignore */ }
             const why = String(err?.stderr ?? err?.message ?? err).slice(0, 120)

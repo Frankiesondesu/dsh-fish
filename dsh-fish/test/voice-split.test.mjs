@@ -67,6 +67,6 @@ test('源码守卫：失败要能退回整段（不要只有并发这一条路�
   const src = await fs.readFile(new URL('../lib/voice.js', import.meta.url), 'utf8')
   assert.match(src, /splitForSpeech\(text\)/, '要真的用了切句')
   assert.match(src, /detectFfmpeg\(\)/, '要确认 ffmpeg 在才走并发')
-  assert.match(src, /if \(!made\) \{[\s\S]*?await tts\(text, file\)/, '并发失败必须退回整段')
+  assert.match(src, /if \(!made\) \{[\s\S]*?await tts\(text, file(, tone)?\)/, '并发失败必须退回整段（fork.55 起带语调参数）')
   assert.match(src, /Promise\.all\(parts\.map/, '分片要并发，不是串行')
 })
