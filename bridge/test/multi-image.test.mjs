@@ -1,13 +1,12 @@
 /**
- * 连发多张图（2026-11-05，第二次改）。
+ * 附件统一「文件模式」（2026-11-06）。
  *
- * 第一版是拼成一张递过去，用户否了：**不要拼接**，分别存到本地让她自己处理。
+ * 历史：这个文件原来测「连发多张图分别落盘、单张直传、GIF 拼帧」。
+ * 用户 11-06 改了口径：**他发的所有文件不论格式类型，全部存本地 +
+ * 只告诉他 + 由她自己判断**。于是单张直传、抽帧、read_image 指路全部停用，
+ * 图也并进 files。文件名留着当历史线索，断言已整套换成新口径。
  *
- * 理由比第一版更硬：拼接会把两件不同的事压进一张图，分辨率还打折；
- * 而她的 read_image 本来就是一次读一张——「给你几个路径，你自己决定看哪张」
- * 才是这套系统本来的做法（跟文件、聊天记录一个路子）。
- *
- * 单张不动：照旧直传，她抬眼就看见。
+ * 真正的分类行为在 attachment.test.mjs 里直接测函数；这里守的是桥里的接线。
  */
 
 import { test } from 'node:test'
@@ -15,42 +14,49 @@ import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 
 const src = await readFile(new URL('../bridge.mjs', import.meta.url), 'utf8')
+const att = await readFile(new URL('../attachment.mjs', import.meta.url), 'utf8')
 
-test('多张不拼接：拼图那条路已经拆掉', () => {
-  assert.doesNotMatch(src, /vstack/, '不再用 ffmpeg 拼图')
-  assert.doesNotMatch(src, /function stackImages/, '拼图函数应当已删除')
+test('旧图片直传通路已停用', () => {
+  assert.doesNotMatch(src, /if \(buf\) image = buf\.toString\('base64'\)/, '不再直传单张图')
+  assert.doesNotMatch(src, /imgNote/, '不再有独立的图说明前缀')
+  assert.doesNotMatch(src, /read_image 能打开它们/, '不再替她指工具')
 })
 
-test('多张分别落盘，路径列给她', () => {
-  assert.match(src, /for \(const seg of images\.slice\(0, MULTI_IMAGE_MAX\)\)/, '要循环取多张')
-  assert.match(src, /saveInbox\(`图-\$\{stamp\}-\$\{i \+ 1\}\$\{ext\}`, b\)/, '每张单独落盘')
-  assert.match(src, /lines\.push\(` \$\{i \+ 1\}\. \$\{saved\.path\}（/, '一条一行路径，带序号')
+test('所有附件走同一个 files 循环，全部落盘', () => {
+  assert.match(src, /for \(const seg of files\) \{/, '不再 slice(0, 3)，全部处理')
+  assert.match(src, /ensureExt\(nm, head, seg\?\._kind\)/, '落盘前补后缀')
+  assert.match(src, /看不看、怎么处理，你自己定/, '判断权留给她')
 })
 
-test('要告诉她自己怎么读，以及可以不读', () => {
-  assert.match(src, /看哪张、看不看，你自己定/, '要留出"不看"的许可，否则她会以为必须看')
+test('不承诺「能打开」—— 对她说的话必须为真', () => {
+  const handLine = src.split('\n').find((l) => l.includes('搁在你手边：') && l.includes('lines.push'))
+  assert.ok(handLine, '要有「递过来一个文件」那句话')
+  assert.doesNotMatch(handLine, /her_open/, '视频是二进制，her_open 会如实说读不出来')
+  assert.match(att, /不承诺某个工具能打开/, '分类模块的口径注释也要在')
 })
 
-test('多张时不直传，避免她只盯着第一张', () => {
-  assert.match(src, /buf = null \/\/ 多张时不直传，全走路径/, '多张必须清掉直传那张')
+test('没后缀要按内容补，视频别落成无后缀文件', () => {
+  assert.match(att, /s\(4, 8\) === 'ftyp'/, 'mp4 / mov 魔数')
+  assert.match(att, /kind === 'video'\) return '\.mp4'/, '兜底按段类型给 .mp4')
+  assert.match(att, /b\[0\] === 0xff && b\[1\] === 0xd8 && b\[2\] === 0xff/, 'jpg 魔数')
 })
 
-test('单张照旧直传（没被这次改动波及）', () => {
-  assert.match(src, /bufs\.length === 1 && isGif\(buf\)/, 'GIF 处理仍然只在单张时走')
-  assert.match(src, /if \(buf\) image = buf\.toString\('base64'\)/, '单张仍然直传')
+test('大文件走本机路径直接复制，不进内存', () => {
+  assert.match(src, /function localSource/, '先 stat 判大小，不读内容')
+  assert.match(src, /if \(srcPath\) copyFileSync\(srcPath, out\)/, '复制而不是 Buffer 往返')
+  assert.match(src, /function sniffHead/, '只读 12 字节做魔数判断')
 })
 
-test('一次最多记六张，其余说清没带', () => {
-  assert.match(src, /const MULTI_IMAGE_MAX = 6/, '再多，那一轮的话就全是路径了')
-  assert.match(src, /另外还有 \$\{images\.length - bufs\.length\} 张/, '没带的要说出来')
+test('路径太多时如实说明没全列，但不是只存前几个', () => {
+  assert.match(src, /savedCount > FILE_NOTE_MAX/, '超出才补一句说明')
+  assert.match(src, /也存进收件箱了，路径没全列/, '说清是路径没列、不是文件没存')
 })
 
-test('这些路径要真的进到这一轮的话里', () => {
-  assert.match(src, /fishSay\(imgNote \+ fwdNote \+ fileNote \+ voiceNote \+ text, image\)/,
-    '顺序：图路径 → 转发 → 文件 → 他说的话')
+test('取不到就如实说没到你手上，不假装存了', () => {
+  assert.match(src, /没到你手上——QQ 没给下载地址/, '不许把「没拿到」说成「搁在你手边」')
 })
 
-test('扩展名按内容认，不一律写 .jpg', () => {
-  assert.match(src, /isGif\(b\) \? '\.gif'/, 'GIF 要保住 .gif（她能当动图理解）')
-  assert.match(src, /b\[0\] === 0x89 && b\[1\] === 0x50/, 'PNG 用魔数认，不看段里的名字')
+test('合批窗口从第一个附件起算（发完文件补一句不拆两轮）', () => {
+  assert.match(src, /if \(!p\.attachAt\) p\.attachAt = now/, '图归到 files 后窗口不能丢')
+  assert.match(src, /hasImage: p\.attachAt > 0/, '仍沿用 batch-wait 的 10 秒规则')
 })

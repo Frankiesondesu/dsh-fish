@@ -17,11 +17,13 @@ import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 
 const src = await readFile(new URL('../bridge.mjs', import.meta.url), 'utf8')
+const att = await readFile(new URL('../attachment.mjs', import.meta.url), 'utf8')
 
 test('forward / node 段要被识别', () => {
-  assert.match(src, /s\?\.type === 'forward' \|\| s\?\.type === 'node'/,
+  // 11-06 起分类在 attachment.mjs；转发仍走自己的通路，不当文件
+  assert.match(att, /t === 'forward' \|\| t === 'node'/,
     '两个名字都要认：OneBot 11 是 forward，老实现常见 node')
-  assert.match(src, /forwards\.push\(s\)/, '要收进 forwards 列表')
+  assert.match(att, /forwards\.push\(s\)/, '要收进 forwards 列表')
 })
 
 test('正文要拿 id 去调 get_forward_msg，不能指望消息里自带', () => {
@@ -58,8 +60,8 @@ test('只转发不写字也是合法消息（不能只放行 files）', () => {
 test('fetch 回来的东西要真的进到这一轮的话里', () => {
   assert.match(src, /const fwdNote = await forwardNote\(forwards\)/,
     '算出来不拼进去等于没做')
-  assert.match(src, /fishSay\(imgNote \+ fwdNote \+ fileNote \+ voiceNote \+ text, image\)/,
-    '顺序：图说明 → 转发 → 文件 → 他说的话')
+  assert.match(src, /fishSay\(fwdNote \+ fileNote \+ voiceNote \+ text\)/,
+    '11-06 顺序：转发 → 文件 → 语音 → 他说的话（图片已并入文件，不再单列）')
 })
 
 test('合批窗口要带上 forwards，且一次不处理太多段', () => {

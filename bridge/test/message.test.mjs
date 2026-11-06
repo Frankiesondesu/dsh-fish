@@ -16,10 +16,13 @@ import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 
 const src = await readFile(new URL('../bridge.mjs', import.meta.url), 'utf8')
+const att = await readFile(new URL('../attachment.mjs', import.meta.url), 'utf8')
 
 test('readMessage 的返回值里带 files / forwards', () => {
-  assert.match(src, /return \{ text: text\.trim\(\), atMe, images, files, forwards, audios \}/,
+  // 11-06：分类搬到 attachment.mjs，readMessage 只负责包一层 raw_message 兜底
+  assert.match(src, /return \{ text, atMe, images, files, forwards, audios \}/,
     'readMessage 必须把 files / forwards / audios 一起返回，否则下游拿不到')
+  assert.match(src, /classifySegments\(ev\.message, ev\.self_id\)/, '分类要交给独立模块')
 })
 
 test('handleMessage 必须把 files / forwards 一起解构出来', () => {
@@ -34,10 +37,17 @@ test('「只有文件 / 只有转发」的消息不能被当成空消息丢掉',
     '合批入参也要带上 files / forwards')
 })
 
-test('文件段要被识别，并落到收件箱', () => {
-  assert.match(src, /s\?\.type === 'file'/, 'readMessage 要收 file 段')
-  assert.match(src, /home', 'inbox'/, '文件要落到 home/inbox（她的收件箱）')
-  assert.match(src, /her_open/, '要告诉她用 her_open 打开')
+test('所有附件不论格式，统一进 files / 落到收件箱', () => {
+  // 11-06 真机事故：video 段没人接，整条被丢。改成按数据形态认附件。
+  assert.match(att, /KNOWN_ATTACHMENT = new Set\(\['image', 'mface', 'video', 'file', 'flash'\]\)/,
+    '图 / 视频 / 文件都在已知附件里')
+  assert.match(att, /isAttachment\(s\)\) files\.push/, '按数据形态判定，不靠段名白名单')
+  assert.match(src, /home', 'inbox'/, '统一落到 home/inbox（她的收件箱）')
+  assert.match(src, /看不看、怎么处理，你自己定/, '只给事实，判断权留给她')
+  // 转发落盘的 txt 那句仍写着 her_open 能打开（那是真的），这里只钉「递文件」这句
+  const handLine = src.split('\n').find((l) => l.includes('搁在你手边：') && l.includes('lines.push'))
+  assert.ok(handLine, '要有「递过来一个文件」那句话')
+  assert.doesNotMatch(handLine, /her_open/, '统一文件模式不再承诺能打开（fork.13）')
 })
 
 /**
@@ -67,7 +77,10 @@ test('取不到时要把段内容写进日志', () => {
   assert.match(src, /取文件失败（/, '失败要留一行明确的日志')
 })
 
-test('文件大小上限仍然生效', () => {
-  assert.match(src, /FILE_MAX_BYTES = 32 \* 1024 \* 1024/, '32MB 上限')
-  assert.match(src, /function withinLimit/, '超限要走统一的检查')
+test('文件大小上限对视频放宽，但仍然生效', () => {
+  // 11-06：32MB 会把绝大多数视频挡在门外，默认改 512MB、可在 config.json 调
+  assert.match(src, /fileMaxBytes: 512 \* 1024 \* 1024/, '默认 512MB')
+  assert.match(src, /const FILE_MAX_BYTES = Number\(cfg\.fileMaxBytes\)/, '可配置')
+  assert.match(src, /function withinSize/, '超限要走统一的检查')
+  assert.match(src, /if \(srcPath\) copyFileSync\(srcPath, out\)/, '本机路径直接复制，大视频不进内存')
 })

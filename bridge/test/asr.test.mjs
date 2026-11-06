@@ -86,7 +86,10 @@ test('transcribe：没有配置/空音频都直接说不行', async () => {
 test('桥真的接上了：认 record 段、失败要说"听不了"', async () => {
   const { readFile } = await import('node:fs/promises')
   const src = await readFile(new URL('../bridge.mjs', import.meta.url), 'utf8')
-  assert.match(src, /s\?\.type === 'record'/, 'readMessage 要收语音段')
+  const att = await readFile(new URL('../attachment.mjs', import.meta.url), 'utf8')
+  // 11-06 起分类搬到 attachment.mjs；record 仍单独走 ASR，没被并进「文件」
+  assert.match(att, /else if \(t === 'record'\) audios\.push\(s\)/, 'record 段要收进 audios')
+  assert.match(att, /'forward', 'node', 'record'/, 'record 在「不是附件」的排除名单里')
   assert.match(src, /sendAction\('get_record', \{ file: id, out_format: 'mp3' \}\)/, 'silk 要转 mp3')
   assert.match(src, /我这边听不了/, '听不了要直说，不许猜她听到了什么')
   assert.match(src, /说的是：「\$\{tr\.text\}」/, '听出来了要标明是语音说的')

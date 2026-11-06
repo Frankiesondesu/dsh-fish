@@ -15,17 +15,22 @@
  * 端口发现：DSH 桌面版每次重启端口都会变，所以不写死。先用 netstat 列出本机
  * 监听端口，再挨个打 /dsh-fish/local/ping（带密钥）认出真正的那个，缓存起来；
  * 调用失败就重新认一次。
+ *
+ * 2026-11-06：他发来的所有附件（图 / 视频 / 文档 / 未知格式）统一按「文件模式」
+ * 处理，见 attachment.mjs —— 存本地、只报事实、她自己判断，不再按段类型分流。
  */
 
 import { WebSocketServer } from 'ws'
 import { createServer } from 'node:http'
 import { execFileSync } from 'node:child_process'
-import { readFileSync, writeFileSync, unlinkSync, existsSync, appendFileSync, mkdirSync } from 'node:fs'
+import { readFileSync, writeFileSync, unlinkSync, existsSync, appendFileSync, mkdirSync,
+  copyFileSync, statSync, openSync, readSync, closeSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { dirname, join, isAbsolute } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createPusher } from './push.mjs'
 import { batchWait } from './batch-wait.mjs'
+import { classifySegments, displayName, ensureExt } from './attachment.mjs'
 import { readAsrConfig, ensureServer, transcribe } from './asr.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -50,6 +55,9 @@ const DEFAULTS = {
   mergeMs: 1500,
   // 带图的消息压这么久，等一句补充说明接上来（真机上 5~10 秒很常见）
   imageHoldMs: 10000,
+  // 11-06：视频动辄几百 MB，原来 32MB 会把绝大多数视频挡在门外。
+  // 单位字节，默认 512MB；超大文件若 OneBot 给的是本机路径，直接复制不进内存。
+  fileMaxBytes: 512 * 1024 * 1024,
   fishRoot: 'C:/Users/<用户名>/.dsh-fish',
   fishPort: 0, // 0 = 自动发现
   // fork.23（2026-11-02）：她看视频现在要下整条片子，一条消息两条链接就是 80 秒起。
@@ -211,44 +219,29 @@ function sendAction(action, params = {}) {
   })
 }
 
-/** OneBot 消息段 → 纯文本 + 图 + 文件；顺便告诉调用方有没有 @ 到自己 */
+/**
+ * OneBot 消息段 → 纯文本 + 统一附件（2026-11-06）。
+ *
+ * 分类搬到 attachment.mjs：按**数据形态**认附件，不按段类型白名单。
+ * 图 / 视频 / 文档 / 以后冒出来的新格式一律进 files，走同一条「文件模式」。
+ * 这里只补一个 raw_message 兜底（少数实现不给 message 数组）。
+ */
 function readMessage(ev) {
-  const segs = Array.isArray(ev.message) ? ev.message : []
-  let text = ''
-  let atMe = false
-  const images = []
-  const files = []
-  const forwards = []
-  const audios = []
-  for (const s of segs) {
-    if (s?.type === 'text') text += String(s.data?.text ?? '')
-    else if (s?.type === 'at') {
-      if (String(s.data?.qq) === String(ev.self_id)) atMe = true
-    } else if (s?.type === 'image' || s?.type === 'mface') {
-      // 表情包 / 图片 / 商城表情：都当成一张图递给她看
-      images.push(s)
-    } else if (s?.type === 'file') {
-      // 2026-11-05：他发文件时，落到她的收件箱，路径交给她自己决定要不要开
-      files.push(s)
-    } else if (s?.type === 'record') {
-      // 2026-11-05：他的语音。她没有耳朵，收到之后要转成字（见 flush 里的 voiceNote）。
-      audios.push(s)
-    } else if (s?.type === 'forward' || s?.type === 'node') {
-      // 2026-11-05：合并转发的聊天记录。段里通常**只有一个 id**，内容要拿它去换
-      // （跟 file 段同一个坑：消息里不放正文，只放一个句柄）。
-      forwards.push(s)
-    }
-    // face（QQ 小黄脸）是字体符号，没有可下载的图像，跳过
-  }
-  // mface 有时没有 url，只有一句 summary（「[动画表情]」），拿它当文字兜底
-  if (!text && images.length) {
-    const sum = images.map((s) => String(s?.data?.summary ?? '')).filter(Boolean).join(' ')
-    if (sum) text = sum
-  }
-  if (!segs.length && typeof ev.raw_message === 'string') text = ev.raw_message
-  return { text: text.trim(), atMe, images, files, forwards, audios }
+  const r = classifySegments(ev.message, ev.self_id)
+  const text = !Array.isArray(ev.message) && typeof ev.raw_message === 'string' && !r.text
+    ? ev.raw_message.trim()
+    : r.text
+  const { atMe, images, files, forwards, audios } = r
+  return { text, atMe, images, files, forwards, audios }
 }
 
+/**
+ * ⚠️ 下面这一组「旧图片直传通路」（MULTI_IMAGE_MAX / FFMPEG / isGif / gifFrames /
+ * sheetFromGif / loadImage）2026-11-06 起**已停用**：用户定了所有附件统一走文件模式，
+ * flush 里不再调用它们。留着是为了万一要回退「单张直传」能少翻一次 git，不是漏删。
+ * 真要删的时候记得一并清掉 tmpdir / execFileSync 这些 import。
+ * IMAGE_MAX_BYTES 是例外：出站（她回话夹图）还在用，保留。
+ */
 /** 她的通路收图上限是 6MB（media.js 的 MAX_IMAGE_BYTES），超了直接不发 */
 const IMAGE_MAX_BYTES = 6 * 1024 * 1024
 
@@ -354,14 +347,19 @@ function sheetFromGif(buf) {
 //   ③ get_private_file_url / get_group_file_url —— 只给一条 http 链接
 // 全都不行时把段里到底有什么写进日志（值截断），下次一眼能看出该加哪个字段。
 
-const FILE_MAX_BYTES = 32 * 1024 * 1024
+// 11-06：视频动辄几百 MB，原来的 32MB 会把绝大多数视频挡在门外。
+// 可从 config.json 的 fileMaxBytes 调；超大文件若 OneBot 给的是本机路径，
+// 走 copyFileSync 不进内存（见 attachFromValue）。
+const FILE_MAX_BYTES = Number(cfg.fileMaxBytes) || 512 * 1024 * 1024
+/** 一轮话里最多列几个路径；超出的照样全部落盘，只是不把路径全列出来 */
+const FILE_NOTE_MAX = 10
 
-/** 超过上限就不收（她那边也存不住），返回 null 并留一行日志 */
-function withinLimit(buf) {
-  if (!buf) return null
-  if (buf.length <= FILE_MAX_BYTES) return buf
-  log(`文件太大（${(buf.length / 1048576).toFixed(1)}MB > 32MB），不转`)
-  return null
+/** 超过上限就不收，留一行日志（按字节数判，本机路径也能先判再复制） */
+function withinSize(n) {
+  if (!Number.isFinite(n) || n <= 0) return false
+  if (n <= FILE_MAX_BYTES) return true
+  log(`文件太大（${(n / 1048576).toFixed(1)}MB > ${Math.round(FILE_MAX_BYTES / 1048576)}MB），不收`)
+  return false
 }
 
 /** `base64://…` 或 `data:…;base64,…` 解成 Buffer；不是这种形式返回 null */
@@ -417,6 +415,64 @@ async function bufferFromPayload(data) {
   return null
 }
 
+// ---------------------------------------------------------------- 统一附件（2026-11-06）
+//
+// 视频这类大文件不该在内存里绕一圈：OneBot 的 get_file 经常直接给**本机绝对路径**，
+// 这时 copy 过去就行，别 readFileSync 再 writeFileSync（几百 MB 白占一份内存）。
+// 所以取值结果分两种：{ buf }（url / base64，只能进内存）或 { srcPath }（直接复制）。
+
+/** 本机路径 → 可以直接复制的源文件；不是路径 / 不存在 / 超限 → null */
+function localSource(v) {
+  if (typeof v !== 'string' || !v || !isAbsolute(v)) return null
+  try {
+    const st = statSync(v)
+    if (!st.isFile() || !withinSize(st.size)) return null
+    return v
+  } catch {
+    return null
+  }
+}
+
+/** 一个「可能装着文件」的值 → { buf } / { srcPath } / null */
+async function attachFromValue(v) {
+  if (typeof v !== 'string' || !v) return null
+  const p = localSource(v)
+  if (p) return { srcPath: p }
+  const inline = inlineBuffer(v)
+  if (inline) return withinSize(inline.length) ? { buf: inline } : null
+  if (v.startsWith('http://') || v.startsWith('https://')) {
+    const buf = await readFromUrl(v)
+    return buf && withinSize(buf.length) ? { buf } : null
+  }
+  return null
+}
+
+/** OneBot 各种取文件接口的应答：`{ file }` / `{ url }` / `{ file_path }` 都可能 */
+async function attachFromPayload(data) {
+  for (const key of ['file', 'url', 'file_path', 'path']) {
+    try {
+      const got = await attachFromValue(data?.[key])
+      if (got) return got
+    } catch {
+      /* 换下一个字段 */
+    }
+  }
+  return null
+}
+
+/** 只读前 12 字节做魔数判断，大文件不进内存 */
+function sniffHead(p) {
+  try {
+    const fd = openSync(p, 'r')
+    const b = Buffer.alloc(12)
+    const n = readSync(fd, b, 0, 12, 0)
+    closeSync(fd)
+    return b.subarray(0, n)
+  } catch {
+    return null
+  }
+}
+
 /**
  * 他的语音（2026-11-05）：QQ 的 record 段给的是 silk/amr，本机听写要 mp3。
  * 先试段里的 url / file，再让 LLBot 转一道（get_record 内部会 decode silk）。
@@ -450,14 +506,14 @@ async function loadAudio(seg) {
 
 async function loadFileSeg(seg, ev) {
   const d = seg?.data ?? {}
-  const name = String(d.name ?? d.file ?? '文件')
+  const name = displayName(seg)
   const tried = []
 
   // ① 段里自带的
-  for (const key of ['url', 'file', 'path']) {
+  for (const key of ['url', 'file', 'path', 'file_path']) {
     try {
-      const buf = withinLimit(await bufferFromValue(d[key]))
-      if (buf) return buf
+      const got = await attachFromValue(d[key])
+      if (got) return got
     } catch (err) {
       tried.push(`${key}: ${String(err?.message ?? err)}`)
     }
@@ -475,8 +531,8 @@ async function loadFileSeg(seg, ev) {
   for (const [action, params] of calls) {
     try {
       const r = await sendAction(action, params)
-      const buf = withinLimit(await bufferFromPayload(r?.data))
-      if (buf) return buf
+      const got = await attachFromPayload(r?.data)
+      if (got) return got
       const keys = Object.keys(r?.data ?? {})
       tried.push(`${action}: 应答里没有可下载的东西（${keys.join('/') || '空'}）`)
     } catch (err) {
@@ -491,7 +547,7 @@ async function loadFileSeg(seg, ev) {
 }
 
 /** 落到她的收件箱（`<fishRoot>/home/inbox/`），返回路径与展示名 */
-function saveInbox(name, buf) {
+function saveInbox(name, buf, srcPath = '') {
   const dir = join(cfg.fishRoot, 'home', 'inbox')
   mkdirSync(dir, { recursive: true })
   const raw = String(name ?? '').trim().replace(/^.*[\\/]/, '') || 'file'
@@ -501,8 +557,9 @@ function saveInbox(name, buf) {
   const ext = dot > 0 ? safe.slice(dot) : ''
   let out = join(dir, safe)
   if (existsSync(out)) out = join(dir, `${stem}-${Date.now()}${ext}`)
-  writeFileSync(out, buf)
-  return { path: out, name: out.replace(/^.*[\\/]/, ''), bytes: buf.length }
+  if (srcPath) copyFileSync(srcPath, out)
+  else writeFileSync(out, buf)
+  return { path: out, name: out.replace(/^.*[\\/]/, ''), bytes: statSync(out).size }
 }
 
 
@@ -831,16 +888,17 @@ function schedule(ev, part) {
   let p = pendingChats.get(key)
   const now = Date.now()
   if (!p) {
-    p = { ev, texts: [], images: [], files: [], forwards: [], audios: [], timer: null, imageAt: 0 }
+    p = { ev, texts: [], images: [], files: [], forwards: [], audios: [], timer: null, attachAt: 0 }
     pendingChats.set(key, p)
   }
   if (part.text) p.texts.push(part.text)
-  if (part.images?.length) {
-    p.images.push(...part.images)
-    // 计时起点是**第一张图**：连发几张时，不该每张都把 10 秒重新数一遍
-    if (!p.imageAt) p.imageAt = now
+  if (part.images?.length) p.images.push(...part.images)
+  if (part.files?.length) {
+    p.files.push(...part.files)
+    // 11-06：图也归到 files 了，所以「第一个附件」起算等待窗口 ——
+    // 沿用原来带图的 10 秒，等他发完文件补一句说明，别拆成两轮。
+    if (!p.attachAt) p.attachAt = now
   }
-  if (part.files?.length) p.files.push(...part.files)
   if (part.forwards?.length) p.forwards.push(...part.forwards)
   if (part.audios?.length) p.audios.push(...part.audios)
   p.ev = ev
@@ -851,9 +909,9 @@ function schedule(ev, part) {
   // 规则在 batch-wait.mjs 里（纯函数，有单测）：
   // 有图从第一张图算 10 秒、连发不重置、文字一到立刻发、纯文字压 mergeMs。
   const wait = batchWait({
-    hasImage: p.imageAt > 0,
+    hasImage: p.attachAt > 0,
     hasText: Boolean(part.text),
-    imageAt: p.imageAt,
+    imageAt: p.attachAt,
     now,
     mergeMs,
     imageHoldMs,
@@ -873,63 +931,17 @@ function schedule(ev, part) {
 async function flush(p) {
   const ev = p.ev
   const text = p.texts.join('\n').trim()
-  const images = p.images
   const files = p.files ?? []
   const forwards = p.forwards ?? []
   const audios = p.audios ?? []
   const who = ev.message_type === 'group' ? `群 ${ev.group_id} / ${ev.user_id}` : `私聊 ${ev.user_id}`
-  const only = files.length ? '（只发了文件）' : forwards.length ? '（只转了聊天记录）' : audios.length ? '（只发了语音）' : '（只发了图）'
-  log(`${who}: ${text.slice(0, 80) || only}${images.length ? ` [图 ${images.length}]` : ''}${files.length ? ` [文件 ${files.length}]` : ''}${forwards.length ? ` [转发 ${forwards.length}]` : ''}${audios.length ? ` [语音 ${audios.length}]` : ''}${p.texts.length > 1 || images.length > 1 ? `（合批 ${p.texts.length} 句 / ${images.length} 图）` : ''}`)
+  const only = files.length ? '（只发了文件）' : forwards.length ? '（只转了聊天记录）' : audios.length ? '（只发了语音）' : '（空消息）'
+  log(`${who}: ${text.slice(0, 80) || only}${files.length ? ` [附件 ${files.length}]` : ''}${forwards.length ? ` [转发 ${forwards.length}]` : ''}${audios.length ? ` [语音 ${audios.length}]` : ''}${p.texts.length > 1 ? `（合批 ${p.texts.length} 句）` : ''}`)
 
   return enqueue(async () => {
     const t0 = Date.now()
-    // 她的通路一轮只收一张图（插件侧 /local/say 的 image 是单数）。
-    // 一张：照旧直传，她抬眼就看见。
-    // 多张（2026-11-05 用户定）：**不拼接**——每张单独落到她屋里，把路径列给她，
-    //   看哪张、看不看，由她自己调 read_image 决定。拼接会把两件不同的事压成一张，
-    //   也会让分辨率打折；而她的 read_image 本来一次只读一张。
-    let image = ''
-    let imgNote = ''
-    if (images.length) {
-      const bufs = []
-      for (const seg of images.slice(0, MULTI_IMAGE_MAX)) {
-        const b = await loadImage(seg)
-        if (b) bufs.push(b)
-      }
-      let buf = bufs[0] ?? null
-      if (bufs.length > 1) {
-        const stamp = new Date().toISOString().replace(/[:.]/g, '-')
-        const lines = [`（他一次递过来 ${bufs.length} 张图，都在你屋里：`]
-        bufs.forEach((b, i) => {
-          const ext = isGif(b) ? '.gif' : (b[0] === 0x89 && b[1] === 0x50 ? '.png' : '.jpg')
-          const saved = saveInbox(`图-${stamp}-${i + 1}${ext}`, b)
-          log(`收到图 ${i + 1}/${bufs.length}：${saved.name} ${(saved.bytes / 1024).toFixed(0)}KB → ${saved.path}`)
-          lines.push(` ${i + 1}. ${saved.path}（${(saved.bytes / 1024).toFixed(0)}KB）`)
-        })
-        lines.push('看哪张、看不看，你自己定。read_image 能打开它们。）')
-        imgNote = lines.join('\n') + '\n'
-        buf = null // 多张时不直传，全走路径
-      }
-      // 动图（表情包多半是）抽几帧拼一张 —— 她一次只能看一帧，看第一帧等于没看懂那个表情。
-      // 单帧 GIF 不拼：那样只会得到一张八格全黑的图。多图时不走这条路（已经落盘了）。
-      if (buf && bufs.length === 1 && isGif(buf)) {
-        const frames = gifFrames(buf)
-        if (frames > 1 || frames === 0) {
-          const sheet = sheetFromGif(buf)
-          if (sheet) {
-            log(`动图拼帧：${frames || '?'} 帧 · ${(buf.length / 1024).toFixed(0)}KB → ${(sheet.length / 1024).toFixed(0)}KB`)
-            buf = sheet
-          }
-        } else {
-          log('这张 GIF 只有一帧，按静态图发')
-        }
-      }
-      if (buf) image = buf.toString('base64')
-      if (images.length > bufs.length) {
-        imgNote += `（另外还有 ${images.length - bufs.length} 张，这次没带。）\n`
-      }
-      if (images.length > 1) log(`他一次发了 ${images.length} 张图：${bufs.length} 张落盘，${image ? '另带一张直传' : '不直传'}`)
-    }
+    // 2026-11-06 用户定：不再按格式分流。图片、视频、文档一律走下面的「文件模式」——
+    // 存本地、只报事实、她自己判断；不直传、不抽帧、不替她挑哪张。
     // 他的语音（2026-11-05）：她没有耳朵，这里替她把话听成字。
     // **转不出来就说转不出来**——不许猜，也不许把"嗯"编成一句话。
     let voiceNote = ''
@@ -955,26 +967,35 @@ async function flush(p) {
     // 合并转发的聊天记录（2026-11-05）：段里只有一个 id，得拿它去换正文。
     // 短的直接贴给她，长的落盘给路径——她自己会调 her_open。
     const fwdNote = await forwardNote(forwards)
-    // 文件（2026-11-05）：落到她的收件箱，只把路径和大小告诉她——
-    // 能不能读、要不要读，由她调 her_open 自己试，我们不替她判断。
+    // 文件（2026-11-06 用户定）：他发来的所有附件，不论格式类型，一律落盘到收件箱，
+    // 只把事实（名字 / 大小 / 路径）告诉她，看不看、怎么处理由她自己判断。
+    // **不承诺「能打开」**：her_open 对图片会指 read_image、对视频这类二进制会如实说
+    // 「我读不出来」；替她承诺就是对她说假话（fork.13）。
     let fileNote = ''
     if (files.length) {
       const lines = []
-      for (const seg of files.slice(0, 3)) {
-        const nm = String(seg?.data?.name ?? seg?.data?.file ?? '文件')
-        const buf = await loadFileSeg(seg, ev)
-        if (!buf) {
+      let savedCount = 0
+      for (const seg of files) {
+        const nm = displayName(seg)
+        const got = await loadFileSeg(seg, ev)
+        if (!got) {
           lines.push(`（他递过来一个文件「${nm}」，没到你手上——QQ 没给下载地址，或者链接已经过期。）`)
           continue
         }
-        const saved = saveInbox(nm, buf)
+        const head = got.buf ?? sniffHead(got.srcPath)
+        const saved = saveInbox(ensureExt(nm, head, seg?._kind), got.buf, got.srcPath)
+        savedCount++
         log(`收到文件：${saved.name} ${(saved.bytes / 1024).toFixed(0)}KB → ${saved.path}`)
-        lines.push(`（他递过来一个文件，搁在你手边：${saved.name}，${(saved.bytes / 1024).toFixed(0)}KB。在 ${saved.path}。her_open 能打开它。）`)
+        if (savedCount <= FILE_NOTE_MAX) {
+          lines.push(`（他递过来一个文件，搁在你手边：${saved.name}，${(saved.bytes / 1024).toFixed(0)}KB。在 ${saved.path}。看不看、怎么处理，你自己定。）`)
+        }
       }
-      if (files.length > 3) lines.push(`（另外还有 ${files.length - 3} 个文件，这次只转了前 3 个。）`)
+      if (savedCount > FILE_NOTE_MAX) {
+        lines.push(`（另外还有 ${savedCount - FILE_NOTE_MAX} 个文件也存进收件箱了，路径没全列，免得这一轮话全是路径。）`)
+      }
       fileNote = lines.join('\n') + '\n\n'
     }
-    const r = await fishSay(imgNote + fwdNote + fileNote + voiceNote + text, image)
+    const r = await fishSay(fwdNote + fileNote + voiceNote + text)
     const ms = Date.now() - t0
     if (!r?.ok) {
       log(`没送到（${ms}ms）：${r?.note ?? '未知'}`)
@@ -1003,7 +1024,7 @@ function onMessage(ev) {
   // 出问题时只能看到"桥没反应"，分不清是消息没到、还是到了被规则挡了。
   const who = ev.message_type === 'group' ? `群 ${ev.group_id} / ${ev.user_id}` : `私聊 ${ev.user_id}`
   const brief = readMessage(ev)
-  log(`收到消息 [${ev.message_type}] ${who} self=${ev.self_id} 文字${brief.text.length}字 图${brief.images.length}${brief.forwards?.length ? ` 转发${brief.forwards.length}` : ''}`)
+  log(`收到消息 [${ev.message_type}] ${who} self=${ev.self_id} 文字${brief.text.length}字 附件${brief.files.length}${brief.forwards?.length ? ` 转发${brief.forwards.length}` : ''}`)
 
   if (String(ev.user_id) === String(ev.self_id)) return // 自己发的
   if (!allowed(ev.user_id)) {
@@ -1112,7 +1133,11 @@ if (process.env.FISH_BRIDGE_DEBUG !== '0') {
     const type = String(u.searchParams.get('type') || 'text')
     const file = String(u.searchParams.get('file') || '')
     const text = String(u.searchParams.get('text') || '')
-    const seg = type === 'text' ? { type: 'text', data: { text } } : { type, data: { file } }
+    const url = String(u.searchParams.get('url') || '')
+    const name = String(u.searchParams.get('name') || '')
+    // 11-06：调试口也能造 video / 未知格式段（带 url / name），真机验证用
+    const data = type === 'text' ? { text } : { file, ...(url ? { url } : {}), ...(name ? { name } : {}) }
+    const seg = { type, data }
     try {
       const r = await sendAction('send_private_msg', { user_id: to, message: [seg] })
       res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' })

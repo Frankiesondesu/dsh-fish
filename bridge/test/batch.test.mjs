@@ -52,10 +52,11 @@ test('关掉合批（窗口都是 0）：立刻发', () => {
   assert.equal(batchWait({ hasImage: false, hasText: true, imageAt: 0, now: 1, mergeMs: 0, imageHoldMs: 0 }), 0)
 })
 
-test('桥真的用上了这个纯函数，而且起点是第一张图', async () => {
+test('桥真的用上了这个纯函数，而且起点是第一个附件', async () => {
   const src = await readFile(new URL('../bridge.mjs', import.meta.url), 'utf8')
   assert.match(src, /const wait = batchWait\(\{/, '不算白写')
-  assert.match(src, /if \(!p\.imageAt\) p\.imageAt = now/, '起点记第一张图，后面的不覆盖')
+  // 11-06：图也归到 files 了，窗口起点泛化成「第一个附件」，语义没变
+  assert.match(src, /if \(!p\.attachAt\) p\.attachAt = now/, '起点记第一个附件，后面的不覆盖')
   assert.match(src, /imageHoldMs: 10000/, '默认值就是 10 秒')
 })
 
