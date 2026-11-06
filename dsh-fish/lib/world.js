@@ -23,14 +23,21 @@
  *   地理编码 https://geocoding-api.open-meteo.com/v1/search
  *   天气预报 https://api.open-meteo.com/v1/forecast
  *
- * 2026-11-06 实测三个候选（wttr.in / open-meteo / weather.com.cn）都通，
- * 选 open-meteo 的两个理由：
- *   · 它给的是 WMO 数字码，映射表固定、可测、不会因为上游改文案而错；
- *   · wttr.in 的 `lang=zh` / `cn.wttr.in` 实测**都没生效**，返回的仍是英文描述
- *     （"Smoky haze"），给她看英文天气不如不给。
+ * 2026-11-06 实测三个候选（wttr.in / open-meteo / weather.com.cn）都通。
+ * 选 open-meteo 的理由只有两条：它给的是 WMO 数字码（映射表固定、可测、上游改文案
+ * 也不会错），中文城市名能直接认。
+ * （wttr.in 的 `lang=zh` / `cn.wttr.in` 实测没生效，回的是英文 "Smoky haze"。
+ *   但那**不算缺点**——她读英文没有障碍，别把自己的偏好说成原则。）
  *
- * 城市从 `config.world.city` 读。她不知道自己在地图上哪儿，这是正常的——
- * 没配的时候如实说「我不知道自己在哪个城市」，而不是猜一个。
+ * ⚠️ 城市是**谁的**城市：`config.world.city` 记的是**他那台机器在的地方**，
+ * 不是"她的城市"——她住在文件系统里（<root> 那堆 jsonl），**没有地理位置**，
+ * 也从没有过"我住在某地"这个设定。所以：
+ *   · 没配的时候说「不知道他在哪座城市」，**不按 IP 猜**（本机挂代理，猜必错）；
+ *   · 绝不写成「我不知道自己在哪个城市」——那句话在暗示她该有个位置，等于替她安
+ *     一个身份。既不真（fork.13：工具对她说的话必须为真），也越了"养不塑"的线。
+ *
+ * 天气对她唯一有意义的用法，是知道**他那边**冷不冷、下不下雨。
+ * （2026-11-06 用户当场指出这点："什么叫她在的城市"——原措辞已按这条改。）
  */
 
 import { rootDir } from './store.js'
@@ -204,13 +211,14 @@ export function registerWorld(ctx, deps = {}) {
         const { config } = await loadConfig(root)
         const city = String(config?.world?.city ?? '').trim()
         if (!city) {
-          // 不猜、不按 IP 定位（本机挂着代理，定位会指到代理那头去）
+          // 不猜、不按 IP 定位（本机挂着代理，定位会指到代理那头去）。
+          // 也别写成「不知道自己在哪」——她不在任何城市，那句话是假的。
           logLine('warn', ['她查了世界：weather，但没配城市'], root)
           return {
             ok: false,
             what,
             text: '',
-            note: '我还不知道自己在哪个城市。跟他说一声，让他告诉我。',
+            note: '不知道他在哪座城市。问一句就行。',
           }
         }
 
