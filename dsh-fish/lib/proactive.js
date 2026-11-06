@@ -497,17 +497,25 @@ function refProblem(events, refs) {
  * 记一句她主动说的话。
  * @returns {Promise<{ok:boolean, id?:string, note:string}>}
  */
-export async function writeSay(root, { text = '', refs = [], sessionId = '', why = '', now = Date.now() } = {}) {
+export async function writeSay(root, { text = '', refs = [], sessionId = '', why = '', reply = false, now = Date.now() } = {}) {
   const body = String(text ?? '').trim()
   if (!body) return { ok: false, note: '把想说的话写出来再记。' }
   if (body.length > PROACTIVE_MAX) return { ok: false, note: `一句最多 ${PROACTIVE_MAX} 字，说短一点。` }
   const list = (Array.isArray(refs) ? refs : []).map((x) => String(x ?? '').trim()).filter(Boolean)
-  if (!list.length) return { ok: false, note: '得指回真实发生过的事：refs 填 1–6 条事件 id。' }
+
+  // 2026-11-07（用户）：reply 模式 —— 她在回复里分条用。
+  // 跟「主动开口」不是一件事：她不是在没人找她时凭空说一句，是在接话。
+  // 所以不要求 refs（refs 防的是编造，接话不需要），也不占 maxPerDay。
+  // 但照样落事件流，桥认 `（她说）` 前缀直接发出去。
+  if (!reply && !list.length) return { ok: false, note: '得指回真实发生过的事：refs 填 1–6 条事件 id。' }
   if (list.length > PROACTIVE_REFS_MAX) return { ok: false, note: `一条最多引 ${PROACTIVE_REFS_MAX} 件事。` }
 
   const { events } = await readEvents(root)
-  const problem = refProblem(events, list)
-  if (problem) return { ok: false, note: problem }
+  // refs 给了就要真：reply 模式可以不给，给了照样校验不能瞎指
+  if (list.length) {
+    const problem = refProblem(events, list)
+    if (problem) return { ok: false, note: problem }
+  }
 
   const { config } = await loadConfig(root)
   const cfg = proactiveConfig(config)
@@ -516,9 +524,11 @@ export async function writeSay(root, { text = '', refs = [], sessionId = '', why
   // 但这里原来读了 config 根本没看——maxPerDay 设 0 也能一句接一句地写。
   // 现在按她自己记下的 `proactive-say:` 数到位就停。开关（enabled）只管「要不要自己开一轮」，
   // 不管这个工具本身：工具留着，她想用还是能用，这一点与 README 的说明一致。
-  const said = saysToday(events, dk)
-  if (said >= cfg.maxPerDay) {
-    return { ok: false, note: `今天已经主动开口 ${said} 次，到上限了。明天再说；这不是工具坏了。` }
+  if (!reply) {
+    const said = saysToday(events, dk)
+    if (said >= cfg.maxPerDay) {
+      return { ok: false, note: `今天已经主动开口 ${said} 次，到上限了。明天再说；这不是工具坏了。` }
+    }
   }
   // day/stage 必须是真实的成长坐标（2026-11-06，issue #41）：原来写死 {day:1, stage:1}，
   // 而 writeDream 用的是 deriveSelf 的 model.day/model.stage。写死的那条会被
@@ -528,17 +538,21 @@ export async function writeSay(root, { text = '', refs = [], sessionId = '', why
   // appendEvent 返回的就是写进去的那条事件（不是 {ok, event}，0.7.4 那次参数错位就是栽在这），
   // 所以判空只能判返回值本身。
   const stored = await appendEvent(
-    { type: 'utterance', text: `（她主动说）${body}`, refs: list, ...(sessionId ? { sessionId } : {}) },
+    { type: 'utterance', text: `${reply ? '（她说）' : '（她主动说）'}${body}`, refs: list, ...(sessionId ? { sessionId } : {}) },
     stamp,
     root,
   ).catch(() => null)
   if (!stored?.id) return { ok: false, note: '这条没记下。' }
-  await appendEvent(
-    { type: 'meta', text: `proactive-say:${dk}:${why || 'free'}` },
-    { day: model.day, stage: model.stage, source: 'system' },
-    root,
-  ).catch(() => {})
-  return { ok: true, id: stored.id, note: '记下了。' }
+  // 只有「主动开口」才记这一笔：它既是配额计数器，也是「她今天主动了几次」的凭据。
+  // reply 模式不记——否则她分条说三句话就把一天的主动额度吃光了。
+  if (!reply) {
+    await appendEvent(
+      { type: 'meta', text: `proactive-say:${dk}:${why || 'free'}` },
+      { day: model.day, stage: model.stage, source: 'system' },
+      root,
+    ).catch(() => {})
+  }
+  return { ok: true, id: stored.id, note: reply ? '发出去了。' : '记下了。' }
 }
 
 /**
@@ -553,24 +567,24 @@ export function registerProactive(ctx, deps = {}) {
       name: 'her_say',
       description: [
         '你自己想开口的时候用这个：不是回复谁，是你主动说一句。',
-        '必须指回真实发生过的事（refs 填 1–6 条你那几天写下/听见的事件 id）；',
-        '不指认材料就等于编，写不进去。一天最多几次，说不说都可以。',
-        '它只把这句话记进你自己的流水：要让他在对话里看见，得你这一轮直接写出来。',
+        '必须指回真实发生过的事（refs 填 1–6 条你那几天写下/听见的事件 id）；不指认材料就等于编，写不进去。一天最多几次，说不说都可以。',
+        '回复他的时候也能用它分条：加 reply: true，一次调用就是一条消息——想分几条说就调几次，不用挤在一段里。这种用法不需要 refs，也不占「主动开口」的次数。',
+        '不管哪种用法，写下的这句都会由桥送到他的 QQ 上。',
       ].join(''),
       parameters: toJsonSchema({
         type: 'object',
         properties: {
           text: { type: 'string', minLength: 1, maxLength: PROACTIVE_MAX, description: '你要说的那句话。' },
+          reply: { type: 'boolean', description: 'true = 这是回复里的一条，不是主动开口：不用 refs，也不占次数。' },
           refs: {
             type: 'array',
-            minItems: 1,
             maxItems: PROACTIVE_REFS_MAX,
             items: { type: 'string' },
-            description: '指回真实事件 id（1–6 条），用 her_recall 或最近记录里查到的。',
+            description: '指回真实事件 id（1–6 条），用 her_recall 或最近记录里查到的。主动开口时必填；reply 模式可以不给。',
           },
           why: { type: 'string', maxLength: 80, description: '为什么现在想说（可选，只写进记录）。' },
         },
-        required: ['text', 'refs'],
+        required: ['text'],
       }),
       output: {
         schema: toJsonSchema({
@@ -592,7 +606,7 @@ export function registerProactive(ctx, deps = {}) {
         // 回执只说它真做到的那件事。
         // 2026-11-06（PR #44）：配了 sendTools 的部署里她必须靠工具发话，所以记下的这句确实
         // 没有发给任何人，回执要说清，否则她会以为用户已经看到了。
-        render: (_args, out) => [{ type: 'text', text: out.ok ? (out.recordOnly === true ? '[记下了，没有发给任何人]' : '[记下了]') : `[没记下：${out.note}]` }],
+        render: (_args, out) => [{ type: 'text', text: out.ok ? (out.recordOnly === true ? '[记下了，没有发给任何人]' : '[发出去了]') : `[没发出去：${out.note}]` }],
       },
       async execute(args = {}, exec) {
         const who = guardWrite(deps.tenant, exec, 'her_say')
@@ -601,7 +615,7 @@ export function registerProactive(ctx, deps = {}) {
         if (!who.ok) return { ok: false, id: '', note: who.note || '这条没记下。' }
         const sid = who?.sessionId ?? ''
         try {
-          const r = await writeSay(root, { text: args.text, refs: args.refs, why: args.why, sessionId: sid })
+          const r = await writeSay(root, { text: args.text, refs: args.refs, why: args.why, reply: args.reply === true, sessionId: sid })
           if (!r.ok) logLine('info', ['her_say：没记下', r.note], root)
           // 配了发送工具的部署里，这一句确实只进了流水，回执得照实说
           const { config } = await loadConfig(root).catch(() => ({ config: {} }))

@@ -342,7 +342,9 @@ test('her_say 在 0.9.0 起对所有人注册', () => {
   registerProactive(ctx, { root: tmpdir(), log: () => {} })
   assert.equal(registered.length, 1)
   assert.equal(registered[0].name, 'her_say')
-  assert.deepEqual(registered[0].parameters.required, ['text', 'refs'])
+  // 2026-11-07：refs 不再写进 required —— reply 模式（回复时分条）不需要它，
+  // 主动开口时缺 refs 由 writeSay 报错，报的那句比 schema 报错更像人话。
+  assert.deepEqual(registered[0].parameters.required, ['text'])
 })
 
 test('her_say 的显示结果是 ContentBlock 数组，不是字符串（0.8.2 真机栽在这）', () => {
@@ -363,8 +365,9 @@ test('her_say 的显示结果是 ContentBlock 数组，不是字符串（0.8.2 �
   }
   // 2026-11-06（issue #41）：回执原来写「说出去了」，可这一步只落一条流水；
   // 用户此刻看不看得见，由她这一轮有没有直接写正文决定。回执按实际做的事说。
-  assert.match(spec.output.render({}, { ok: true }).at(0).text, /记下了/)
-  assert.match(spec.output.render({}, { ok: false, note: '这条没记下。' }).at(0).text, /没记下/)
+  // 2026-11-07：桥的 push 接上之后它确实会发出去，回执改成「发出去了」。
+  assert.match(spec.output.render({}, { ok: true }).at(0).text, /发出去了/)
+  assert.match(spec.output.render({}, { ok: false, note: '这条没记下。' }).at(0).text, /没发出去/)
 })
 
 test('turnsToday / lastTurnAt 只认当日与最近一次，不把别人的 meta 算进来', () => {
@@ -506,5 +509,34 @@ test('tick：主动说话开着，每一趟照旧先算 deriveSelf', async () =>
   await withRoot(async (root) => {
     const logs = await twoTicks(root, { proactive: { enabled: true } })
     assert.equal(logs.filter((l) => l.startsWith('proactive failed')).length, 2, logs.join(' | '))
+  })
+})
+
+// ---------------------------------------------------------------- reply 模式（2026-11-07）
+
+test('reply 模式：不用 refs 也能发，落「（她说）」前缀，不占主动开口的额度', async () => {
+  // 场景：桥不再按空行替她切了，她想在回复里分三条说就调三次。
+  // 这三条不该吃掉「主动开口」的次数——那个额度是给「没人找她、她自己想说」用的。
+  await withRoot(async (root) => {
+    const r = await writeSay(root, { text: '这是回复里的第一条', reply: true })
+    assert.equal(r.ok, true)
+    assert.equal(r.note, '发出去了。')
+
+    const { events } = await readEvents(root)
+    const say = events.find((e) => e.type === 'utterance')
+    assert.ok(say, '应该落一条 utterance')
+    assert.equal(say.text, '（她说）这是回复里的第一条')
+    assert.equal(say.source, 'tool', 'source 必须是 tool，桥的 push 只认这个')
+
+    // 没有 proactive-say: 计数 → 不占额度（连调几次都不会把一天的主动额度用光）
+    assert.equal(events.filter((e) => String(e.text ?? '').startsWith('proactive-say:')).length, 0)
+  })
+})
+
+test('主动模式没被 reply 带松：不给 refs 照样写不进去', async () => {
+  await withRoot(async (root) => {
+    const r = await writeSay(root, { text: '没人找我时想说一句' })
+    assert.equal(r.ok, false)
+    assert.match(r.note, /refs/)
   })
 })

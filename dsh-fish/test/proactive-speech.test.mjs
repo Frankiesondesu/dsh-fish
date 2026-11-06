@@ -290,8 +290,9 @@ test('her_say 回执：配了 sendTools 照实说没发给任何人', async () =
   const root = await setup({ sendTools: ['send_chat'] })
   const tool = render(root)
   assert.deepEqual(tool.output.render({}, { ok: true, note: 'x', recordOnly: true }), [{ type: 'text', text: '[记下了，没有发给任何人]' }])
-  // issue #41 已把默认回执改成 [记下了]（那一步只写流水，不代表用户看得见）
-  assert.deepEqual(tool.output.render({}, { ok: true, note: 'x' }), [{ type: 'text', text: '[记下了]' }])
+  // issue #41 曾把默认回执改成 [记下了]（那时这一步只写流水）。2026-11-07 起
+  // 桥的 push 会把 her_say 的话真的推到 QQ，所以默认回执照实说 [发出去了]。
+  assert.deepEqual(tool.output.render({}, { ok: true, note: 'x' }), [{ type: 'text', text: '[发出去了]' }])
 })
 
 test('配置：夹紧、默认值，设置页只改一项时别的不丢', async () => {
