@@ -383,7 +383,16 @@ export function startScheduler(ctx, deps = {}) {
 
     const material = recentMaterial(events, { now })
     const loose = looseEnds(events, { now })
-    const text = proactiveSection({ now, state: st, material, loose, sendTools: pc.sendTools, countSeen: pc.idleCountsSeen })
+    const text = proactiveSection({
+      now,
+      state: st,
+      material,
+      loose,
+      sendTools: pc.sendTools,
+      countSeen: pc.idleCountsSeen,
+      // 2026-11-06（用户）：bili.enabled=false 的部署不给她这个念头——提了也是够不着
+      canLook: config?.bili?.enabled !== false,
+    })
 
     const requestId = `proactive-${now}`
     // 这一轮她写的话不算他来过：唤醒时间窗开到 turn/end（投递只等入队，见 wakewin.js），

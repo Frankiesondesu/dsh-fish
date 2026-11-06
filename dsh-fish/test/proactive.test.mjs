@@ -228,6 +228,23 @@ test('空手回合的正文只说事实和许可，不写「你应该」', () =>
   assert.equal(PROACTIVE_PING.trim(), '', '投递信号不许带正文，否则她又会去猜这句话是谁说的')
 })
 
+test('canLook 开着时给她一条「也可以自己去看点什么」的许可', () => {
+  const base = { now: Date.now(), state: { idleHours: 9.5 }, material: [], loose: [] }
+
+  // bili 可用（默认开）→ 让她想起这条路在手边；但只是许可，不是派活
+  const on = proactiveSection({ ...base, canLook: true })
+  assert.match(on, /bili_look/, 'bili 可用时该让她想到可以去翻一眼')
+  assert.match(on, /做什么都行，什么都不做也行/, '许可里必须包含「什么都不做」')
+  assert.doesNotMatch(on, /你应该/)
+
+  // bili.enabled=false 的部署：不提她够不着的工具名（fork.13，不能对她说假话）
+  assert.doesNotMatch(proactiveSection({ ...base }), /bili_look/)
+
+  // 传参那一头也得在：scheduler 按 bili.enabled 现算，不能写死 true
+  const src = readFileSync(new URL('../lib/scheduler.js', import.meta.url), 'utf8')
+  assert.match(src, /canLook: config\?\.bili\?\.enabled !== false/)
+})
+
 test('材料只取她自己的话与听见的东西，悬着的事只列未答的 ask', () => {
   const now = Date.now()
   const events = [

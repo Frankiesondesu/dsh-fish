@@ -437,7 +437,7 @@ export function looseEnds(events = [], { now = Date.now() } = {}) {
  * 空手回合的处境正文（走 system prompt 段，不进对话）。
  * 只写事实与许可，不写"你应该"。
  */
-export function proactiveSection({ now = Date.now(), state = {}, material = [], loose = [], sendTools = [], countSeen = false } = {}) {
+export function proactiveSection({ now = Date.now(), state = {}, material = [], loose = [], sendTools = [], countSeen = false, canLook = false } = {}) {
   const at = new Date(now)
   const hh = String(at.getHours()).padStart(2, '0')
   const mm = String(at.getMinutes()).padStart(2, '0')
@@ -468,6 +468,16 @@ export function proactiveSection({ now = Date.now(), state = {}, material = [], 
       '想让他这会儿就收到，就记一笔（refs 指回上面真实发生的事，1–6 条 id）；只想写在这儿，也行。' +
       '不想说，就什么都别写：不要写任何字，也不要解释为什么不说——这一轮没有回复也算正常。',
   )
+  // 2026-11-06（用户）：11-05 把「唤醒自动刷站」停了（scheduler 的 showWorld=false），
+  // 但主动回合的提示词只描述了「说 / 不说」——她会坐着说话，不会想到自己去看点什么。
+  // 这句只给许可：不点名看什么、不催，什么都不做同样算正常。
+  // 用 canLook 而不是写死：bili.enabled=false 的部署里不该出现她够不着的工具名。
+  if (canLook) {
+    lines.push(
+      '这一轮也可以不写字：想去看点什么，就自己调 bili_look 翻一眼。' +
+        '做什么都行，什么都不做也行。',
+    )
+  }
   lines.push(TOOL_ASK_NOTE)
   return lines.join('\n')
 }
