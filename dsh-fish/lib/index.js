@@ -21,6 +21,7 @@ import { registerHerDiary } from './herdiary.js'
 import { registerWatch } from './watch.js'
 import { registerZoom } from './zoom.js'
 import { registerHerOpen } from './herfile.js'
+import { registerLocalWatch } from './localwatch.js'
 import { registerLetter } from './letter.js'
 import { registerNote } from './note.js'
 import { registerBringBack } from './keep.js'
@@ -387,6 +388,8 @@ export function apply(ctx, baseConfig = {}) {
         () => registerZoom(ctx, { root, tenant: tenancy }),
         // fork.47（2026-11-05）：他 QQ 递过来的文件落到 home/inbox，她调 her_open 自己读。
         () => registerHerOpen(ctx, { root }),
+        // 2026-11-06：他直接递过来的本地视频，走同一条 vs 管线（input 换成本地路径）。
+        () => registerLocalWatch(ctx, { root, tenant: tenancy }),
         // R4：留话（不审批）。和 growth_commit 一样是纯追加，但收件人明确。
         () => registerLetter(ctx, { root, tenant: tenancy }),
         // issue #22 乙档（2026-11-04）：醒来看的那张便条。写完会不会到期、

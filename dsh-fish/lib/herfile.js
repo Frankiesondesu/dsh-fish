@@ -32,6 +32,12 @@ const SNIFF = 8 * 1024
 const IMAGE_EXT = /\.(png|jpe?g|gif|webp|bmp|heic|avif)$/i
 
 /**
+ * 他直接递过来的视频：her_open 读不出内容，但 2026-11-06 起有 her_watch_local
+ * 能看画面。跟图片指 read_image 同构——指条明路，不替她决定看不看，也不说「能打开」。
+ */
+export const VIDEO_EXT = /\.(mp4|m4v|mov|mkv|avi|webm|flv|wmv|m2ts|ts|3gp)$/i
+
+/**
  * 桥把文件落到收件箱。名字做最小清洗（去掉路径分隔符与控制字符），重名加时间戳。
  * @returns {Promise<{path:string,name:string,bytes:number}|null>}
  */
@@ -121,6 +127,16 @@ export function registerHerOpen(ctx, deps = {}) {
           return {
             ok: false, text: '', chars: 0, truncated: false,
             note: '这是一张图片，用 read_image 打开它。',
+          }
+        }
+
+        if (VIDEO_EXT.test(abs)) {
+          // 2026-11-06：以前走到下面的 looksBinary 只丢一句「二进制，我读不出来」，
+          // 她于是以为没路可走。现在如实说能力边界：我读不出内容，但你有工具能看画面。
+          logLine('info', ['她打开文件：视频，指 her_watch_local', basename(abs)], root)
+          return {
+            ok: false, text: '', chars: 0, truncated: false,
+            note: '这是一个视频，我读不出内容；想看画面就用 her_watch_local，把这个路径给它。',
           }
         }
 

@@ -13,6 +13,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { watchViaStoryboard } from '../lib/vs.js'
+import { slashed } from '../lib/posix.js'
 
 // 最小 PNG（1×1 白点）：encodeRaw 用 ffmpeg 编码，内容无所谓
 const TINY_PNG = Buffer.from(
@@ -71,7 +72,9 @@ test('vs 引擎：多张宫格落盘、每格带时刻和台词、说明文字�
     assert.ok(r.text.includes('第1格 0:00–0:10'), '每格要带时刻：' + r.text.slice(0, 200))
     assert.ok(r.text.includes('你好，这是一段台词'), '台词要跟着格子进来')
     assert.ok(r.text.includes('台词共 9 字、12 段'), '要交代台词来源和规模')
-    assert.ok(r.text.includes(r.path), '路径要出现在说明里')
+    // 说明里列给她的路径用正斜杠；照抄反斜杠在客户端会「无法预览」（2026-10-26 实测）
+    assert.ok(r.text.includes(slashed(r.path)), '路径要出现在说明里，且是正斜杠')
+    assert.ok(!r.text.includes(String(r.path).replace(/\//g, '\\')), '不该把反斜杠原路径列给她')
   } finally {
     rmSync(root, { recursive: true, force: true })
   }

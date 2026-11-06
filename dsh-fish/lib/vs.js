@@ -20,6 +20,7 @@ import { pathToFileURL } from 'node:url'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { mediaDir } from './media.js'
+import { slashed } from './posix.js'
 
 /** vs 插件 src 的默认位置；video.vsPath 可覆盖 */
 export function vsSrcDefault() {
@@ -91,12 +92,16 @@ export async function loadStoryboard(vsPath) {
  * 走 vs 全管线看一条视频。
  *
  * @param {object} o
- *   bvid    视频号
+ *   bvid    视频号（本地视频时不传）
+ *   input   本地视频绝对路径；传了就走本地，不拼 B 站 URL（2026-11-06）
+ *   name    本地视频的显示名（本地时用）
+ *   tag     落盘宫格图用的标识（本地时用，默认取 bvid）
  *   root    她的家（media 目录落在这里）
  *   hotword 热词（可选，转写用）
  *   at      她点名的时刻（秒，数组）；给了就只看这个窗口 [min-5, max+5]
  *   vsPath  vs 插件 src 目录（空 = 默认位置）
  *   ocr     硬字幕 OCR（默认开；全程本地，不花 token）
+ *   ffmpegPath / ffprobePath  本地视频可显式指定（绕开 PATH 里的旧 ffmpeg）
  *   impl    注入的 { runStoryboard, saveStoryboards }（单测用；默认真加载 vs）
  * @returns {Promise<{ok:boolean, paths?:string[], path?:string, text?:string, why?:string, title?:string}>}
  */
@@ -106,12 +111,19 @@ export async function watchViaStoryboard(o = {}) {
     return { ok: false, why: `没找到 dsh-video-storyboard 外挂${lastWhy ? `（${lastWhy}）` : ''}` }
   }
 
+  // 2026-11-06：vs 的 runStoryboard 本来就吃「视频路径」——fetch.js 的 resolveInput
+  // 对本地路径原样返回，只有 http 链接才交给 yt-dlp 下载。以前我们只拼了 B 站 URL，
+  // 所以她看不了他直接递过来的本地 mp4。传 input 就走本地，其余整条管线一字不改。
+  const local = Boolean(o.input)
   const opts = {
-    input: `https://www.bilibili.com/video/${o.bvid}`,
+    input: local ? String(o.input) : `https://www.bilibili.com/video/${o.bvid}`,
     // 硬字幕 OCR 全程本地（rapidocr），不花 token；烧在画面里的字她读得到
     ocr: o.ocr !== false,
   }
   if (o.hotword) opts.hotwords = String(o.hotword)
+  // 本地视频显式带上 WinGet 的 ffmpeg（PATH 里那个是旧版），避免 probe / 取帧踩坑
+  if (o.ffmpegPath) opts.ffmpegPath = String(o.ffmpegPath)
+  if (o.ffprobePath) opts.ffprobePath = String(o.ffprobePath)
   // 她点名的时刻 → 一个窗口，前后各留 5 秒余量。
   // fork.22：lite 删掉之后，`normalizeAt` 那道夹取也跟着没了，这里得自己挡一遍——
   // 她传 ['abc'] 或者负数过来，`Math.floor(NaN)` 会让 from 变成 NaN，整条管线就废了。
@@ -131,7 +143,9 @@ export async function watchViaStoryboard(o = {}) {
   }
 
   const dir = await mediaDir(o.root)
-  const outPath = join(dir, `sheet-${o.bvid}-${Date.now()}.png`)
+  // 本地视频没有 bvid，用它自己的名字当落盘标识；清洗掉非 ASCII 与路径字符
+  const tag = String(o.tag || o.bvid || 'local').replace(/[^A-Za-z0-9_-]/g, '_')
+  const outPath = join(dir, `sheet-${tag}-${Date.now()}.png`)
   let paths = []
   try {
     paths = await mod.saveStoryboards(res, outPath, { evidence: true })
@@ -225,10 +239,13 @@ export async function watchViaStoryboard(o = {}) {
     ? `（台词共 ${tr.chars} 字、${tr.segments ?? 0} 段，来源：${srcText}${ocrBits.length ? `；${ocrBits.join('；')}` : ''}）`
     : '（这条没有字幕轨，也没有听写到台词）'
 
-  const title = String(res.info?.title ?? '') || o.bvid
+  const title = String(res.info?.title ?? '') || (local ? String(o.name || '本地视频') : o.bvid)
   const text = [
     `《${title}》：这次认真看，${sheets.length} 张宫格、${cells} 格画面，都放在这儿：`,
-    ...paths,
+    // 说明里列给她的路径必须是正斜杠：宿主渲染 markdown 图片时拿它拼 /api/file，
+    // 反斜杠会解析失败显示「无法预览」（2026-10-26 实测；watch.js 早就转了 r.path，
+    // 这里漏了 text 里那几行，于是「路径照抄——用正斜杠」这句话反而和列出来的路径对不上）。
+    ...paths.map(slashed),
     '用 read_image 一张张读。要在回复里贴图，路径照抄——用正斜杠。',
     '',
     `每格是哪一刻、那时候在说什么${trNote}：`,

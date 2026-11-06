@@ -103,7 +103,7 @@ async function enrichInfo(root, r, bvid) {
 /**
  * 没有 tenancy（单测、老调用）时自己拼一个，理由同 look.js 的 tenancyOf。
  */
-function tenancyOf(root, tenancy) {
+export function tenancyOf(root, tenancy) {
   if (tenancy && typeof tenancy === 'object') {
     return { root, herDir: String(tenancy.herDir ?? ''), tenant: tenancy.tenant ?? { ok: true } }
   }
