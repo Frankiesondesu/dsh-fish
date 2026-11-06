@@ -20,10 +20,12 @@
 import { spawn, execFileSync } from 'node:child_process'
 import { connect } from 'node:net'
 import { existsSync } from 'node:fs'
+import { homedir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 import { ensureLlbotPatch } from './llbot-patch.mjs'
 import { ensureVsPatch } from './vs-patch.mjs'
+import { workbuddyPythons } from './shared/root.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const CHECK_ONLY = process.argv.includes('--check')
@@ -31,7 +33,17 @@ const CHECK_ONLY = process.argv.includes('--check')
 // （尤其「只重启桥」时，用户根本没要开查看器）
 const NO_OPEN = process.argv.includes('--no-open')
 
-const DSH_EXE = 'D:\\Program Files (x86)\\DeepSeek Harness\\DeepSeek Harness.exe'
+// 2026-11-06：DSH 装在哪台机可能不一样（有人装 D 盘、有人装 C 盘、有人装进
+// AppData）。原来写死一个路径，换台机就「❌ 找不到 DSH」。现在按常见位置挨个试，
+// 还支持 DSH_EXE 环境变量直接指定。都找不到时下面报错会把试过的路径列出来。
+const DSH_CANDIDATES = [
+  process.env.DSH_EXE,
+  'D:\\Program Files (x86)\\DeepSeek Harness\\DeepSeek Harness.exe',
+  'C:\\Program Files (x86)\\DeepSeek Harness\\DeepSeek Harness.exe',
+  'C:\\Program Files\\DeepSeek Harness\\DeepSeek Harness.exe',
+  join(homedir(), 'AppData', 'Local', 'Programs', 'DeepSeek Harness', 'DeepSeek Harness.exe'),
+].filter(Boolean)
+const DSH_EXE = DSH_CANDIDATES.find((p) => existsSync(p)) ?? ''
 const LL_EXE = join(HERE, 'runtime', 'LL', 'LuckyLillia.exe')
 const BRIDGE = join(HERE, 'bridge', 'bridge.mjs')
 const VIEWER = join(HERE, 'viewer', 'viewer.mjs')
@@ -46,11 +58,9 @@ const PY_TURN = join(PLUG, 'turn-taking', 'venv', 'Scripts', 'python.exe')
 const PY_TTS = join(PLUG, 'dialogue-tts', 'venv', 'Scripts', 'python.exe')
 // duplex.py 只用标准库，不挑解释器；复用已存在的 venv，别写死 WorkBuddy 内置
 // python（那个路径带版本号，升级就失效）。最后一条是兜底。
-const PY_STDLIB = [
-  PY_TURN,
-  PY_TTS,
-  'C:\\Users\\<用户名>\\.workbuddy\\binaries\\python\\versions\\3.13.12\\python.exe',
-].find(existsSync)
+// 2026-11-06：最后那条原来写死 .../versions/3.13.12/python.exe——注释自己都在说
+// 「那个路径带版本号，升级就失效」，但兜底那行还是写死了。改成扫目录。
+const PY_STDLIB = [PY_TURN, PY_TTS, ...workbuddyPythons()].find(existsSync)
 
 const VOICE = [
   { key: '话轮 18766', port: 18766, exe: PY_TURN,
@@ -153,7 +163,9 @@ async function main() {
     detach(DSH_EXE, [], 'DSH', { cleanElectronEnv: true, cwd: dirname(DSH_EXE) })
     report.push(['DSH', '已拉起（要等它加载完插件）'])
   } else {
-    out(`  ❌ 找不到 DSH：${DSH_EXE}`)
+    out('  ❌ 找不到 DSH。找过这些位置：')
+    for (const p of DSH_CANDIDATES) out(`       ${p}`)
+    out('     装在别处的话，设环境变量 DSH_EXE 指过去。')
     report.push(['DSH', '找不到可执行文件'])
   }
 

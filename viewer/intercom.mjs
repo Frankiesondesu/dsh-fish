@@ -26,10 +26,12 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSy
 import { join } from 'node:path'
 
 import { readAsrConfig, ensureServer, transcribe, ping as asrPing } from '../bridge/asr.mjs'
+import { fishRoot, workbuddyPythons } from '../shared/root.mjs'
 
 const run = promisify(execFile)
 
-const ROOT = 'C:/Users/<用户名>/.dsh-fish'
+// 2026-11-06：不再写死 C:/Users/<用户名>。优先级见 shared/root.mjs。
+const ROOT = fishRoot()
 const KEY_FILE = join(ROOT, 'local.key')
 const AUDIO_DIR = join(ROOT, 'voice', 'intercom')
 
@@ -192,7 +194,9 @@ function pythonExe() {
   // 与 dsh-fish/lib/voice.js 同一套候选：装了 edge_tts 的那个 WorkBuddy python 优先
   const cands = [
     process.env.FISH_PYTHON,
-    'C:/Users/<用户名>/.workbuddy/binaries/python/versions/3.13.12/python.exe',
+    // 2026-11-06：原来写死 .../versions/3.13.12/python.exe，WorkBuddy 一升级就失效。
+    // workbuddyPythons() 扫目录、版本降序，换机也不会指到不存在的路径。
+    ...workbuddyPythons(),
     'python',
   ].filter(Boolean)
   for (const p of cands) {

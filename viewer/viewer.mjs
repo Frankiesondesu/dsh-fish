@@ -18,12 +18,15 @@ import { readFileSync, existsSync, readdirSync, statSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { zstdDecompressSync } from 'node:zlib'
+import { dshSessionsDir, fishRoot } from '../shared/root.mjs'
 import { intercomStatus, talk } from './intercom.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const FISH = join(HERE, '..', 'dsh-fish')
-const ROOT = 'C:/Users/<用户名>/.dsh-fish'
-const DSH_SESSIONS = 'C:/Users/<用户名>/.dsh/sessions/--C-Users-<用户名>-.dsh-fish-home--'
+// 2026-11-06：不再写死 C:/Users/<用户名>。换机/换盘/换用户名都靠这一步，
+// 优先级（DSH_FISH_HOME → 指针文件 → ~/.dsh-fish）见 shared/root.mjs。
+const ROOT = fishRoot()
+const DSH_SESSIONS = dshSessionsDir(ROOT)
 const PORT = 7788
 
 // ---------------------------------------------------------------- 读数据
