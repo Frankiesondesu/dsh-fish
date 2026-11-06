@@ -20,6 +20,7 @@ import { fileURLToPath } from 'node:url'
 import { zstdDecompressSync } from 'node:zlib'
 import { dshSessionsDir, fishRoot } from '../shared/root.mjs'
 import { intercomStatus, talk } from './intercom.mjs'
+import { readUsage } from './usage.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const FISH = join(HERE, '..', 'dsh-fish')
@@ -506,7 +507,7 @@ const PAGE = String.raw`<!doctype html>
 <main id="main"><p class="dim">读数据中…</p></main>
 <script>
 let D = null, tab = 'profile';
-const TABS = [['profile','人格数据'],['said','她说的话'],['mine','你说的话'],['acts','她做过的事'],['events','事件流'],['intercom','对讲机'],['status','本机状态'],['settings','设置']];
+const TABS = [['profile','人格数据'],['said','她说的话'],['mine','你说的话'],['acts','她做过的事'],['events','事件流'],['intercom','对讲机'],['usage','用量'],['status','本机状态'],['settings','设置']];
 const esc = s => String(s??'').replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
 const t = ms => { if(!ms) return ''; const d=new Date(ms); return String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0'); };
 
@@ -531,6 +532,7 @@ function render(){
   const HM = humanMetrics();
   const el = document.getElementById('main');
   if(tab==='intercom'){ renderIntercom(el); return }
+  if(tab==='usage'){ renderUsage(el); return }
   if(tab==='status'){ renderStatus(el); return }
   if(tab==='settings'){ renderSettings(el); return }
 
@@ -713,6 +715,91 @@ function humanMetrics(){
 
 // 只读聚合：插件版本 / 进程跑的是不是新代码 / 各本地服务探活 / 账本。
 // 「语料库」在这里只把口径写给人看，不做任何挑选或打分——挑哪些是系统的手。
+// ---------------- 用量 / 消费（2026-11-06） ----------------
+// 数据是 DSH 自己写的 usage-ledger.json，不是这个插件记的。
+// 那条账本 2026-10-25 之后就停了，所以页面上必须把「截止到哪天」写在最前面——
+// 不写的话，用户会以为最近没花钱。
+const fmtN = n => {
+  const v = Number(n) || 0;
+  if (v >= 1e9) return (v / 1e9).toFixed(2) + 'G';
+  if (v >= 1e6) return (v / 1e6).toFixed(2) + 'M';
+  if (v >= 1e3) return (v / 1e3).toFixed(1) + 'K';
+  return String(Math.round(v));
+};
+// cost 是 DSH 写的原值，单位不明（按 DeepSeek 几种计价都反推不出来），
+// 所以不加 ¥ / $，小到 1e-6 也照实显示，不做四舍五入到 0。
+const fmtCost = c => {
+  const v = Number(c) || 0;
+  return v === 0 ? '0' : v < 0.01 ? v.toFixed(6) : v.toFixed(4);
+};
+
+async function renderUsage(el){
+  el.innerHTML = '<div class="sec">用量与消费</div><div class="card"><span class="dim">读用量账本中…</span></div>';
+  let u;
+  try { u = await (await fetch('/api/usage',{cache:'no-store'})).json(); }
+  catch(e){ el.innerHTML = '<div class="card err">用量读不到：'+esc(e.message)+'</div>'; return }
+
+  const head = '<div class="sec">用量与消费</div>';
+
+  if(!u.ok){
+    el.innerHTML = head +
+      '<div class="card err">'+esc(u.why || '读不到用量账本')+'</div>' +
+      '<div class="card" style="margin-top:10px">'+
+        '<div class="dim" style="font-size:12.5px">账本路径：'+esc(u.file)+'</div>'+
+        '<div class="dim" style="font-size:12.5px;margin-top:6px;line-height:1.7">'+
+          '这个文件由 DSH 自己写，不归这个插件管。它出现之后刷新这页就能看到。'+
+        '</div>'+
+      '</div>';
+    return;
+  }
+
+  const T = u.total || {};
+  const models = u.models || [];
+  const days = u.days || [];
+
+  const tip = '<div class="card" style="border-color:rgba(245,189,98,.35);margin-bottom:12px">'+
+    '<b style="color:#f3cd91">这份账本停在 '+esc(u.to || '（还是空的）')+'</b>'+
+    '<div class="dim" style="font-size:12.5px;margin-top:6px;line-height:1.75">'+
+      'DSH 的代码里还有一整套用量统计，但 2026-10-25 之后就没再往这个文件写过。'+
+      '下面这些数字都是真实发生过的，只是<b>不含最近的花费</b>。'+
+    '</div></div>';
+
+  const statRow = '<div class="st-group"><h3>合计 · '+esc(u.from || '?')+' 至 '+esc(u.to || '?')+'</h3>'+
+    '<div class="stats" style="margin:14px 16px">'+
+      stat('调用', fmtN(T.calls), '次')+
+      stat('输入', fmtN(T.input), 'tokens')+
+      stat('输出', fmtN(T.output), 'tokens')+
+      stat('缓存读', fmtN(T.cacheRead), 'tokens')+
+      stat('消费', fmtCost(T.cost), '', 'DSH 记的值')+
+    '</div></div>';
+
+  const row = (label, hint, cost) => '<div class="st-field">'+
+    '<div><div class="st-label">'+esc(label)+'</div><div class="st-hint">'+esc(hint)+'</div></div>'+
+    '<div class="st-ctl"><b>'+esc(cost)+'</b></div></div>';
+
+  const modelRows = models.map(m => row(
+    m.provider + ' / ' + m.model,
+    fmtN(m.calls)+' 次 · 入 '+fmtN(m.input)+' · 出 '+fmtN(m.output)+' · 缓存读 '+fmtN(m.cacheRead),
+    fmtCost(m.cost),
+  )).join('');
+
+  // 最近的在最上面：看用量通常是看"最近几天花了多少"
+  const dayRows = days.slice().reverse().map(d => row(
+    d.date,
+    fmtN(d.calls)+' 次 · 入 '+fmtN(d.input)+' · 出 '+fmtN(d.output)+' · 缓存读 '+fmtN(d.cacheRead),
+    fmtCost(d.cost),
+  )).join('');
+
+  el.innerHTML = head + tip + statRow +
+    '<div class="st-group"><h3>按模型</h3>'+(modelRows || '<div class="dim" style="padding:12px 16px">没有记录</div>')+'</div>'+
+    '<div class="st-group"><h3>按天</h3>'+(dayRows || '<div class="dim" style="padding:12px 16px">没有记录</div>')+'</div>'+
+    '<div class="card" style="margin-top:12px"><div class="dim" style="font-size:12px;line-height:1.85">'+
+      '账本：'+esc(u.file)+'<br>'+
+      '「消费」是 DSH 写进账本的 cost 原值：单位它没标，我按 DeepSeek 几种常见计价都反推过、对不上，'+
+      '所以这里原样显示，没有加货币符号。'+
+    '</div></div>';
+}
+
 async function renderStatus(el){
   el.innerHTML = '<div class="sec">本机状态</div><div class="card"><span class="dim">读状态中…</span></div>';
   let s;
@@ -997,6 +1084,13 @@ createServer(async (req, res) => {
       const st = await buildStatus()
       res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
       return res.end(JSON.stringify(st))
+    }
+    // 用量/消费（2026-11-06）：数据来自 DSH 自己的 usage-ledger.json，
+    // 读不到就返回 ok:false + 原因，页面照实说，不编数。
+    if (req.url === '/api/usage') {
+      const u = readUsage()
+      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
+      return res.end(JSON.stringify(u))
     }
     // ---- 对讲机（2026-11-06）：链路在 intercom.mjs，这里只做薄壳 ----
     if (req.url === '/api/intercom/status') {
