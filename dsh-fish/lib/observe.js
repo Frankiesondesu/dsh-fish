@@ -353,6 +353,11 @@ export function registerObserve(ctx, deps = {}) {
           const c = countEvents(events)
           return {
             utterance: events.filter((e) => e.type === 'utterance').length,
+            // issue #32：对话行（flags 带 uncommitted）单列。它们是她答他的话，
+            // 跟她自己想说的判断混在一起时，「说 N 句」这个数字会越聊越虚高。
+            chat: events.filter(
+              (e) => e.type === 'utterance' && Array.isArray(e.flags) && e.flags.includes('uncommitted'),
+            ).length,
             revise: events.filter((e) => e.type === 'revise').length,
             refusal: events.filter((e) => e.type === 'refusal').length,
             reunion: events.filter((e) => e.type === 'reunion').length,
@@ -584,6 +589,10 @@ export function registerObserve(ctx, deps = {}) {
         }
         const before = await loadConfig(root).catch(() => null)
         const next = await updateConfig(patch, root)
+        // 身份段里有一句跟着 sendTools 走，变了就重写一次（只在变的时候，别的保存不多写盘）
+        if (JSON.stringify(before?.config?.proactive?.sendTools ?? []) !== JSON.stringify(next?.proactive?.sendTools ?? [])) {
+          await refreshSelfDoc(root).catch(() => {})
+        }
         // 审计：日记可见性每翻一次就落一行，事后查得到是谁、随哪次提交翻的。
         // 2026-10-28 用户反馈「开了『让我看日记』插件又自己关」——光靠猜猜不出来，
         // 至少让下一次发生时日志里有一行可对。

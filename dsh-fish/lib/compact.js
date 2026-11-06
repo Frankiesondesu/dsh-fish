@@ -202,8 +202,33 @@ export function looksLikeNothingSaid(text) {
   return /^(没什么|没有)(什么)?(可)?(想|要)?说的/.test(t) && t.length <= 40
 }
 
-export function followWake(ctx, { rpcId = '', timeoutMs = WAKE_FOLLOW_TIMEOUT_MS, log } = {}) {
+/**
+ * 这一轮是不是上游断流了（不是她说话）。
+ *
+ * 2026-11-06 真机（01:32 那次自动搭话）：上游把这一轮判成退化，
+ * 前端把一行红字当成她的回复写进了会话：
+ *   `❌ [ACP] stream error: the turn degenerated again after the continuation nudge`
+ * 那一行是报错，不是她开口。按「开口」记会白占一次额度，还会进对话流。
+ *
+ * @param {string} text
+ * @returns {boolean}
+ */
+export function looksLikeStreamFailure(text) {
+  const t = String(text ?? '').trim()
+  if (!t) return false
+  if (t.startsWith('❌')) return true
+  const low = t.toLowerCase()
+  if (low.includes('stream error')) return true
+  if (low.includes('turn degenerated')) return true
+  if (low.includes('[acp]') && low.includes('error')) return true
+  return false
+}
+
+export function followWake(ctx, { rpcId = '', timeoutMs = WAKE_FOLLOW_TIMEOUT_MS, log, sendTools = [] } = {}) {
   const rid = String(rpcId ?? '')
+  const tools = new Set(sendTools)
+  const sending = new Set() // 这一轮调了、还没等到结果的发送工具
+  let toolSpoke = false
   const events = []
   let session = null
   let startSeq = -1
@@ -235,6 +260,7 @@ export function followWake(ctx, { rpcId = '', timeoutMs = WAKE_FOLLOW_TIMEOUT_MS
       ok: false,
       spoke,
       said,
+      toolSpoke,
       startSeq,
       endSeq: -1,
       events,
@@ -280,6 +306,24 @@ export function followWake(ctx, { rpcId = '', timeoutMs = WAKE_FOLLOW_TIMEOUT_MS
         if (text) {
           spoke = true
           said = said ? said + String.fromCharCode(10) + text : text
+        }
+        // 靠工具发话的渠道：发送工具成功了就是开了口，哪怕一个字的正文都没写
+        const blocks = event?.data?.message?.content ?? event?.data?.content
+        if (tools.size > 0 && Array.isArray(blocks)) {
+          for (const b of blocks) if (b?.type === 'tool-call' && tools.has(String(b.name))) sending.add(String(b.id ?? ''))
+        }
+      }
+      // 代码模式（run_code）里的发送走嵌套派发，模型那层的工具名是 run_code，这里按真正的工具名认
+      if (String(event?.type ?? '') === 'tool/ptc-dispatch' && tools.has(String(event?.data?.name)) && event?.data?.isError !== true) {
+        spoke = true
+        toolSpoke = true
+      }
+      if (String(event?.type ?? '') === 'tool/result' && sending.size > 0) {
+        const r = event?.data?.message ?? event?.data
+        const id = String(r?.toolCallId ?? r?.callId ?? '')
+        if (sending.delete(id) && r?.isError !== true) {
+          spoke = true
+          toolSpoke = true
         }
       }
     } catch (err) {

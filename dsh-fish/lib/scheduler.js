@@ -16,7 +16,7 @@ import { join } from 'node:path'
 import { deriveSelfCached } from './derive.js'
 import { validateEvent } from './schema.js'
 import { readEvents, appendEvent, rootDir, ensureHer, paths, readJson } from './store.js'
-import { loadConfig, dateKey, inWindow, pickWakeTime } from './settings.js'
+import { loadConfig, dateKey, inWindow, pickWakeTime, updateConfig } from './settings.js'
 import { plan } from './generator.js'
 import { findTemplate } from './events.js'
 import { offerPrompt, SLEEP_TODAY } from './persona.js'
@@ -29,20 +29,21 @@ import { seenOn } from './whatseen.js'
 import { renderWatchList } from './history.js'
 import { fetchCover, coverLines } from './cover.js'
 import { riskState, browsePlan, noteRisk, isRiskCode } from './risk.js'
-import { scanReplies, renderReplies } from './comment.js'
+import { scanReplies, renderReplies, repliesScanDue } from './comment.js'
 import { flushReport } from './report.js'
-import { talkSessionId } from './home.js'
+import { talkSessionId, homeStatus } from './home.js'
 import { refreshSelfDoc } from './selfdoc.js'
-import { setWakeSection, clearWakeSection, getWakeSection } from './identity.js'
+import { setWakeSection, clearWakeSection, getWakeSection, liveAgentOf } from './identity.js'
+import { queueNote, deliverQueued } from './sessionnote.js'
 import { awayNow, awayLine } from './outing.js'
 import { askInChat, picked } from './askinchat.js'
 import { restedToday, settleStaleAsks } from './ask.js'
 import { takeDueAlarm, markAlarmFired } from './alarm.js'
 import { devModeSync } from './devmode.js'
 import { readPause } from './pause.js'
-import { proactiveState, proactiveSection, recentMaterial, looseEnds, TOOL_ASK_NOTE } from './proactive.js'
+import { proactiveConfig, proactiveState, proactiveSection, recentMaterial, looseEnds, TOOL_ASK_NOTE } from './proactive.js'
 import { deliverWake, ensureSessionLive, WAKE_PING } from './deliver.js'
-import { followWake, planWakeCompaction, compactWake, looksLikeNothingSaid } from './compact.js'
+import { followWake, planWakeCompaction, compactWake, looksLikeNothingSaid, looksLikeStreamFailure } from './compact.js'
 import { logLine } from './log.js'
 import { recordGrant } from './grant.js'
 import { readNotes, renderNotes } from './note.js'
@@ -128,18 +129,27 @@ const DAY_END_CUE = '（今天到这里了。这一刻是我自己的。）'
 
 
 /**
- * 等这一次唤醒的回合真正结束。
+ * 等这一轮真说完：认准「我们自己排进去的那一轮」的 turn/end。
  *
- * 坑（真机抓到）：`sessionController.prompt()` 在把消息**排进队列**时就 resolve 了，
- * 模型还在后面慢慢想。之前紧接着就 flushReport，报告在她开口前 8 秒就写完，
- * 于是 out/YYYY-MM-DD.md 永远显示"今天她什么都没说"——她其实说了，只是晚了。
+ * 为什么要有这一步（真机抓到）：`sessionController.prompt()` 在把消息**排进队列**时就
+ * resolve 了，模型还在后面慢慢想。之前紧接着就 flushReport，报告在她开口前 8 秒就写完，
+ * 于是 out/YYYY-MM-DD.md 永远显示「今天她什么都没说」——她其实说了，只是晚了。
  *
- * 宿主的信号是 `session/event`，事件里 `type === 'turn/end'`。
- * 拿不到事件总线（单测/老宿主）时退回"等一会儿再写一次"，
- * 反正 flushReport 是幂等的重写，多写一次不会错。
+ * 坑（issue #36）：以前只认会话不认回合——同一会话里任何一个 turn/end 都算数。
+ * 手动「叫她一次」时她往往正开在别的一轮里（比如他刚发过话），宿主的 `agent.followup`
+ * 会把我们这条排进下一轮，于是**当前那一轮**先 turn/end，处境段（fish:wake）当场被清，
+ * 真正醒来那一轮反而什么都没有。
+ *
+ * 现在的判据：监听挂上之后，必须先见到本条会话的 `turn/start`，之后的 `turn/end`
+ * 才算「我们这一轮说完了」；turn/start 之前来的 turn/end 属于上一轮，忽略。
+ * 拿不到事件总线（单测/老宿主）时退回原来的即时行为，反正就绪后写一次就够了，
+ * 而且 flushReport 是幂等的重写，多写一次不会错。
  */
 function watchTurnEnd(ctx, sessionId, done) {
   let fired = false
+  // 宿主没给事件总线：没有回合可认，退回「等一会儿就动手」的老行为。
+  const noBus = typeof ctx.on !== 'function'
+  let started = noBus
   const once = () => {
     if (fired) return
     fired = true
@@ -148,7 +158,8 @@ function watchTurnEnd(ctx, sessionId, done) {
   const off = ctx.on?.('session/event', (session, event) => {
     const id = session?.header?.id ?? session?.id
     if (id !== sessionId) return
-    if (event?.type === 'turn/end') once()
+    if (event?.type === 'turn/start') { started = true; return }
+    if (event?.type === 'turn/end' && started) once()
   })
   return { off, once, get fired() { return fired } }
 }
@@ -194,6 +205,17 @@ export function startScheduler(ctx, deps = {}) {
     const t = busy.get(id)
     return t !== undefined && Date.now() - t < BUSY_STALE_MS
   }
+  // 别的插件知道她在忙（比如在打一局游戏），这个调度器不知道。它们可以
+  // `ctx.on('dsh-fish/busy', (sessionId) => true)`，不用知道这个包叫什么、装在哪。
+  // 监听要同步返回，只有 true 算忙。抛错、返回 Promise 都按不忙算；Promise 的拒绝要接住，
+  // 宿主把未处理的拒绝当致命错误，别人的一个监听不该把整个进程带走。
+  const busyElsewhere = (id) => {
+    try {
+      const r = ctx.bail?.('dsh-fish/busy', id)
+      if (typeof r?.then === 'function') r.then(undefined, (e) => log('dsh-fish/busy 监听拒绝', e?.message ?? e))
+      return r === true
+    } catch { return false }
+  }
   const waitIdle = async (id) => {
     const until = Date.now() + IDLE_WAIT_MS
     while (!disposed && isBusy(id) && Date.now() < until) await new Promise((r) => setTimeout(r, 2000))
@@ -234,6 +256,13 @@ export function startScheduler(ctx, deps = {}) {
       proactiveEntered = true
       log('proactive', '调度器已进入主动说话检查')
     }
+    // 0.9.0（用户 m02634）：「主动性」这道闸。关着 = 她不会自己攒劲儿开一轮；
+    // 日程唤醒与手动叫醒都不经过这里，照样能用。
+    // 0.9.1 起上游把它排在最前面（「主动性」比「主动说话」更根本）——顺序照上游。
+    if (config?.drive?.enabled === false) {
+      if (proactiveSkip !== '主动性关着') { proactiveSkip = '主动性关着'; log('proactive skip', '主动性关着') }
+      return false
+    }
     // 开关（0.9.0，用户 m02634）：config.proactive.enabled 是正门（默认关）。
     // devMode（fork，坑 #13）仍当总门：.dev 在就照旧开着——这台机器的行为不变；
     // 正门留给以后撤 .dev 时用（改配置就行，不用再靠隐藏文件）。
@@ -244,17 +273,15 @@ export function startScheduler(ctx, deps = {}) {
       }
       return false
     }
-    // 0.9.0（用户 m02634）：「主动性」另一道闸。关着 = 她不会自己攒劲儿开一轮；
-    // 日程唤醒与手动叫醒都不经过这里，照样能用。
-    if (config?.drive?.enabled === false) {
-      if (proactiveSkip !== '主动性关着') { proactiveSkip = '主动性关着'; log('proactive skip', '主动性关着') }
-      return false
-    }
     // 2026-11-04（0.9.0 用户 m01466）：把她的成长档案交给判定函数。
     // 之前这里是 `proactiveState({ config, events, now })` —— 它收不到 model，
     // 于是第 3 天和第 27 天算出来的概率一模一样（「自己开口的出口不该是恒温的」）。
-    // fork.27：走分钟桶缓存，语义与现算一致；下面 wake 的 meta 也用它。
-    const model = deriveSelfCached(events, { growthDays: config.growthDays })
+    // 0.9.1（issue #40）：关着的时候判定用不上 model，不算——deriveSelf 是同步的，
+    // tick 每分钟一次，事件流长了会卡主线程。fork 的 devMode 总门开着、或 forced 闹钟
+    // 时照样算；fork.27 的分钟桶缓存照用，下面 wake 的 meta 也靠它。
+    const model = (forced || proactiveConfig(config).enabled || devModeSync(root))
+      ? deriveSelfCached(events, { growthDays: config.growthDays })
+      : null
     // forced = 她自己定的闹钟（fork.43）：只可能来自 takeDueAlarm，
     // 时间点已经由工具保证在作息窗口内，所以这里不再走 proactiveState 的闸门
     // ——配额、冷却、空闲时长都不看，那是"系统给的机会"，不是她自己的约定。
@@ -284,6 +311,8 @@ export function startScheduler(ctx, deps = {}) {
     // 骰子退役（fork.50 之前的那套 chance 掷签不再用）——劲儿决定「该不该醒」，
     // 醒来说什么仍旧是模型的事。fork.50 的「想不想」保留，折在劲儿值上（见下）。
     // 这张桌子是**判据用的摘要**，不是正文那段（正文那段在 wake() 里现算现摆）。
+    // 0.9.1：pc 在函数级——proactiveSection / 结账那段都要用 sendTools / foldSilent
+    const pc = proactiveConfig(config)
     let drv = null
     if (!forced) {
       const gaps = curiosityOf(events, now)
@@ -294,7 +323,8 @@ export function startScheduler(ctx, deps = {}) {
       const seen = lastSeenAt(events)
       const echoBack = !!(leave && seen && seen >= leave && now - leave <= 72 * 3600_000)
       const driveDesk = { gaps: gaps.length, stale: 0, echo: echoBack, favorite: interest.length > 0 }
-      drv = driveOf({ events, now, stage: model.stage, desk: driveDesk })
+      // 0.9.1：seen 算不算打断安静，配置可切
+      drv = driveOf({ events, now, stage: model.stage, desk: driveDesk, seenCountsAsHeard: pc.idleCountsSeen })
       // 空桌不醒（0.9.0，用户 m02937）：桌上什么都没有时，劲儿再满也不起——
       // 否则她只能回一句「没什么要说的」，既占额度又在对话里留一条噪音。
       if (!deskHasMaterial(driveDesk)) {
@@ -323,10 +353,13 @@ export function startScheduler(ctx, deps = {}) {
       }
     }
     const sc = ctx.sessionController
-    if (!sc?.prompt) {
+    // 0.9.1 起投递走 `agent.followup()`（见下面的 deliverWake），不再经 `sc.prompt`。
+    // 原来这里卡的是 `sc?.prompt`——合并时留着它，等于把所有没给 prompt 的宿主
+    // （包括测试里的假宿主）全挡在门外，主动回合一次都投不出去。
+    if (!sc) {
       if (proactiveSkip !== '拿不到 sessionController') {
         proactiveSkip = '拿不到 sessionController'
-        log('proactive skip', '宿主没给 ctx.sessionController.prompt')
+        log('proactive skip', '宿主没给 ctx.sessionController')
       }
       return false
     }
@@ -338,10 +371,19 @@ export function startScheduler(ctx, deps = {}) {
       }
       return false
     }
+    // 0.9.1（issue #36）：她正忙时不投——处境段会挂在正在跑的那一轮上，那一轮结束
+    // 又把它清掉，真正的这一轮就只收到一个空格。过 5 分钟再看（lastProbe 往回拨）。
+    const elsewhere = busyElsewhere(sessionId)
+    if (elsewhere || isBusy(sessionId)) {
+      lastProbe = now - 25 * 60_000
+      const why = elsewhere ? '别的插件说她在忙（dsh-fish/busy）' : '她正忙'
+      if (proactiveSkip !== why) { proactiveSkip = why; log('proactive skip', why) }
+      return false
+    }
 
     const material = recentMaterial(events, { now })
     const loose = looseEnds(events, { now })
-    const text = proactiveSection({ now, state: st, material, loose })
+    const text = proactiveSection({ now, state: st, material, loose, sendTools: pc.sendTools, countSeen: pc.idleCountsSeen })
 
     const requestId = `proactive-${now}`
     // 这一轮她写的话不算他来过：唤醒时间窗开到 turn/end（投递只等入队，见 wakewin.js），
@@ -370,7 +412,7 @@ export function startScheduler(ctx, deps = {}) {
 
       // 投递之前先把这一轮盯起来（0.9.0 用户 m00803）。认领信号是 rpcId：
       // 每次投递一个唯一值，命中之前一律当「还没开始」，所以早挂不会认错轮。
-      const follow = followWake(ctx, { rpcId: requestId, log })
+      const follow = followWake(ctx, { rpcId: requestId, log, sendTools: pc.sendTools })
 
       // 2026-11-04（0.9.0 用户 m00428）：投递换成正解 —— 自建 `source.kind='fish-wake'`
       // 的消息交给 `agent.followup()`。宿主把它画成一张默认收起的折叠条，
@@ -418,7 +460,12 @@ export function startScheduler(ctx, deps = {}) {
           const meta = { day: model.day, stage: model.stage, source: 'timer' }
           // 「没什么要说的」不是开口（0.9.0 用户 m02937）：她写一句元话语
           // 交代「这轮没话说」，在文本界面上几乎不可避免；按静默记、折掉，别当一次开口。
-          const quiet = out.spoke !== true || looksLikeNothingSaid(out.said)
+          // 配了发送工具时正文到不了人，只认工具（0.9.1 PR #44）；没配时还是看正文。
+          // 上游断流写成的那行红字也不是她开口（0.9.1：真机见过的 `❌ [ACP] stream error`）。
+          const broken = out.spoke === true && looksLikeStreamFailure(out.said)
+          const quiet = pc.sendTools.length > 0
+            ? out.toolSpoke !== true
+            : (out.spoke !== true || broken || looksLikeNothingSaid(out.said))
           // fork.43：她自己定的闹钟不占主动配额、不起冷却——turn / silent 两行都不写。
           if (!forced) {
             if (!quiet) {
@@ -429,13 +476,14 @@ export function startScheduler(ctx, deps = {}) {
             await appendEvent({ type: 'meta', text: `proactive-silent:${dk}:${now}` }, meta, root).catch(() => {})
           }
           // 折叠只在拿到闭合区间时做：超时、或没认出那条 ping，out.endSeq 都是 -1。
-          const plan = out.endSeq >= 0
+          const plan = out.endSeq >= 0 && pc.foldSilent
             ? planWakeCompaction(out.events, { startSeq: out.startSeq, endSeq: out.endSeq, rpcId: requestId })
             : null
           // 一轮可能被宿主的投影切成几段：各段单独换，边界节点原样留着。
           let folded = 0
           if (plan) for (const run of plan.runs) if (await compactWake(out.session, run, { log })) folded += 1
-          const tail = out.spoke === true ? '，只说了句没什么要说的' : ''
+          const tail = broken ? '，这一轮上游断流了（那行报错不算她开口）'
+            : out.spoke === true ? '，只说了句没什么要说的' : ''
           const head = forced ? '按她定的点醒了一次' : '醒了一次'
           log('proactive', folded > 0
             ? `${head}，没有开口${tail}（这一轮折成 ${folded} 行，盖住 ${plan.shadowed} 个节点）`
@@ -526,6 +574,31 @@ export function startScheduler(ctx, deps = {}) {
         return
       }
 
+      // ---- 有人回她了吗（2026-11-06，用户 m01641）----
+      // 原来这里只有 wake() 拼正文时顺带扫一次：没被叫醒的那天就完全看不到回复，
+      // 而设置页那个「多久看一次有没有人回复」一直是个空旋钮（scanEveryMin
+      // 全仓没有消费者）。现在按那个间隔真去问一次，问到了就把那几句排队投给她。
+      // 投递用 queueNote：她醒着就立刻补进当前这条会话，没开着就等她下次打开。
+      try {
+        if (repliesScanDue(config?.comment, now)) {
+          const waiting = await scanReplies({ root, events, dateKey: dk }).catch(() => [])
+          // 无论有没有人回都记一次：不记的话每 30 秒就会重新问一遍 B 站（-412 就是这么撞出来的）。
+          await updateConfig({ comment: { lastScanAt: new Date(now).toISOString() } }, root).catch(() => {})
+          if (waiting.length) {
+            const txt = renderReplies(waiting)
+            if (txt) {
+              await queueNote(root, txt).catch(() => null)
+              const h = await homeStatus(root).catch(() => null)
+              const agent = h?.sessionId ? liveAgentOf(ctx, h.sessionId) : null
+              if (agent) await deliverQueued(agent, root, { home: true }).catch(() => null)
+              log('comment', `有人回她了（${waiting.length} 条），已经递过去。`)
+            }
+          }
+        }
+      } catch (err) {
+        log('comment', `扫回复失败：${err?.message ?? err}`)
+      }
+
       // ---- 主动说话（0.8.1 本机实验，2026-10-30 用户 m04610）----
       // 它不是唤醒：不占 wakesPerDay，也不推成长事件。只在 .dev 下生效。
       // 开了就 return——这一趟由她自己决定说还是不说，不再叠一次醒一醒。
@@ -591,8 +664,9 @@ export function startScheduler(ctx, deps = {}) {
       // 轮换之后这里查的是旧会话忙不忙，新会话正说着话也照样插进去。
       const sid = (await readJson(join(paths(root).root, 'home.json'), null).catch(() => null))?.sessionId
         ?? deps.sessionId
-      if (sid && isBusy(sid)) {
-        const why = '她正在说话，等这一轮结束再叫'
+      const elsewhere = sid ? busyElsewhere(sid) : false
+      if (sid && (elsewhere || isBusy(sid))) {
+        const why = elsewhere ? '别的插件说她在忙（dsh-fish/busy），等一等再叫' : '她正在说话，等这一轮结束再叫'
         const next = shouldLogSkip(skipLogged, dk, now, why)
         if (next) { skipLogged = next; log('skip', why) }
         return
@@ -777,7 +851,13 @@ async function wake(ctx, root, model, config, decision, dk, log, deps = {}) {
   {
     try {
       const { events: evs } = await readEvents(root)
-      if (!dreamOn(evs, model.day).length) {
+      // 2026-11-06（issue #42）：「兴趣」关掉时不再摆旧句子。
+      // 原来 freeWakeFor 只要 tableText 非空就判成 table，而 tableText 根本不看 interest 开关——
+      // 于是「关掉摆东西」之后，每 6 小时还是会因为旧句子空醒一次，而且那一轮既不想一想、
+      // 也不给规则申请、也不给「今天到这里」：14 天里 14 次全是旧句子。
+      // 旧句子属于「桌上那几样东西」里的一样，跟着兴趣开关走才自洽。
+      const staleOn = config?.interest?.enabled !== false
+      if (staleOn && !dreamOn(evs, model.day).length) {
         const shownToday = evs.some((e) => e?.type === 'meta' && String(e.text ?? '').startsWith(`table:${dk}`))
         const [{ outings }, { possessions }] = await Promise.all([readOutings(root), readPossessions(root)])
         const tripSessions = new Set(
@@ -1073,13 +1153,14 @@ async function wake(ctx, root, model, config, decision, dk, log, deps = {}) {
   }
 
   // 刷站那几十秒里她可能刚好开始了别的一轮（有人找她）。等那一轮说完再挂处境、再叫：
-  // watcher 认的是会话不是这一轮，挂早了会被那一轮的 turn/end 收走。
+  // 挂早了会被那一轮的 turn/end 收走（issue #36 之前 watcher 只认会话不认回合，
+  // 现在它至少要见到我们自己这一轮的 turn/start 才算数，双保险）。
   if (typeof deps.waitIdle === 'function') await deps.waitIdle(sessionId)
 
   // 这一轮她写的话不算他来过：唤醒时间窗开到 turn/end，不是开到入队（见 wakewin.js）。
   // turn/end 不来时跟处境一起由下面的兜底关；没送进去就在 catch 里关。
   // 处境代次（2026-11-04，用户 m01466）：见 maybeProactive 里的同一处注释。
-  // watcher 认的是会话不是这一轮，所以清的时候要带着自己挂上去时拿到的号。
+  // 清的时候要带着自己挂上去时拿到的号，别把别人后来挂的处境一起抹了。
   let gen = 0
   const releaseWake = holdWake()
   const watcher = watchTurnEnd(ctx, sessionId, () => { releaseWake(); void writeReport(); clearWakeSection(gen) })

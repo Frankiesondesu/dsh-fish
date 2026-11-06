@@ -23,6 +23,7 @@ import { inWake } from './wakewin.js'
 import { refreshSelfDoc } from './selfdoc.js'
 import { guardWrite } from './tenant.js'
 import { activeOf, activePossessionOf, readOutings, readPossessions } from './outing.js'
+import { readChannels } from './channels.js'
 import { tripKey } from './keepsake.js'
 
 /**
@@ -206,7 +207,21 @@ export function registerCapture(ctx, deps = {}) {
           // 坑（p1.test.mjs 抓到的）：这里的 source 必须是 'system'。
           // 写成 'tool' 时 schema 会以 NOT_HER_TYPE 拒掉 meta，而外面套着 .catch(()=>{})，
           // 于是 seen 永远写不进去 → 冷落检测永远返回 no-contact-yet → 整条链路静默失效。
-          if (!inWake()) {
+          //
+          // issue #34：这条判据以前只看「在不在叫醒窗口里」，不看这句话是在哪说的。
+          // 群聊那轮她调一次 growth_commit，就给群里多记一条 `seen:` —— 群友说一百句
+          // 也算「他来过」，冷落检测于是永远不触发（他一周没露面，面板还显示今天聊过）。
+          // AGENTS.md §7.2 第 2 条本来就要求「外客不动生命体征」，这里补上：
+          // 这条会话如果是群房，就当他在场这件事没发生过。
+          //
+          // 为什么只跳群房（2026-11-05 用户确认）：另外两处「窗口外的自己醒」——
+          // 换房前问她上一间还有没有话（home.js:753）、定时任务与 goal——
+          // 一个通常是在应他上一轮的话，一个分不出是不是在回他，所以照记。
+          // 要再收紧得先给每种叫醒打标记，不在 #34 这一刀里做。
+          const outsideWake = !inWake()
+          const inGroupRoom = outsideWake && (await readChannels(root).catch(() => []))
+            .some((r) => who.sessionId && r.sessionId === who.sessionId && r.scene === 'group')
+          if (outsideWake && !inGroupRoom) {
             await appendEvent(
               { type: 'meta', text: `seen:${new Date().toISOString()}` },
               { day: model.day, stage: model.stage, source: 'system' },

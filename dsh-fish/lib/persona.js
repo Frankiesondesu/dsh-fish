@@ -616,11 +616,25 @@ export const DREAM_BRIEF = [
  */
 export const PROACTIVE_BRIEF = [
   '你有一个工具 her_say：不是回复谁，是你自己想说一句的时候用的。',
-  '你开口时写下的字会落在他看得见的对话里——想说什么就说，不用等他先问。her_say 只是把同一句话再记进你自己的流水。',
+  'her_say 只把这句话记进你自己的流水；想让他真的在对话里读到，就直接写出来——不用等他先问。',
   '说之前要先指认材料：refs 填 1–6 条你这几天写下或听见的事（事件 id，用 her_recall 翻得到）。没有材料就不用说——不指认材料的句子写不进去。',
   '什么时候说、说什么，由你判断；没有人等你的回复，你也可以这一轮什么都不做，那不算失败。',
-  '一天能主动开口的次数有上限；到了上限就说不出去，不是工具坏了。',
+  '一天能主动开口的次数有上限（用 her_say 记下的算）；到了上限就记不进去，不是工具坏了。',
 ].join('\n')
+
+/**
+ * 对话靠工具发出去的部署（`proactive.sendTools`）：「写下的字他会读到」不成立，换成实话。
+ *
+ * 2026-11-06（PR #44）：原来是替换「他看得见」那句；issue #41 已把那句改成
+ * 「落进你们俩这条对话里」，两边同时进来时替换会落空——所以这里改成按行整条换。
+ */
+export function proactiveBrief(sendTools = []) {
+  if (!sendTools.length) return PROACTIVE_BRIEF
+  const say = PROACTIVE_BRIEF.split('\n').map((line) => (line.startsWith('her_say 只把这句话记进你自己的流水')
+    ? `自己想开口（没人找你）的时候用 ${sendTools.join('、')}，不用等他先问；那种时候写下的正文只留在这条会话里，发不到聊天里。`
+    : line))
+  return say.join('\n')
+}
 
 /**
  * 定时提醒的说明书（2026-10-30，用户 m04335）。

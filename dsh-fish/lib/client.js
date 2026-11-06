@@ -385,6 +385,10 @@ window.__ModuleLoader__.load({
       const [proactiveOn, setProactiveOn] = useState(false)
       const [proactiveMax, setProactiveMax] = useState(2)
       const [proactiveIdle, setProactiveIdle] = useState(6)
+      const [proactiveTools, setProactiveTools] = useState('')
+      const proactiveToolsTimer = useRef(null)
+      const [proactiveCompact, setProactiveCompact] = useState(true)
+      const [proactiveSeen, setProactiveSeen] = useState(false)
       // 2026-11-05（用户 m02634）：梦 / 主动性 / 兴趣 三个开关，默认全开。
       const [driveOn, setDriveOn] = useState(true)
       const [interestOn, setInterestOn] = useState(true)
@@ -603,6 +607,9 @@ window.__ModuleLoader__.load({
             setProactiveOn(pr.enabled === true)
             setProactiveMax(Number(pr.maxPerDay ?? 2))
             setProactiveIdle(Number(pr.minIdleHours ?? 6))
+            setProactiveTools(Array.isArray(pr.sendTools) ? pr.sendTools.join(', ') : '')
+            setProactiveCompact(pr.foldSilent !== false)
+            setProactiveSeen(pr.idleCountsSeen === true)
           }
           setDriveOn(s.config?.drive?.enabled !== false)
           setInterestOn(s.config?.interest?.enabled !== false)
@@ -1013,8 +1020,14 @@ window.__ModuleLoader__.load({
       const saveOwnerCard = async () => {
         setBusy('owner'); setOwNote('')
         try {
-          const body = { mid: owMid, nickname: owName }
+          // 2026-11-06（用户反馈）：这三格原来是「一律原样提交」，于是只粘 cookie、两格
+          // 没填（或先清空了）的人，点一次保存就把 mid / 昵称覆写成空串 —— 昵称一空，
+          // mentionPrefix 就返回空串，评论里再也 @ 不出来。现在只提交填了的格子。
+          const body = {}
+          if (owMid.trim()) body.mid = owMid.trim()
+          if (owName.trim()) body.nickname = owName.trim()
           if (owCookie.trim()) body.cookie = owCookie.trim()
+          if (!Object.keys(body).length) { setOwNote('三格都是空的，没东西可存。'); setBusy(''); return }
           const r = await jpost('/owner', body)
           setOwNote(r.note || (r.ok ? '存下了。' : '没存上。'))
           setOwCookie('')
@@ -2076,7 +2089,9 @@ window.__ModuleLoader__.load({
               : rowTip('立场', '还没开始', '要等四个阶段（信任 / 自主 / 主动 / 整合）都走完，立场才开始产生。'),
           rowTip('最近的称呼', s.name ? s.name : '还没想好', '她自己决定怎么称呼你。这个不是设置项，改不了。'),
           rowTip('冷落', s.absenceDays > 0 ? `${s.absenceDays} 天` : '没有', '你多久没说话了。超过门槛她会记下「你不在」。'),
-          rowTip('互动计数', `说 ${s.counts.utterance} · 改口 ${s.counts.revise} · 拒绝 ${s.counts.refusal} · 重聚 ${s.counts.reunion}`, '说=她写过几句自己的判断（含留话）；改口=按照规则推翻历史认知并指明改的是哪条；拒绝=她明确登记拒绝过什么；重聚=久别之后她自己写下的感受。'),
+          // issue #32：`counts.utterance` 含对话行（flags 带 uncommitted），把它们减掉之后
+          // 才是「她自己写下、不是答他的话」的句数；那些行单列成「聊天」。
+          rowTip('互动计数', `说 ${Math.max(0, (s.counts.utterance ?? 0) - (s.counts.chat ?? 0))} · 改口 ${s.counts.revise} · 拒绝 ${s.counts.refusal} · 重聚 ${s.counts.reunion}${s.counts.chat ? ` · 聊天 ${s.counts.chat}` : ''}`, '说=她写过几句自己的判断（含留话）；改口=按照规则推翻历史认知并指明改的是哪条；拒绝=她明确登记拒绝过什么；重聚=久别之后她自己写下的感受。聊天=对话里她回你的话，单列，不算进「说」。'),
           s.quality ? h('div', { style: { marginTop: '4px', marginBottom: '2px' } },
             h('div', {
               style: { display: 'flex', gap: '8px', alignItems: 'baseline', fontSize: '13px', marginBottom: '5px' },
@@ -2169,14 +2184,14 @@ window.__ModuleLoader__.load({
               hint: '超过这么多天没说话，她会记下「你不在」。' }))),
         // 主动说话（0.8.1 本机实验）：只有 .dev 下才出现。频率是上限，不是任务——
         // 开关开着也不代表她每天都会说，说不说由她自己判断（见 lib/proactive.js）。
-        // 主动搭话（0.8.1 起，0.9.0 公开）：只留三件跟「开口」直接有关的事。
+        // 主动搭话（0.8.1 起，0.9.0 公开）：只留跟「开口」直接有关的事。
         // 劲儿与兴趣是另一套东西，各自一张卡——混在一张卡里，用户分不清哪一项在管什么。
         group('主动搭话',
           '她可以自己找你说话，不用你先开口。这里调的是上限：开着也可能好几天不说，那是她的判断，不是坏了。',
           h('div', { className: 'grid2' },
             Toggle({ label: '允许她主动开口', on: proactiveOn,
               onChange: (v) => { setProactiveOn(v); patchProactive({ enabled: v }) },
-              hint: '关掉就完全没有这个功能。' }),
+              hint: '关掉：她不会自己开一轮来找你。her_say 这个工具还在，她想说时仍可以用，只是不再由系统替她开这一轮。' }),
             Sel({ label: '一天最多几次', value: proactiveMax,
               onChange: (v) => { setProactiveMax(v); patchProactive({ maxPerDay: Number(v) }) },
               options: [0, 1, 2, 3, 4, 5, 6],
@@ -2185,7 +2200,22 @@ window.__ModuleLoader__.load({
             Num({ label: '你多久没说话，她才可能开口', value: proactiveIdle,
               onChange: (v) => { setProactiveIdle(v); patchProactive({ minIdleHours: Number(v) }) },
               min: 1, max: 24, unit: '小时',
-              hint: '越久没说话，她越可能开口（有上限）。刚聊完不会马上又来找你。' }))),
+              hint: '越久没说话，她越可能开口（有上限）。刚聊完不会马上又来找你。' }),
+            Text({ label: '她靠哪些工具把话发出去', value: proactiveTools, wide: true,
+              placeholder: '工具名，逗号分隔；不填就只认正文',
+              // 打字时不逐键保存：停手 700ms 再存，和这一页别的自动保存一样
+              onChange: (v) => {
+                setProactiveTools(v)
+                clearTimeout(proactiveToolsTimer.current)
+                proactiveToolsTimer.current = setTimeout(() => patchProactive({ sendTools: v.split(/[,，\s]+/).filter(Boolean) }), 700)
+              },
+              hint: '她写的字不会被插件自动发出去、要调工具才发得出去时才填，并且要放进下面的插件能力白名单。填了之后只有工具调成功才算她开了口。' }),
+            Toggle({ label: '没开口的那一轮折起来', on: proactiveCompact,
+              onChange: (v) => { setProactiveCompact(v); patchProactive({ foldSilent: v }) },
+              hint: '省上下文。上下文很大、靠缓存省钱时可以关：改历史会让缓存失效。' }),
+            Toggle({ label: '你来过也算打断安静', on: proactiveSeen,
+              onChange: (v) => { setProactiveSeen(v); patchProactive({ idleCountsSeen: v }) },
+              hint: '你只从聊天软件找她、她又不写正文时才开，不然你刚聊完她也觉得安静了很久。代价是你在这台机器上和别的 agent 说话也算。' }))),
         // 主观能动性：不是「定时叫她说话」，而是她心里慢慢攒的一股劲。
         group('主观能动性',
           '她心里会慢慢攒一股想动的劲：越久没自己动过、桌上越有值得看的东西，攒得越快。攒够了才会自己醒一次——不按钟点，也不是每天必须。',
@@ -2195,7 +2225,7 @@ window.__ModuleLoader__.load({
               hint: '关掉：她不会自己开一轮，只在你叫她、或者日程到点时才醒。已经发生的事不受影响。' }))),
         // 兴趣与惦记：她醒来时桌上摆的那几样东西。
         group('兴趣',
-          '她醒来的时候，桌上会摆几样她自己的东西：问过还没答案的问题、翻到过的旧句子、你回没回她留的那句话、最近总说到的那件事。这些只给她看，不会变成待办。',
+          '她醒来的时候，桌上会摆几样她自己的东西：她反复问起过的事、翻到过的旧句子、你回没回她留的那句话、最近总说到的那件事。这些只给她看，不会变成待办。关掉之后连旧句子也不再摆，她只会按时被叫醒。',
           h('div', { className: 'grid2' },
             Toggle({ label: '醒来时把这些摆出来', on: interestOn,
               onChange: (v) => { setInterestOn(v); patchGroup('interest', { enabled: v }) },
@@ -2551,7 +2581,7 @@ window.__ModuleLoader__.load({
             Text({ label: '要 @ 的 B 站 uid', value: owMid, onChange: setOwMid, placeholder: '数字，比如 12345678', wide: true,
               hint: '就是 B 站个人主页地址里那串数字。' }),
             Text({ label: '要 @ 的 B 站昵称', value: owName, onChange: setOwName, placeholder: '评论里 @ 的就是这个名字', wide: true,
-              hint: '没填昵称就 @ 不出来——空的 @ 只是一串没人认领的字符。' }),
+              hint: '要跟 B 站上显示的一字不差（带空格也照填）。没填就 @ 不出来——空的 @ 只是一串没人认领的字符。' }),
             Toggle({ label: '发评论时在最前面 @ 你', on: atOwner, onChange: setAtOwner,
               hint: '关掉就不 @，评论会显得更像自言自语。' }))),
         group('B 站登录',
@@ -2579,7 +2609,7 @@ window.__ModuleLoader__.load({
                 qrNote ? h('span', { className: 'qrerr', style: { margin: 0 } }, qrNote) : null))
             : h('div', null,
               h('p', { className: 'hint', style: { margin: '0 0 8px' } },
-                'cookie 存好之后为隐私起见不再回显，输入框永远是空的。'),
+                'cookie 存好之后为隐私起见不再回显，输入框永远是空的——空着不代表没存上，上面那行「已存…」才是凭据。'),
               h('textarea', {
                 rows: 3,
                 value: owCookie,
@@ -2686,7 +2716,7 @@ window.__ModuleLoader__.load({
           '一个侧栏会话聊到几百轮，上下文必然撑爆——不是变慢，是每轮都为几十万字付费，最后直接失败。',
           h('div', { className: 'grid2' },
             Num({ label: '聊满多少轮换新会话', value: rotateAfter, onChange: setRotateAfter, min: 0, max: 500, unit: '轮',
-              hint: '请在不断的循环中，找到能引发本质变化的唯一解。0 = 永不换。上下文占满后会将当前已形成的核心认知和初始信息，作为提示词带到新会话。' }),
+              hint: '请在不断的循环中，找到能引发本质变化的唯一解。0 = 永不换——那条会话会一直聊到宿主上下文撑不住为止，之后这一轮会直接失败（不会自动换）。换的时候会把当前已形成的核心认知和初始信息，作为提示词带到新会话。' }),
             Num({ label: '单次上下文限制（身份文档多少字）', value: docBudget, onChange: setDocBudget, min: 600, max: 4000, step: 100, unit: '字',
               hint: '超了按照规则遗忘部分认知/经历；「初始人格」和四条禁令不会遗忘。根据经历不同，部分认知可能会变成永久记忆不再遗忘。' }))),
 
@@ -2733,7 +2763,9 @@ window.__ModuleLoader__.load({
                   mem.sections?.voiceLast
                     ? h('div', { className: 'dim' }, `　最近读到：「${mem.sections.voiceLast.text}」${mem.sections.voiceLast.echoed ? '（她认下了）' : ''}`)
                     : null,
-                  h('div', null, `· 记下的事：${mem.events ?? 0} 条 · 日记 ${mem.diaries ?? 0} 篇`),
+                  // issue #32：口径同面板标题那行——含她读到的别人说法与开局起点，不只她写的。
+                  h('div', { title: '她自己写的判断、留话、日记，加上她读到并记下的别人说法和开局那份起点；不含系统后台记账。' },
+                    `· 记下的事：${mem.events ?? 0} 条 · 日记 ${mem.diaries ?? 0} 篇`),
                   h('div', null, `· 这条会话：${mem.session?.rotateAfter > 0
                     ? `${mem.session?.turns ?? 0} / ${mem.session.rotateAfter} 轮，满了自动换新会话`
                     : '不自动换'}`),
@@ -4110,7 +4142,14 @@ window.__ModuleLoader__.load({
 
       return h('div', { className: 'dfish', ref: (el) => { topEl = el } },
         h('h2', null, '大肥鱼'),
-        h('p', { className: 'sub' },
+        h('p', {
+          className: 'sub',
+          // issue #32：这个数字（counts.total = countEvents().real）从来不只是「她写的」——
+          // 她读到的别人说法、开局那份起点、日记、答你的话都在里面。以前文案写「她记下
+          // N 条」，跟面板上「记下的事」一起被当成了「她写了 N 条」，于是永远对不上。
+          // 口径不改（改 real 的定义会动事件流语义与一堆派生数字），把话说清楚。
+          title: '她自己写的判断、留话、日记，加上她读到并记下的别人说法和开局那份起点；不含系统后台记账（另计）。',
+        },
           s ? `第 ${s.day} / ${s.growthDays} 天 · ${s.stageName} · 她记下 ${s.counts.total} 条${s.counts.meta ? `，另有 ${s.counts.meta} 条系统记录` : ''}` : '读取中…'),
         err ? h('pre', { className: 'err' }, err) : null,
         note ? h('pre', { className: 'ok' }, note) : null,

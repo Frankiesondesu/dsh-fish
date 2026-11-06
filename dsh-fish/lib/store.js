@@ -14,6 +14,7 @@
  * API 全部 async：原子写用「写 tmp → rename」，避免断电留半行。
  */
 
+import { randomBytes } from 'node:crypto'
 import { promises as fs } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { validateEvent, EVENT_SCHEMA_VERSION } from './schema.js'
@@ -89,7 +90,8 @@ const RENAME_RETRY = new Set(['EPERM', 'EACCES', 'EBUSY', 'ENOTEMPTY'])
 
 export async function writeAtomic(file, text, mode) {
   await ensureDir(dirname(file))
-  const tmp = `${file}.${process.pid}.${Date.now()}.tmp`
+  // 随机后缀：同一进程同一毫秒的两次写不能共用一个临时文件，否则内容会交错，写出坏 JSON
+  const tmp = `${file}.${process.pid}.${Date.now()}.${randomBytes(4).toString('hex')}.tmp`
   await fs.writeFile(tmp, text, 'utf8')
   if (mode) await fs.chmod(tmp, mode).catch(() => {})
   for (let i = 0; i < RENAME_WAIT.length; i++) {
@@ -107,9 +109,19 @@ export async function writeAtomic(file, text, mode) {
   }
 }
 
+// issue #38：手改过的 JSON 常带 UTF-8 BOM（PowerShell 5.1 的
+// `Set-Content -Encoding UTF8`、记事本「带 BOM 的 UTF-8」都会写）。
+// `JSON.parse` 见到 BOM 直接抛 SyntaxError，于是**内容完好的文件**被下面的
+// 坏文件分支改名成 `.corrupt.<时间>`，config.json 退回全默认、owner.json 变 null、
+// home.json 直接新建一条会话——用户以为自己的改动丢了。
+// 只剥开头这一个字符；不动其余内容，也不改行号之外的任何字节。
+function stripBom(text) {
+  return typeof text === 'string' && text.charCodeAt(0) === 0xfeff ? text.slice(1) : text
+}
+
 export async function readJson(file, fallback = null) {
   try {
-    return JSON.parse(await fs.readFile(file, 'utf8'))
+    return JSON.parse(stripBom(await fs.readFile(file, 'utf8')))
   } catch (err) {
     if (err.code === 'ENOENT') return fallback
     // 坏文件不静默吞：留证据，返回 fallback 让上层能用

@@ -25,6 +25,7 @@ import { defineTool } from './tool.js'
 import { guardWrite } from './tenant.js'
 import { logLine } from './log.js'
 import { tsMs, HER_TYPES } from './schema.js'
+import { deriveSelf } from './derive.js'
 
 /** 一天的默认上限。 */
 export const PROACTIVE_DEFAULTS = Object.freeze({
@@ -69,7 +70,7 @@ export const TOOL_ASK_NOTE = '（如果你想到要做什么、但手上没有�
 /**
  * 读配置并夹紧。老配置没有 proactive 这一组，用默认值。
  * @param {object} config
- * @returns {{enabled:boolean,maxPerDay:number,minIdleHours:number,baseChance:number,gainPerHour:number,maxChance:number,cooldownHours:number}}
+ * @returns {{enabled:boolean,maxPerDay:number,minIdleHours:number,baseChance:number,gainPerHour:number,maxChance:number,cooldownHours:number,sendTools:string[],foldSilent:boolean,idleCountsSeen:boolean}}
  */
 export function proactiveConfig(config = {}) {
   const raw = config?.proactive ?? {}
@@ -88,6 +89,10 @@ export function proactiveConfig(config = {}) {
     cooldownHours: num(raw.cooldownHours, PROACTIVE_DEFAULTS.cooldownHours, 0, 240),
     // fork.54：免打扰时段（他不想被打扰的时间，跟"她醒着"的 window 是两回事）。
     dnd: normalizeDnd(raw.dnd),
+    // 0.9.1（PR #44 / issue #32）：工具说话、静默折叠、seen 计入安静
+    sendTools: Array.isArray(raw.sendTools) ? raw.sendTools.map((x) => String(x ?? '').trim()).filter(Boolean) : [],
+    foldSilent: raw.foldSilent !== false,
+    idleCountsSeen: raw.idleCountsSeen === true,
   }
 }
 
@@ -158,6 +163,26 @@ export function turnsToday(events = [], dk = '') {
   return n
 }
 
+/**
+ * 今天已经用 her_say 说过几次（meta `proactive-say:<dk>:<why>`）。
+ *
+ * 2026-11-06（issue #41）：工具描述一直写着「一天最多几次」，但 `writeSay` 读了配置
+ * 只为了别的用途，从来不数——`maxPerDay` 设 0 也能连着写 8 次。这里按她自己记下的
+ * 那条记账数，判据只有同一份 `maxPerDay`，不另设数字。
+ *
+ * 只数 `proactive-say:`，不数 `proactive-turn:`：后者是「空手回合开过几次」，
+ * 前者是「她真的开口了几次」。两件事分开记（见上面 SILENT_MARK 那段）。
+ */
+export function saysToday(events = [], dk = '') {
+  if (!dk) return 0
+  let n = 0
+  for (const e of events) {
+    if (e?.type !== 'meta') continue
+    if (String(e.text ?? '').startsWith(`proactive-say:${dk}:`)) n += 1
+  }
+  return n
+}
+
 /** 上一次空手回合是什么时候（毫秒）。 */
 export function lastTurnAt(events = []) {
   let at = 0
@@ -219,11 +244,15 @@ export function countsForIdle(e) {
   return SPOKE_TYPES.includes(String(e?.type ?? ''))
 }
 
-/** 距离上一次**真的有人说话**，过了多少小时。没有记录时返回 Infinity。 */
-export function idleHoursOf(events = [], now = Date.now()) {
+/**
+ * 距离上一次**真的有人说话**，过了多少小时。没有记录时返回 Infinity。
+ * countSeen：连 `seen:` 也算（`proactive.idleCountsSeen`），给对话不进事件流的部署用。
+ */
+export function idleHoursOf(events = [], now = Date.now(), { countSeen = false } = {}) {
   let last = 0
   for (const e of events) {
-    if (!countsForIdle(e)) continue
+    const seen = countSeen && e?.type === 'meta' && String(e.text ?? '').startsWith('seen:')
+    if (!seen && !countsForIdle(e)) continue
     const ts = tsMs(e)
     if (Number.isFinite(ts) && ts > last) last = ts
   }
@@ -336,7 +365,7 @@ function growthLevers(model, events = [], now = Date.now(), cfg = {}) {
 export function proactiveState({ config = {}, events = [], now = Date.now(), away = null, rested = false, model = null } = {}) {
   const cfg = proactiveConfig(config)
   const dk = dateKey(new Date(now))
-  const idleHours = idleHoursOf(events, now)
+  const idleHours = idleHoursOf(events, now, { countSeen: cfg.idleCountsSeen })
   const base = { chance: 0, idleHours, dk }
   if (!cfg.enabled) return { ...base, ok: false, why: '主动说话是关着的' }
   // 只在醒着的时间窗里：凌晨三点收到一句「我想你了」不是她自主，是她打乱了作息。
@@ -408,14 +437,14 @@ export function looseEnds(events = [], { now = Date.now() } = {}) {
  * 空手回合的处境正文（走 system prompt 段，不进对话）。
  * 只写事实与许可，不写"你应该"。
  */
-export function proactiveSection({ now = Date.now(), state = {}, material = [], loose = [] } = {}) {
+export function proactiveSection({ now = Date.now(), state = {}, material = [], loose = [], sendTools = [], countSeen = false } = {}) {
   const at = new Date(now)
   const hh = String(at.getHours()).padStart(2, '0')
   const mm = String(at.getMinutes()).padStart(2, '0')
   const idle = Number.isFinite(state.idleHours) ? `${state.idleHours.toFixed(1)} 小时` : '很久'
   const lines = [
     '（现在没有人跟你说话。这一轮不是谁找你，也不是日程安排的醒；是你自己醒着，想不想开口由你。）',
-    `现在是 ${at.getFullYear()}-${String(at.getMonth() + 1).padStart(2, '0')}-${String(at.getDate()).padStart(2, '0')} ${hh}:${mm}；距离上一次留下记录已经 ${idle}。`,
+    `现在是 ${at.getFullYear()}-${String(at.getMonth() + 1).padStart(2, '0')}-${String(at.getDate()).padStart(2, '0')} ${hh}:${mm}；距离上一次${countSeen ? '他来或你留下记录' : '留下记录'}已经 ${idle}。`,
   ]
   if (material.length) {
     lines.push('最近这几天你写下/听见的（要引用就指回 id，别改写事实）：')
@@ -428,14 +457,13 @@ export function proactiveSection({ now = Date.now(), state = {}, material = [], 
     lines.push('还有几件事悬着：')
     for (const l of loose) lines.push(`- [${l.id}] ${l.text}`)
   }
-  // 2026-11-02 真机（19:40 那次人工触发）：原来这里写的是「他看得见」+「**也可以**再用
-  // her_say 记进流水」。她按字面理解，就没记——账本里没有 `（她主动说）`，QQ 那边什么
-  // 都收不到。问题不在她：那句话在他在手机上的时候本来就是假的，只有这个窗口看得见。
-  // 改成把两个去处如实说清楚，记不记仍然由她定（这里不写「你应该」）。
-  // 0.9.0 把结尾换成「什么都别写：不要写任何字……」——「什么都不做」在文本界面上
-  // 不成立，她会写一句元话语交代自己没说。两边的教训都留着。
-  lines.push(
-    '想说什么就说，不用等他先问——这一轮你写下的字会落在你们俩的对话里，他回到这个窗口就看得见。' +
+  // fork.19（2026-11-02 真机）：原来只写「也可以再用 her_say」，她按字面理解就没记，
+  // QQ 那边什么都收不到。两个去处必须如实说清——只写在对话里的，他不在这个窗口就看不到。
+  // 0.9.1（issue #41）上游从另一头修的同一个谎：「他看得见」不保证成立，只说能保证的部分。
+  // 0.9.1（PR #44）：配了 sendTools 的部署正文发不出去，只有调那件工具才算开口。
+  if (sendTools.length > 0) lines.push(`想说什么就用 ${sendTools.join('、')}，不用等他先问。这一轮写下的正文只留在这条会话里，发不到聊天里。不想说，就什么都别写：不要写任何字，也不要解释为什么不说——这一轮没有回复也算正常。`)
+  else lines.push(
+    '想说什么就说，不用等他先问——这一轮你写下的字会落进你们俩这条对话里，他回到这个窗口就看得见。' +
       '但对话只在窗口里：他不在的时候（多半在手机上），能到他眼前的只有你用 her_say 记进流水的话。' +
       '想让他这会儿就收到，就记一笔（refs 指回上面真实发生的事，1–6 条 id）；只想写在这儿，也行。' +
       '不想说，就什么都别写：不要写任何字，也不要解释为什么不说——这一轮没有回复也算正常。',
@@ -472,18 +500,32 @@ export async function writeSay(root, { text = '', refs = [], sessionId = '', why
   if (problem) return { ok: false, note: problem }
 
   const { config } = await loadConfig(root)
+  const cfg = proactiveConfig(config)
   const dk = dateKey(new Date(now))
+  // 2026-11-06（issue #41）：说明书与设置页都写着「一天最多几次」、到了上限就说不出去，
+  // 但这里原来读了 config 根本没看——maxPerDay 设 0 也能一句接一句地写。
+  // 现在按她自己记下的 `proactive-say:` 数到位就停。开关（enabled）只管「要不要自己开一轮」，
+  // 不管这个工具本身：工具留着，她想用还是能用，这一点与 README 的说明一致。
+  const said = saysToday(events, dk)
+  if (said >= cfg.maxPerDay) {
+    return { ok: false, note: `今天已经主动开口 ${said} 次，到上限了。明天再说；这不是工具坏了。` }
+  }
+  // day/stage 必须是真实的成长坐标（2026-11-06，issue #41）：原来写死 {day:1, stage:1}，
+  // 而 writeDream 用的是 deriveSelf 的 model.day/model.stage。写死的那条会被
+  // consistency() 当成阶段 1 的旧话去处，跟真正说过的话配不上对。
+  const model = deriveSelf(events, { growthDays: config.growthDays })
+  const stamp = { day: model.day, stage: model.stage, source: 'tool' }
   // appendEvent 返回的就是写进去的那条事件（不是 {ok, event}，0.7.4 那次参数错位就是栽在这），
   // 所以判空只能判返回值本身。
   const stored = await appendEvent(
     { type: 'utterance', text: `（她主动说）${body}`, refs: list, ...(sessionId ? { sessionId } : {}) },
-    { day: 1, stage: 1, source: 'tool' },
+    stamp,
     root,
   ).catch(() => null)
   if (!stored?.id) return { ok: false, note: '这条没记下。' }
   await appendEvent(
     { type: 'meta', text: `proactive-say:${dk}:${why || 'free'}` },
-    { day: 1, stage: 1, source: 'system' },
+    { day: model.day, stage: model.stage, source: 'system' },
     root,
   ).catch(() => {})
   return { ok: true, id: stored.id, note: '记下了。' }
@@ -503,6 +545,7 @@ export function registerProactive(ctx, deps = {}) {
         '你自己想开口的时候用这个：不是回复谁，是你主动说一句。',
         '必须指回真实发生过的事（refs 填 1–6 条你那几天写下/听见的事件 id）；',
         '不指认材料就等于编，写不进去。一天最多几次，说不说都可以。',
+        '它只把这句话记进你自己的流水：要让他在对话里看见，得你这一轮直接写出来。',
       ].join(''),
       parameters: toJsonSchema({
         type: 'object',
@@ -529,11 +572,17 @@ export function registerProactive(ctx, deps = {}) {
           },
           required: ['ok', 'note'],
         }),
+        // recordOnly 只给 render 看（配了发送工具时回执换一句）
         // 2026-10-31 真机（10-30 那两轮）：这里原来直接返回字符串，宿主按 ContentBlock
         // 数组处理，`content.some` 当场抛 TypeError。她看到的工具结果是「Error: content.some
         // is not a function」——写入其实成功了，她却以为工具坏了，重试一次后放弃，一个字没说。
         // 签名同样是 (args, out)，跟 lib/keep.js:97 那些一样。
-        render: (_args, out) => [{ type: 'text', text: out.ok ? '[说出去了]' : `[没记下：${out.note}]` }],
+        // 2026-11-06（issue #41）：原来写 `[说出去了]`。可这里只往她自己的流水里落一条，
+        // 用户此刻在对话里看不看得见，取决于她这一轮有没有直接写出正文——不是这个工具决定的。
+        // 回执只说它真做到的那件事。
+        // 2026-11-06（PR #44）：配了 sendTools 的部署里她必须靠工具发话，所以记下的这句确实
+        // 没有发给任何人，回执要说清，否则她会以为用户已经看到了。
+        render: (_args, out) => [{ type: 'text', text: out.ok ? (out.recordOnly === true ? '[记下了，没有发给任何人]' : '[记下了]') : `[没记下：${out.note}]` }],
       },
       async execute(args = {}, exec) {
         const who = guardWrite(deps.tenant, exec, 'her_say')
@@ -544,7 +593,9 @@ export function registerProactive(ctx, deps = {}) {
         try {
           const r = await writeSay(root, { text: args.text, refs: args.refs, why: args.why, sessionId: sid })
           if (!r.ok) logLine('info', ['her_say：没记下', r.note], root)
-          return { ok: r.ok, id: r.id ?? '', note: r.note }
+          // 配了发送工具的部署里，这一句确实只进了流水，回执得照实说
+          const { config } = await loadConfig(root).catch(() => ({ config: {} }))
+          return { ok: r.ok, id: r.id ?? '', note: r.note, ...(proactiveConfig(config).sendTools.length > 0 ? { recordOnly: true } : {}) }
         } catch (e) {
           logLine('warn', ['her_say：', e?.message ?? String(e)], root)
           return { ok: false, id: '', note: '这条没记下。' }
