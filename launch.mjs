@@ -1,10 +1,14 @@
 /**
- * launch.mjs —— 一键把这条链路上的四样东西拉起来（2026-11-02）
+ * launch.mjs —— 一键把这条链路拉起来（2026-11-02；2026-11-06 加语音三路）
  *
  *   1. DSH（她的宿主，必须开着才有"她"）
  *   2. LuckyLillia（QQ 个人号 + PMHQ + LLBot，出 OneBot）
- *   3. bridge（QQ ↔ 她 的桥，监听 6199）
- *   4. viewer（人格/行动查看器，7788）
+ *   3. 语音三路（本地 HTTP 服务，python；脚本用相对路径，启动必须带 cwd）
+ *        3a. smart-turn   话轮端点    18766
+ *        3b. CosyVoice2   对话 TTS    18767
+ *        3c. full-duplex  全双工接口  18768（判话轮会回打 18766，故排在它后面）
+ *   4. bridge（QQ ↔ 她 的桥，监听 6199）
+ *   5. viewer（人格/行动查看器，7788；「本机状态」会探活上面三路）
  *
  * 每一样都先看有没有在跑，已经在跑就跳过 —— 重复启动会抢端口，比不启动更麻烦。
  *
@@ -29,6 +33,30 @@ const LL_EXE = join(HERE, 'runtime', 'LL', 'LuckyLillia.exe')
 const BRIDGE = join(HERE, 'bridge', 'bridge.mjs')
 const VIEWER = join(HERE, 'viewer', 'viewer.mjs')
 const VIEWER_URL = 'http://127.0.0.1:7788'
+
+// 语音三路（2026-11-06）：都在 fish 的同级目录 D:\Code\<同级目录> 下。
+// 启动命令是「venv 里的 python + 相对路径的脚本」，所以 detach 必须给 cwd。
+// 注意 venv/Scripts/python.exe 是 launcher：它还会拉起真正的 uv python 子进程，
+// 真正听端口、装模型的是那个子进程（关的时候要连树一起收，见 shutdown.mjs）。
+const PLUG = dirname(HERE)
+const PY_TURN = join(PLUG, 'turn-taking', 'venv', 'Scripts', 'python.exe')
+const PY_TTS = join(PLUG, 'dialogue-tts', 'venv', 'Scripts', 'python.exe')
+// duplex.py 只用标准库，不挑解释器；复用已存在的 venv，别写死 WorkBuddy 内置
+// python（那个路径带版本号，升级就失效）。最后一条是兜底。
+const PY_STDLIB = [
+  PY_TURN,
+  PY_TTS,
+  'C:\\Users\\<用户名>\\.workbuddy\\binaries\\python\\versions\\3.13.12\\python.exe',
+].find(existsSync)
+
+const VOICE = [
+  { key: '话轮 18766', port: 18766, exe: PY_TURN,
+    args: ['server.py', '--port', '18766'], cwd: join(PLUG, 'turn-taking') },
+  { key: 'TTS 18767', port: 18767, exe: PY_TTS,
+    args: ['server.py', '--port', '18767'], cwd: join(PLUG, 'dialogue-tts') },
+  { key: '全双工 18768', port: 18768, exe: PY_STDLIB,
+    args: ['duplex.py', '--port', '18768'], cwd: join(PLUG, 'full-duplex') },
+]
 
 // ---------------------------------------------------------------- 小工具
 
@@ -64,7 +92,7 @@ function portOpen(port) {
 }
 
 /** 起一个脱离本窗口的进程：关掉这个黑框它也不会跟着死 */
-function detach(exe, args, label, { cleanElectronEnv = false, cwd } = {}) {
+function detach(exe, args, label, { cleanElectronEnv = false, cwd, hide = false } = {}) {
   // 2026-11-02：Electron 程序（DSH）在带 ELECTRON_RUN_AS_NODE=1 的环境里会
   // **降级成纯 Node** 跑：无脚本就立刻退出（退出码 0）、给 Chromium 参数就报
   // "bad option"。从 WorkBuddy 的终端里继承来的环境正好带这个变量，所以
@@ -77,7 +105,8 @@ function detach(exe, args, label, { cleanElectronEnv = false, cwd } = {}) {
     delete env.ELECTRON_RUN_AS_NODE
     delete env.NODE_OPTIONS
   }
-  const p = spawn(exe, args, { detached: true, stdio: 'ignore', windowsHide: false, env, ...(cwd ? { cwd } : {}) })
+  // hide：语音三路是纯后台 HTTP 服务，stdio 已经丢了，没必要再弹三个黑框。
+  const p = spawn(exe, args, { detached: true, stdio: 'ignore', windowsHide: hide, env, ...(cwd ? { cwd } : {}) })
   p.unref()
   out(`  ↑ 已启动 ${label}（PID ${p.pid}）`)
   return p
@@ -159,7 +188,31 @@ async function main() {
     report.push(['LuckyLillia', '找不到可执行文件'])
   }
 
-  // 3) 桥
+  // 3) 语音三路 —— 先起：桥会用到话轮，查看器「本机状态」会探活它们
+  for (const s of VOICE) {
+    if (await portOpen(s.port)) {
+      out(`  ✅ ${s.key} 已经在听`)
+      report.push([s.key, '运行中'])
+      continue
+    }
+    const script = join(s.cwd, s.args[0])
+    if (!s.exe || !existsSync(s.exe) || !existsSync(script)) {
+      const miss = !s.exe || !existsSync(s.exe) ? (s.exe ?? 'python 解释器') : script
+      out(`  ❌ ${s.key} 缺文件：${miss}`)
+      report.push([s.key, '缺文件，已跳过'])
+      continue
+    }
+    if (CHECK_ONLY) {
+      out(`  ❌ ${s.key} 没开`)
+      report.push([s.key, '未启动'])
+      continue
+    }
+    out(`  … ${s.key} 没开，正在拉起${s.port === 18767 ? '（模型加载要十几秒）' : ''}`)
+    detach(s.exe, s.args, s.key, { cwd: s.cwd, hide: true })
+    report.push([s.key, '已启动'])
+  }
+
+  // 4) 桥
   if (await portOpen(6199)) {
     out('  ✅ 桥已经在听 6199')
     report.push(['桥', '运行中（6199）'])
@@ -172,7 +225,7 @@ async function main() {
     report.push(['桥', '已启动（6199）'])
   }
 
-  // 4) 查看器
+  // 5) 查看器
   if (await portOpen(7788)) {
     out('  ✅ 查看器已经在跑')
     report.push(['查看器', '运行中（7788）'])
@@ -205,6 +258,7 @@ async function main() {
   for (const [k, v] of report) out(`  ${k.padEnd(12, ' ')} ${v}`)
   out('')
   out('  查看器    ' + VIEWER_URL)
+  out('  语音三路  18766 话轮 / 18767 TTS / 18768 全双工（查看器「本机状态」可探活）')
   out('  QQ 那条   QQ → 阿岸；桥连上后日志在 bridge\\bridge.log')
   out('')
   out('  关掉：双击 一键关闭.cmd（或 node shutdown.mjs --check 先看清单）')

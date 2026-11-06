@@ -7,8 +7,9 @@
  *   1. 桥        —— 先断 QQ 那条线，免得它还在推话/等回话时下游已经没了
  *   2. 查看器    —— 只读，随时可关
  *   3. ASR       —— 本地听写服务，先请它自己退出，不行再杀
- *   4. LuckyLillia —— QQ 客户端，杀进程树（llbot / PMHQ 都是它的子进程）
- *   5. DSH       —— 她的宿主，最后关：关掉就等于她这一觉睡下去了
+ *   4. 语音三路  —— 18766 话轮 / 18767 TTS / 18768 全双工，连进程树一起收
+ *   5. LuckyLillia —— QQ 客户端，杀进程树（llbot / PMHQ 都是它的子进程）
+ *   6. DSH       —— 她的宿主，最后关：关掉就等于她这一觉睡下去了
  *
  * 每个目标先**好好请它退**（taskkill 不带 /F），几秒还没走再强杀。
  * DSH 是 Electron，硬杀容易留一个半死的托盘图标。
@@ -18,6 +19,7 @@
  *   node shutdown.mjs --yes    不问，直接关
  *   node shutdown.mjs --check  只列清单，什么都不关
  *   node shutdown.mjs 桥       只关这一个（改完桥想单独重启时用）
+ *                              也能填：查看器 / ASR / 话轮 / TTS / 全双工 / LuckyLillia / DSH
  */
 
 import { execFileSync } from 'node:child_process'
@@ -154,6 +156,34 @@ async function collect() {
     return [pid]
   }
 
+  /**
+   * 语音三路的识别（2026-11-06）。比桥/查看器麻烦，两个坑：
+   *  ① 命令行里脚本是相对路径（"server.py --port 18767"），byPath 认不到；
+   *  ② venv 的 python.exe 是 **launcher**，会再拉起真正的 uv python 子进程，
+   *     真正 LISTENING、装着 2.8G 模型的是那个子进程（实测 2026-11-06）。
+   *     只杀父进程端口不会放掉，只杀子进程父进程变孤儿。
+   * 所以按「独占端口参数」把父子一起收齐，交给 tree 连树带走。
+   */
+  const voicePids = (port) => {
+    const tag = `--port ${port}`
+    const pids = new Set()
+    for (const p of procs) {
+      if (!/python(w)?(\.exe)?$/i.test(p.name)) continue
+      const cmd = norm(p.cmd)
+      if (!cmd.includes(tag) || !/server\.py|duplex\.py/.test(cmd)) continue
+      pids.add(p.pid)
+    }
+    // 端口兜底：命令行读不到时用。占端口的必须同样带这个端口参数，
+    // 否则只报告不动手 —— 端口被别人的服务占着时，不去杀无辜程序。
+    const lp = portPid(port)
+    if (lp && !pids.has(lp)) {
+      const p = byPid.get(lp)
+      if (p && /python(w)?(\.exe)?$/i.test(p.name) && norm(p.cmd).includes(tag)) pids.add(lp)
+      else notes.push(`端口 ${port} 被 ${p ? `${p.name}(${lp})` : `PID ${lp}`} 占着，命令行不像本项目服务，没动`)
+    }
+    return [...pids]
+  }
+
   // 1) 桥
   const bridge = new Set(byPath(SELF.bridge).map((p) => p.pid))
   for (const pid of byPort(6199, /node(\.exe)?$/i, '桥')) bridge.add(pid)
@@ -179,7 +209,24 @@ async function collect() {
     http: 'http://127.0.0.1:18765/shutdown',
   })
 
-  // 4) LuckyLillia / 5) DSH：都是唯一命名的桌面程序，按进程名认。
+  // 4) 语音三路：18766 话轮 / 18767 TTS / 18768 全双工
+  //    tree: true 是必须的 —— venv launcher 和真正干活的 uv 子进程是一对，
+  //    只收一个就会留下占着端口（和显存）的半截服务。
+  for (const [key, port, note] of [
+    ['话轮', 18766, 'smart-turn 端点检测'],
+    ['TTS', 18767, 'CosyVoice2 对话 TTS'],
+    ['全双工', 18768, '全双工接口状态机'],
+  ]) {
+    targets.push({
+      key,
+      pids: voicePids(port),
+      note: `${note}（${port}）`,
+      why: `命令行带 --port ${port} 的 python`,
+      tree: true,
+    })
+  }
+
+  // 5) LuckyLillia / 6) DSH：都是唯一命名的桌面程序，按进程名认。
   //    LuckyLillia 额外要求路径在本仓库 runtime/LL 下——万一别处装了同名程序不会误杀。
   //    Electron（DSH）是一串同名进程，只杀**根**那个（父进程不是自己人），带 /T 一次带走全部。
   const rootsOf = (pred) => {
@@ -211,8 +258,10 @@ async function collect() {
   const targeted = new Set(targets.flatMap((t) => t.pids))
   const orphans = procs.filter(
     (p) =>
-      /node(\.exe)?$/i.test(p.name) &&
-      (norm(p.cmd).includes(SELF.bridge) || norm(p.cmd).includes(SELF.viewer)) &&
+      ((/node(\.exe)?$/i.test(p.name) &&
+        (norm(p.cmd).includes(SELF.bridge) || norm(p.cmd).includes(SELF.viewer))) ||
+        // 语音三路被杀掉父进程后可能留下 python 孤儿（18765 归 ASR 自己管，不碰）
+        (/python(w)?(\.exe)?$/i.test(p.name) && /--port 1876[678]/.test(norm(p.cmd)))) &&
       p.pid !== process.pid &&
       !byPid.has(p.ppid) &&
       !targeted.has(p.pid),
@@ -376,6 +425,9 @@ async function main() {
     [6199, '桥'],
     [7788, '查看器'],
     [18765, 'ASR'],
+    [18766, '话轮'],
+    [18767, 'TTS'],
+    [18768, '全双工'],
   ]
   for (const [port, name] of ports) {
     // 只关一个时，别的还开着是应该的——报出来只会让人以为没关干净
