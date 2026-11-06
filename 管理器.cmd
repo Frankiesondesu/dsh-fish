@@ -1,6 +1,6 @@
 @echo off
 chcp 65001 >nul
 pushd "%~dp0"
-title 她 · 管理器
+title Fish Manager
 node manager\server.mjs
 if errorlevel 1 pause
