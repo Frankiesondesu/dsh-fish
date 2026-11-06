@@ -39,6 +39,8 @@ export const NOTES_MAX = 200
 export const NOTE_TEXT_MAX = 200
 /** 醒来那一段最多列几张，剩下的只报数。 */
 export const NOTE_SHOW_MAX = 5
+// fork.57：循环纪念日过了这 many 天就算这年过完，等明年（不是欠账，不挂「晚了 N 天」）。
+const YEARLY_GRACE_DAYS = 3
 
 export function notesPath(root = rootDir()) {
   return join(root, NOTES_FILE)
@@ -71,6 +73,8 @@ export function normalizeNote(raw) {
     due: isDue(raw.due) ? String(raw.due) : '',
     created: String(raw.created ?? '') || new Date().toISOString(),
     status,
+    // fork.57：每年这一天都要算数（生日/纪念日）。只在有日子时有意义。
+    yearly: raw.yearly === true,
     reason: raw.reason == null ? null : String(raw.reason).slice(0, 200),
     closedAt: raw.closedAt == null ? null : String(raw.closedAt),
   }
@@ -155,6 +159,15 @@ export function renderNotes(notes, now = new Date()) {
   for (const n of notes ?? []) {
     if (!n || n.status !== 'open') continue
     if (!isDue(n.due)) continue
+    if (n.yearly) {
+      // fork.57：循环纪念日不是欠账——每年那天上桌（「就是今天」），过后三天
+      // 还提一句（「刚过去」），然后等明年。没有「晚了 158 天」这种事。
+      const eff = `${today.slice(0, 4)}-${n.due.slice(5, 10)}`
+      const lateY = daysBetween(eff, today)
+      if (lateY < 0 || lateY > YEARLY_GRACE_DAYS) continue
+      due.push({ ...n, late: lateY })
+      continue
+    }
     const late = daysBetween(n.due, today)
     if (late < 0) continue // 还没到日子：不到期不上桌
     due.push({ ...n, late })
@@ -180,7 +193,7 @@ export function renderNotes(notes, now = new Date()) {
  * 写一张纸条。永不抛（失败只回 note）。
  * @returns {Promise<{ok:boolean, id:string, note:string}>}
  */
-export async function addNote(root, { text, due } = {}) {
+export async function addNote(root, { text, due, yearly } = {}) {
   const body = String(text ?? '').replace(/\s+/g, ' ').trim()
   if (!body) return { ok: false, id: '', note: '空白的，没记。' }
   if (body.length > NOTE_TEXT_MAX) {
@@ -189,6 +202,10 @@ export async function addNote(root, { text, due } = {}) {
   const day = String(due ?? '').trim()
   if (day && !isDue(day)) {
     return { ok: false, id: '', note: '日子要写成 2026-11-05 这样，或者干脆不写。' }
+  }
+  const everyYear = yearly === true
+  if (everyYear && !day) {
+    return { ok: false, id: '', note: '每年都要算数的纸条得给日子（它记的是哪一天）。' }
   }
 
   try {
@@ -200,6 +217,7 @@ export async function addNote(root, { text, due } = {}) {
       id: newNoteId(),
       text: body,
       due: day,
+      yearly: everyYear,
       created: new Date().toISOString(),
       status: 'open',
     })
@@ -270,6 +288,10 @@ export function registerNote(ctx, deps = {}) {
           type: 'string',
           description: '哪天该做，写成 2026-11-05。可以不给——不给就是挂着，不算日子。',
         },
+        yearly: {
+          type: 'boolean',
+          description: '每年这一天都要算数（生日、纪念日这种）就给 true——那天它会重新上桌。给 true 的话日子必填。',
+        },
         id: { type: 'string', description: '要划掉的那张纸条的 id。手里没有就不用给，给 text 就行。' },
         status: { type: 'string', enum: ['done'], description: '划掉的时候给 done。' },
       }),
@@ -293,7 +315,7 @@ export function registerNote(ctx, deps = {}) {
           const r = await closeNote(root, { id: args?.id, text: args?.text })
           return { ok: r.ok, id: r.id, note: r.note }
         }
-        const r = await addNote(root, { text: args?.text, due: args?.due })
+        const r = await addNote(root, { text: args?.text, due: args?.due, yearly: args?.yearly === true })
         return { ok: r.ok, id: r.id, note: r.note }
       },
     }),

@@ -432,3 +432,35 @@ test('说明书和工具描述都告诉她怎么划掉，不再叫她报看不�
     assert.match(def.parameters.properties.text.description, /当时记的那句话/, '参数说明不能再说划掉时不用给')
   })
 })
+
+// ---- fork.57：循环纪念日（yearly）----
+
+test('yearly：到日子那天上桌（就是今天），过后三天内还挂着，第四天等明年', () => {
+  const now = new Date(2026, 10, 6, 8, 0)  // 2026-11-06
+  const mk = (mmdd) => normalizeNote({ id: 'n1', text: '她的生日', due: `2026-${mmdd}`, yearly: true, status: 'open' })
+  assert.match(renderNotes([mk('11-06')], now), /11-06 她的生日，就是今天。/)
+  assert.match(renderNotes([mk('11-04')], now), /11-04 她的生日，晚了二天。/)
+  assert.match(renderNotes([mk('11-03')], now), /11-03 她的生日，晚了三天。/)
+  assert.equal(renderNotes([mk('11-02')], now), '', '过了宽限期，这年就算过完')
+  assert.equal(renderNotes([mk('12-06')], now), '', '今年还没到，不上桌')
+})
+
+test('yearly：跨了年也对——due 存的是哪年不重要，看月日', () => {
+  const now = new Date(2026, 10, 6, 8, 0)
+  const old = normalizeNote({ id: 'n2', text: '认识一周年', due: '2025-11-06', yearly: true, status: 'open' })
+  assert.match(renderNotes([old], now), /就是今天。/)
+})
+
+test('yearly：普通纸条的过期逻辑一点没动；addNote 的 yearly 必须带日子', async () => {
+  const now = new Date(2026, 10, 6, 8, 0)
+  const plain = normalizeNote({ id: 'n3', text: '交作业', due: '2026-11-01', status: 'open' })
+  assert.match(renderNotes([plain], now), /晚了五天。/, '普通纸条没有宽限期')
+  await withRoot(async (root) => {
+    const noDue = await addNote(root, { text: '妈妈的生日', yearly: true })
+    assert.equal(noDue.ok, false)
+    const okOne = await addNote(root, { text: '妈妈的生日', due: '2027-03-08', yearly: true })
+    assert.equal(okOne.ok, true)
+    const saved = JSON.parse(await readFile(notesPath(root), 'utf8'))
+    assert.equal(saved.find((n) => n.id === okOne.id).yearly, true)
+  })
+})
