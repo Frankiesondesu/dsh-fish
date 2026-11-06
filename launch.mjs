@@ -30,6 +30,22 @@ import { workbuddyPythons } from './shared/root.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const CHECK_ONLY = process.argv.includes('--check')
+
+// 单项启动（2026-11-06）：`node launch.mjs 桥` 只拉桥，其他一律不碰。
+// 为什么要这个：GUI 管理器（manager/）要能单独开关某一项，而原来这个脚本
+// 只有「全部启动」。另写一套启动逻辑等于养两份真相，所以能力长在这里。
+// 不传就是全部启动——和以前一模一样。
+const ONLY_ARG = (process.argv.slice(2).find((a) => !a.startsWith('-')) || '').trim()
+const ALIAS = {
+  桥: 'bridge', bridge: 'bridge',
+  查看器: 'viewer', viewer: 'viewer',
+  话轮: 'turn', turn: 'turn',
+  全双工: 'duplex', duplex: 'duplex',
+  dsh: 'dsh',
+  ll: 'll', luckylillia: 'll',
+}
+const TARGET = ONLY_ARG ? (ALIAS[ONLY_ARG] || ALIAS[ONLY_ARG.toLowerCase()] || '') : ''
+const want = (k) => !TARGET || TARGET === k
 // restart.mjs 调这个脚本时传 --no-open：重启不该顺手弹一个浏览器窗口
 // （尤其「只重启桥」时，用户根本没要开查看器）
 const NO_OPEN = process.argv.includes('--no-open')
@@ -66,14 +82,14 @@ const PY_TTS = join(PLUG, 'dialogue-tts', 'venv', 'Scripts', 'python.exe')
 const PY_STDLIB = [PY_TURN, PY_TTS, ...workbuddyPythons()].find(existsSync)
 
 const VOICE = [
-  { key: '话轮 18766', port: 18766, exe: PY_TURN,
+  { id: 'turn', key: '话轮 18766', port: 18766, exe: PY_TURN,
     args: ['server.py', '--port', '18766'], cwd: join(PLUG, 'turn-taking') },
   // 2026-11-06（用户问「dialogue-tts 到底有没有用过」）：查下来是**一次都没用过**——
   // 业务代码引用 0 处、插件日志 0 条、账本 0 次提及，唯一产物是搭完测的 3.6 秒 wav。
   // 她的声音一直走 edge-tts（zh-CN-YunxiNeural，她自己听完十条挑的，理由「别给我一副
   // 好听的嗓子」）。留着它只意味着每次启动多等 2-3 分钟加载 5.3G 权重，于 11-06 摘出。
   // 要用时手动：cd D:\Code\<同级目录>\dialogue-tts && venv\Scripts\python.exe server.py --port 18767
-  { key: '全双工 18768', port: 18768, exe: PY_STDLIB,
+  { id: 'duplex', key: '全双工 18768', port: 18768, exe: PY_STDLIB,
     args: ['duplex.py', '--port', '18768'], cwd: join(PLUG, 'full-duplex') },
 ]
 
@@ -153,12 +169,26 @@ async function waitPort(port, ms, step = 500) {
 const report = []
 
 async function main() {
+  // 参数写错就当场拒，别静默走「全部启动」——那是最容易误伤的一种失败
+  if (ONLY_ARG && !TARGET) {
+    out('')
+    out(`  ✗ 不认识「${ONLY_ARG}」。能单独启动的是这几项：`)
+    out('       dsh / ll / turn / duplex / bridge / viewer')
+    out('       （也认中文：话轮 / 全双工 / 桥 / 查看器）')
+    out('     不给参数就是全部启动。')
+    out('')
+    process.exit(2)
+  }
+
   out('')
   out('  她 · 一键启动')
+  if (TARGET) out(`  （只启动：${TARGET}）`)
   out('  ' + '─'.repeat(46))
 
   // 1) DSH
-  if (running('DeepSeek Harness.exe')) {
+  if (!want('dsh')) {
+    // 单项启动别的：DSH 一点不碰（它不是可重启的普通服务，重启会断她会话）
+  } else if (running('DeepSeek Harness.exe')) {
     out('  ✅ DSH 已经在跑')
     report.push(['DSH', '运行中'])
   } else if (CHECK_ONLY) {
@@ -178,8 +208,10 @@ async function main() {
   // 2) LuckyLillia
   //    先兜一次 LLBot 的补丁：LuckyLillia 更新 llbot 时会把 llbot.js 整份覆盖，
   //    补丁丢了 QQ 消息就会全部收不到（而且不报错，最难查的那种）。
-  const lp = ensureLlbotPatch({ write: !CHECK_ONLY })
-  if (lp.state === 'patched') {
+  const lp = want('ll') ? ensureLlbotPatch({ write: !CHECK_ONLY }) : { state: 'skip' }
+  if (!want('ll')) {
+    // 单项启动别的：补丁检查也跳过（它会写盘）
+  } else if (lp.state === 'patched') {
     out('  ✅ LLBot 剥帧头补丁在位')
     report.push(['LLBot 补丁', '在位'])
   } else if (lp.state === 'applied') {
@@ -197,9 +229,11 @@ async function main() {
   //     dsh-video-storyboard 升级会整份覆盖：changes 上限会退回 5（她看到的
   //     「改自」标记就只剩前几条），OCR 校正会退回「只认 asr」（她看的 B 站
   //     AI 字幕片子一条都不会被校正）。所以每次启动兜一次，丢了自动补回。
-  const vp = ensureVsPatch({ write: !CHECK_ONLY })
+  const vp = want('ll') ? ensureVsPatch({ write: !CHECK_ONLY }) : []
   const vpBad = vp.filter((r) => r.state === 'missing' || r.state === 'unknown')
-  if (vpBad.length === 0) {
+  if (!want('ll')) {
+    // 单项启动别的：vs 补丁也跳过
+  } else if (vpBad.length === 0) {
     out(`  ✅ vs 外挂补丁在位（${vp.map((r) => (r.state === 'applied' ? '刚补回' : '在位')).join(' / ')}）`)
     report.push(['vs 补丁', vp.some((r) => r.state === 'applied') ? '已补回' : '在位'])
   } else {
@@ -207,7 +241,9 @@ async function main() {
     report.push(['vs 补丁', '待人工确认'])
   }
 
-  if (running('LuckyLillia.exe')) {
+  if (!want('ll')) {
+    // 单项启动别的
+  } else if (running('LuckyLillia.exe')) {
     out('  ✅ LuckyLillia 已经在跑')
     report.push(['LuckyLillia', '运行中'])
   } else if (CHECK_ONLY) {
@@ -224,6 +260,7 @@ async function main() {
 
   // 3) 语音三路 —— 先起：桥会用到话轮，查看器「本机状态」会探活它们
   for (const s of VOICE) {
+    if (!want(s.id)) continue
     if (await portOpen(s.port)) {
       out(`  ✅ ${s.key} 已经在听`)
       report.push([s.key, '运行中'])
@@ -252,7 +289,9 @@ async function main() {
   }
 
   // 4) 桥
-  if (await portOpen(6199)) {
+  if (!want('bridge')) {
+    // 单项启动别的
+  } else if (await portOpen(6199)) {
     out('  ✅ 桥已经在听 6199')
     report.push(['桥', '运行中（6199）'])
   } else if (CHECK_ONLY) {
@@ -265,7 +304,9 @@ async function main() {
   }
 
   // 5) 查看器
-  if (await portOpen(7788)) {
+  if (!want('viewer')) {
+    // 单项启动别的
+  } else if (await portOpen(7788)) {
     out('  ✅ 查看器已经在跑')
     report.push(['查看器', '运行中（7788）'])
   } else if (CHECK_ONLY) {

@@ -1,0 +1,388 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>她 · 管理器</title>
+<style>
+  :root{
+    --bg:#0b0d12; --panel:#14171f; --panel2:#191d27;
+    --line:rgba(255,255,255,.07); --line2:rgba(255,255,255,.11);
+    --fg:#e9ebf2; --dim:#8b93a7; --dim2:#5f6779;
+    --ok:#4ade80; --warn:#f5bd62; --bad:#f0788a; --acc:#8aa4ff;
+    --r:16px;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{
+    margin:0; background:var(--bg); color:var(--fg);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI Variable Display","Segoe UI",
+      "PingFang SC","Microsoft YaHei UI","Microsoft YaHei",sans-serif;
+    font-size:14px; -webkit-font-smoothing:antialiased;
+    background-image:
+      radial-gradient(900px 500px at 15% -10%, rgba(138,164,255,.10), transparent 60%),
+      radial-gradient(700px 400px at 95% 0%, rgba(167,139,250,.08), transparent 55%);
+    background-attachment:fixed;
+  }
+
+  /* ---------- 顶栏 ---------- */
+  header{
+    position:sticky; top:0; z-index:20;
+    backdrop-filter:blur(16px) saturate(140%);
+    background:rgba(11,13,18,.78);
+    border-bottom:1px solid var(--line);
+  }
+  .bar{
+    max-width:1180px; margin:0 auto; padding:16px 24px;
+    display:flex; align-items:center; gap:16px; flex-wrap:wrap;
+  }
+  .brand{display:flex; align-items:center; gap:11px; font-size:15px; font-weight:640; letter-spacing:.2px}
+  .mark{
+    width:30px; height:30px; border-radius:9px; display:grid; place-items:center;
+    background:linear-gradient(145deg,#8aa4ff,#a78bfa); color:#0b0d12;
+    font-weight:700; font-size:15px; box-shadow:0 4px 14px rgba(138,164,255,.28);
+  }
+  .spacer{flex:1}
+
+  .summary{
+    display:flex; align-items:center; gap:8px;
+    padding:6px 13px; border-radius:999px;
+    border:1px solid var(--line); background:var(--panel);
+    font-size:12.5px; color:var(--dim); white-space:nowrap;
+  }
+  .summary b{color:var(--fg); font-variant-numeric:tabular-nums}
+
+  .bulk{display:flex; gap:8px; flex-wrap:wrap}
+
+  /* ---------- 按钮 ---------- */
+  button{
+    font:inherit; font-size:12.5px; font-weight:560;
+    padding:7px 14px; border-radius:9px; cursor:pointer;
+    border:1px solid var(--line2); background:var(--panel2); color:var(--fg);
+    transition:background .15s, border-color .15s, transform .08s, color .15s, opacity .15s;
+    white-space:nowrap;
+  }
+  button:hover:not(:disabled){background:#202632; border-color:rgba(255,255,255,.18)}
+  button:active:not(:disabled){transform:translateY(1px)}
+  button:disabled{opacity:.38; cursor:not-allowed}
+  button.primary{background:rgba(138,164,255,.15); border-color:rgba(138,164,255,.38); color:#c3d0ff}
+  button.primary:hover:not(:disabled){background:rgba(138,164,255,.24)}
+  button.danger{background:rgba(240,120,138,.12); border-color:rgba(240,120,138,.32); color:#f5a8b4}
+  button.danger:hover:not(:disabled){background:rgba(240,120,138,.2)}
+  button.ghost{background:transparent}
+  button.ghost:hover:not(:disabled){background:rgba(255,255,255,.05)}
+
+  /* ---------- 网格 ---------- */
+  main{max-width:1180px; margin:0 auto; padding:22px 24px 60px}
+  .grid{
+    display:grid; gap:14px;
+    grid-template-columns:repeat(auto-fill,minmax(320px,1fr));
+  }
+
+  /* ---------- 服务卡 ---------- */
+  .svc{
+    position:relative; overflow:hidden;
+    background:var(--panel); border:1px solid var(--line); border-radius:var(--r);
+    padding:16px 17px 14px;
+    transition:border-color .2s, background .2s, transform .18s, box-shadow .2s;
+  }
+  .svc::before{
+    content:''; position:absolute; inset:0; pointer-events:none; opacity:0;
+    transition:opacity .25s;
+    background:radial-gradient(420px 160px at 50% -30%, rgba(74,222,128,.16), transparent 70%);
+  }
+  .svc.up{border-color:rgba(74,222,128,.22); background:linear-gradient(180deg,rgba(74,222,128,.045),var(--panel) 46%)}
+  .svc.up::before{opacity:1}
+  .svc.idle{opacity:.82}
+  .svc.idle:hover{opacity:1}
+  .svc.busy{border-color:rgba(138,164,255,.4); box-shadow:0 0 0 1px rgba(138,164,255,.16)}
+  .svc.unmanaged{opacity:.68}
+
+  .svc-top{display:flex; align-items:center; gap:10px; position:relative; z-index:1}
+  .dot{
+    width:9px; height:9px; border-radius:50%; flex:none;
+    background:var(--dim2); box-shadow:0 0 0 0 rgba(74,222,128,.5);
+    transition:background .2s;
+  }
+  .svc.up .dot{background:var(--ok); animation:pulse 2.4s ease-out infinite}
+  .svc.working .dot{background:var(--warn); animation:pulse 1s ease-out infinite}
+  @keyframes pulse{
+    0%{box-shadow:0 0 0 0 rgba(74,222,128,.45)}
+    70%{box-shadow:0 0 0 7px rgba(74,222,128,0)}
+    100%{box-shadow:0 0 0 0 rgba(74,222,128,0)}
+  }
+  .svc.working .dot{animation-name:pulseWarn}
+  @keyframes pulseWarn{
+    0%{box-shadow:0 0 0 0 rgba(245,189,98,.5)}
+    70%{box-shadow:0 0 0 7px rgba(245,189,98,0)}
+    100%{box-shadow:0 0 0 0 rgba(245,189,98,0)}
+  }
+
+  .svc h3{margin:0; font-size:14.5px; font-weight:640; letter-spacing:.15px}
+  .tag{
+    margin-left:auto; font-size:11px; color:var(--dim);
+    padding:3px 8px; border-radius:6px; background:rgba(255,255,255,.045);
+    border:1px solid var(--line); font-variant-numeric:tabular-nums;
+  }
+  .desc{
+    margin:11px 0 0; font-size:12.5px; line-height:1.65; color:var(--dim);
+    min-height:40px; position:relative; z-index:1;
+  }
+  .status-line{
+    margin-top:10px; font-size:12px; color:var(--dim2);
+    display:flex; align-items:center; gap:8px; min-height:18px;
+    font-variant-numeric:tabular-nums;
+  }
+  .status-line .st{font-weight:600}
+  .svc.up .status-line .st{color:var(--ok)}
+  .svc.working .status-line .st{color:var(--warn)}
+  .warn{
+    margin-top:9px; font-size:11.5px; color:#d9b06a;
+    background:rgba(245,189,98,.08); border:1px solid rgba(245,189,98,.16);
+    border-radius:7px; padding:5px 9px; display:inline-block;
+  }
+  .actions{
+    display:flex; gap:7px; margin-top:13px; padding-top:13px;
+    border-top:1px solid var(--line); position:relative; z-index:1;
+  }
+  .actions button{flex:1; justify-content:center; padding:7px 6px}
+
+  /* ---------- 提示 ---------- */
+  #toast{
+    position:fixed; left:50%; bottom:26px; transform:translate(-50%,18px);
+    display:flex; flex-direction:column; gap:8px; align-items:center;
+    z-index:60; pointer-events:none;
+  }
+  .toast{
+    padding:10px 17px; border-radius:11px; font-size:12.5px;
+    background:rgba(25,29,39,.96); border:1px solid var(--line2);
+    box-shadow:0 10px 30px rgba(0,0,0,.45);
+    opacity:0; transform:translateY(10px); transition:opacity .2s, transform .2s;
+    max-width:min(560px,90vw);
+  }
+  .toast.on{opacity:1; transform:translateY(0)}
+  .toast.ok{border-color:rgba(74,222,128,.35)}
+  .toast.err{border-color:rgba(240,120,138,.4); color:#f5b3bd}
+
+  footer{
+    max-width:1180px; margin:0 auto; padding:0 24px 34px;
+    font-size:11.5px; color:var(--dim2); line-height:1.9;
+  }
+  footer code{background:rgba(255,255,255,.05); padding:1px 6px; border-radius:5px; font-size:11px}
+
+  @media (max-width:640px){
+    .bar{padding:13px 16px; gap:11px}
+    main{padding:16px 16px 48px}
+    .grid{grid-template-columns:1fr}
+    .bulk{width:100%}
+    .bulk button{flex:1}
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="bar">
+    <div class="brand"><span class="mark">她</span> 管理器</div>
+    <div class="summary" id="summary">探测中…</div>
+    <div class="spacer"></div>
+    <div class="bulk">
+      <button class="primary" data-all="start">全部启动</button>
+      <button data-all="restart">全部重启</button>
+      <button class="danger" data-all="stop">全部停止</button>
+    </div>
+  </div>
+</header>
+
+<main>
+  <div class="grid" id="grid"></div>
+</main>
+
+<footer>
+  启动/停止都交给仓库根目录的 <code>launch.mjs</code> / <code>shutdown.mjs</code> / <code>restart.mjs</code>，
+  这里不重写一套。<br>
+  ASR 听写归你自己的 vs 插件管线管，这里只看不动。<br>
+  关掉这个窗口不影响任何服务；要关服务请点上面的按钮。
+</footer>
+
+<div id="toast"></div>
+
+<script>
+'use strict';
+
+const grid = document.getElementById('grid');
+const summaryEl = document.getElementById('summary');
+const toastBox = document.getElementById('toast');
+
+// 正在「启动中」的服务：点了启动之后到端口真的开之间，界面要有话说，
+// 否则用户会以为没反应又点一次（于是起两份）。
+const pending = new Map();   // key -> { until, action }
+const PENDING_MS = 45000;
+
+let last = [];        // 最近一次探测结果
+let busy = '';        // 服务端当前的忙标记
+let reqSeq = 0;
+
+function toast(text, kind) {
+  const el = document.createElement('div');
+  el.className = 'toast' + (kind ? ' ' + kind : '');
+  el.textContent = text;
+  toastBox.appendChild(el);
+  requestAnimationFrame(() => el.classList.add('on'));
+  setTimeout(() => {
+    el.classList.remove('on');
+    setTimeout(() => el.remove(), 260);
+  }, 2800);
+}
+
+function esc(s) {
+  return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+}
+
+function fmtSince() {
+  const d = new Date();
+  return String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0') + ':' + String(d.getSeconds()).padStart(2, '0');
+}
+
+function stateOf(s) {
+  const p = pending.get(s.key);
+  if (p && Date.now() < p.until) {
+    if (s.up && p.action !== 'stop') pending.delete(s.key);
+    else return p.action === 'stop' ? 'working' : 'working';
+  } else if (p) {
+    pending.delete(s.key);
+  }
+  return s.up ? 'up' : 'idle';
+}
+
+function statusText(s, st) {
+  const p = pending.get(s.key);
+  if (st === 'working') {
+    if (p && p.action === 'stop') return '正在关闭…';
+    if (p && p.action === 'restart') return '正在重启…';
+    return '正在启动…';
+  }
+  if (s.up) return '运行中' + (s.pid ? ' · PID ' + s.pid : '');
+  return '已停止';
+}
+
+function render() {
+  const total = last.length;
+  const up = last.filter(s => s.up).length;
+  const managed = last.filter(s => s.managed).length;
+  const upManaged = last.filter(s => s.managed && s.up).length;
+
+  summaryEl.innerHTML =
+    '<b>' + upManaged + '/' + managed + '</b> 运行中' +
+    (total !== managed ? ' · <b>' + (up - upManaged) + '</b> 外部服务在线' : '') +
+    ' · ' + fmtSince();
+
+  const gridBusy = !!busy;
+
+  grid.innerHTML = last.map(s => {
+    const st = stateOf(s);
+    const cls = ['svc', st, s.managed ? '' : 'unmanaged', gridBusy ? 'busy' : ''].filter(Boolean).join(' ');
+    const dis = (!s.managed || gridBusy || st === 'working') ? ' disabled' : '';
+
+    return '<article class="' + cls + '" data-key="' + esc(s.key) + '">' +
+      '<div class="svc-top">' +
+        '<span class="dot"></span>' +
+        '<h3>' + esc(s.name) + '</h3>' +
+        '<span class="tag">' + esc(s.tag) + '</span>' +
+      '</div>' +
+      '<p class="desc">' + esc(s.desc) + '</p>' +
+      '<div class="status-line"><span class="st">' + esc(statusText(s, st)) + '</span></div>' +
+      (s.warn ? '<div class="warn">' + esc(s.warn) + '</div>' : '') +
+      '<div class="actions">' +
+        '<button class="primary" data-a="start"' + dis + '>启动</button>' +
+        '<button class="ghost" data-a="restart"' + dis + '>重启</button>' +
+        '<button class="danger" data-a="stop"' + dis + '>停止</button>' +
+      '</div>' +
+    '</article>';
+  }).join('');
+}
+
+async function refresh() {
+  const seq = ++reqSeq;
+  try {
+    const r = await fetch('/api/services', { cache: 'no-store' });
+    const j = await r.json();
+    if (seq !== reqSeq) return;          // 有更新的请求了，丢掉这次
+    last = j.services || [];
+    busy = j.busy || '';
+    render();
+  } catch (e) {
+    summaryEl.textContent = '连不上管理器';
+  }
+}
+
+async function act(key, action, name) {
+  pending.set(key, { until: Date.now() + PENDING_MS, action });
+  render();
+  try {
+    const r = await fetch('/api/action', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ key, action }),
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || !j.ok) {
+      pending.delete(key);
+      toast(j.error || ('操作失败（HTTP ' + r.status + '）'), 'err');
+      render();
+      return;
+    }
+    toast(j.message || '已发出', 'ok');
+    setTimeout(refresh, 700);
+  } catch (e) {
+    pending.delete(key);
+    toast('连不上管理器：' + e.message, 'err');
+    render();
+  }
+}
+
+async function actAll(action) {
+  const label = { start: '全部启动', stop: '全部停止', restart: '全部重启' }[action] || action;
+  if (action !== 'start' && !confirm(label + '？\n\n这会动到所有服务（DSH 重启会断她会话）。')) return;
+  busy = label;
+  render();
+  try {
+    const r = await fetch('/api/all', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ action }),
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || !j.ok) { toast(j.error || '操作失败', 'err'); return }
+    toast(j.message || '已发出', 'ok');
+    setTimeout(refresh, 1200);
+  } catch (e) {
+    toast('连不上管理器：' + e.message, 'err');
+  } finally {
+    setTimeout(() => { busy = ''; refresh() }, 2600);
+  }
+}
+
+// 事件代理：卡片按钮
+grid.addEventListener('click', (ev) => {
+  const btn = ev.target.closest('button[data-a]');
+  if (!btn || btn.disabled) return;
+  const card = btn.closest('.svc');
+  if (!card) return;
+  const key = card.dataset.key;
+  const name = card.querySelector('h3').textContent;
+  act(key, btn.dataset.a, name);
+});
+
+// 顶栏批量
+document.querySelector('.bulk').addEventListener('click', (ev) => {
+  const btn = ev.target.closest('button[data-all]');
+  if (!btn || btn.disabled) return;
+  actAll(btn.dataset.all);
+});
+
+refresh();
+setInterval(refresh, 2000);
+</script>
+</body>
+</html>
