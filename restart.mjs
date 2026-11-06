@@ -79,10 +79,11 @@ function portsFor(target) {
   // DSH 不占这两个端口（她的通路是动态端口，桥发消息前会自己重新发现）。
   // 2026-11-05 用户选 3 时踩到：脚本傻等了 30 秒，还报了两条根本不成立的警告。
   if (/^dsh$/i.test(target)) return []
-  // 全部重启：语音三路也得等端口让出来。
+  // 全部重启：语音两路也得等端口让出来。
   // 2026-11-06 20:38 实测：shutdown 用 tree kill 收 venv launcher + uv 子进程，
-  // 收尾比桥/查看器慢；launch 一看「端口还在听」就跳过，三路于是全没起来。
-  return [6199, 7788, 18766, 18767, 18768]
+  // 收尾比桥/查看器慢；launch 一看「端口还在听」就跳过，两路于是全没起来。
+  // （TTS 18767 同日已摘出启动链路，不用再等它）
+  return [6199, 7788, 18766, 18768]
 }
 
 /** 她那条会话的就绪信号：插件启动时写进 instance.json 的 bootAt。 */
@@ -120,7 +121,7 @@ const touchesDsh = !TARGET || /^dsh$/i.test(TARGET)
 // 目标名拼错时 shutdown 只会打印「没有这一项」然后正常退出，restart 却会接着
 // 去等 6199/7788「让出来」（它们本来就听着）→ 白等 30 秒 + 两条假警告。
 // 2026-11-06 补：先在门口挡住。
-const KNOWN_TARGETS = ['桥', '查看器', 'ASR', '话轮', 'TTS', '全双工', 'LuckyLillia', 'DSH']
+const KNOWN_TARGETS = ['桥', '查看器', 'ASR', '话轮', '全双工', 'LuckyLillia', 'DSH']
 if (TARGET && !KNOWN_TARGETS.some((k) => k.toLowerCase() === TARGET.toLowerCase())) {
   out('')
   out(`  ✗ 没有叫「${TARGET}」的这一项。可选的：${KNOWN_TARGETS.join(' / ')}`)
@@ -172,12 +173,11 @@ out('')
 out('  验证')
 await sleep(2000)
 for (const p of portsFor(TARGET)) {
-  // TTS 18767 要加载 CosyVoice2（5.3G），实测 2-3 分钟才监听；
-  // 话轮 18766 要加载 ONNX，实测约 14 秒。桥/查看器是 node，1.5 秒没听就是没起来。
-  // 2026-11-06：25 秒窗口对 TTS 必然误报，改成按端口给预算。
-  const budget = p === 18767 ? 240_000 : p >= 18766 ? 60_000 : 1_500
+  // 话轮 18766 要加载 ONNX，实测约 14 秒；桥/查看器是 node，1.5 秒没听就是没起来。
+  // （TTS 18767 原来要 240 秒预算，2026-11-06 摘出启动链路后这条特例一起去掉）
+  const budget = p >= 18766 ? 60_000 : 1_500
   const ms = await waitUntil(() => portOpen(p), budget, 1000)
-  const slow = p >= 18766 && p <= 18768
+  const slow = p >= 18766
   out(ms ? `  ✅ ${p} 在听${slow ? `（${(ms / 1000).toFixed(0)}s）` : ''}` : `  ❌ ${p} 没起来`)
   if (!ms) portsOk = false
 }

@@ -3,10 +3,11 @@
  *
  *   1. DSH（她的宿主，必须开着才有"她"）
  *   2. LuckyLillia（QQ 个人号 + PMHQ + LLBot，出 OneBot）
- *   3. 语音三路（本地 HTTP 服务，python；脚本用相对路径，启动必须带 cwd）
+ *   3. 语音两路（本地 HTTP 服务，python；脚本用相对路径，启动必须带 cwd）
  *        3a. smart-turn   话轮端点    18766
- *        3b. CosyVoice2   对话 TTS    18767
- *        3c. full-duplex  全双工接口  18768（判话轮会回打 18766，故排在它后面）
+ *        3b. full-duplex  全双工接口  18768（判话轮会回打 18766，故排在它后面）
+ *      ——CosyVoice2 / 18767 于 2026-11-06 摘出：搭好后从没接进任何链路，
+ *        每次启动只净赔 2-3 分钟加载 5.3G 权重。详见下面 VOICE 处的注释。
  *   4. bridge（QQ ↔ 她 的桥，监听 6199）
  *   5. viewer（人格/行动查看器，7788；「本机状态」会探活上面三路）
  *
@@ -55,6 +56,8 @@ const VIEWER_URL = 'http://127.0.0.1:7788'
 // 真正听端口、装模型的是那个子进程（关的时候要连树一起收，见 shutdown.mjs）。
 const PLUG = dirname(HERE)
 const PY_TURN = join(PLUG, 'turn-taking', 'venv', 'Scripts', 'python.exe')
+// dialogue-tts 的 venv 2026-11-06 已删（12G）。这条留着是给「哪天手动重建了 TTS」
+// 的情况——路径不存在时 PY_STDLIB 的 find(existsSync) 会自动跳过它。
 const PY_TTS = join(PLUG, 'dialogue-tts', 'venv', 'Scripts', 'python.exe')
 // duplex.py 只用标准库，不挑解释器；复用已存在的 venv，别写死 WorkBuddy 内置
 // python（那个路径带版本号，升级就失效）。最后一条是兜底。
@@ -65,8 +68,11 @@ const PY_STDLIB = [PY_TURN, PY_TTS, ...workbuddyPythons()].find(existsSync)
 const VOICE = [
   { key: '话轮 18766', port: 18766, exe: PY_TURN,
     args: ['server.py', '--port', '18766'], cwd: join(PLUG, 'turn-taking') },
-  { key: 'TTS 18767', port: 18767, exe: PY_TTS,
-    args: ['server.py', '--port', '18767'], cwd: join(PLUG, 'dialogue-tts') },
+  // 2026-11-06（用户问「dialogue-tts 到底有没有用过」）：查下来是**一次都没用过**——
+  // 业务代码引用 0 处、插件日志 0 条、账本 0 次提及，唯一产物是搭完测的 3.6 秒 wav。
+  // 她的声音一直走 edge-tts（zh-CN-YunxiNeural，她自己听完十条挑的，理由「别给我一副
+  // 好听的嗓子」）。留着它只意味着每次启动多等 2-3 分钟加载 5.3G 权重，于 11-06 摘出。
+  // 要用时手动：cd D:\Code\<同级目录>\dialogue-tts && venv\Scripts\python.exe server.py --port 18767
   { key: '全双工 18768', port: 18768, exe: PY_STDLIB,
     args: ['duplex.py', '--port', '18768'], cwd: join(PLUG, 'full-duplex') },
 ]
@@ -235,10 +241,10 @@ async function main() {
       report.push([s.key, '未启动'])
       continue
     }
-    out(`  … ${s.key} 没开，正在拉起${s.port === 18767 ? '（模型加载要十几秒）' : ''}`)
+    out(`  … ${s.key} 没开，正在拉起`)
     detach(s.exe, s.args, s.key, { cwd: s.cwd, hide: true })
     // 起完马上看一眼：python 依赖缺失时会秒退，而 stdio 已经丢了、什么都看不到。
-    // 6 秒只是「有没有立刻死」，不是「加载完」—— 18766 要十几秒，18767 要两三分钟。
+    // 6 秒只是「有没有立刻死」，不是「加载完」—— 18766（ONNX）实测要十几秒。
     const early = await waitPort(s.port, 6000)
     if (early) out(`    ✅ ${s.key} 已经在听（${(early / 1000).toFixed(1)}s）`)
     else out(`    … ${s.key} 进程已拉起，还在加载（端口晚点自己会开）`)
@@ -291,7 +297,8 @@ async function main() {
   for (const [k, v] of report) out(`  ${k.padEnd(12, ' ')} ${v}`)
   out('')
   out('  查看器    ' + VIEWER_URL)
-  out('  语音三路  18766 话轮 / 18767 TTS / 18768 全双工（查看器「本机状态」可探活）')
+  out('  语音两路  18766 话轮 / 18768 全双工（查看器「本机状态」可探活）')
+  out('            TTS 18767 已停用（从没接进任何链路，用了只赔启动时间）')
   out('  QQ 那条   QQ → 阿岸；桥连上后日志在 bridge\\bridge.log')
   out('')
   out('  关掉：双击 一键关闭.cmd（或 node shutdown.mjs --check 先看清单）')

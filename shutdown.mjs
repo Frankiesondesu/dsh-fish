@@ -209,12 +209,14 @@ async function collect() {
     http: 'http://127.0.0.1:18765/shutdown',
   })
 
-  // 4) 语音三路：18766 话轮 / 18767 TTS / 18768 全双工
+  // 4) 语音两路：18766 话轮 / 18768 全双工
   //    tree: true 是必须的 —— venv launcher 和真正干活的 uv 子进程是一对，
   //    只收一个就会留下占着端口（和显存）的半截服务。
+  //    TTS 18767 2026-11-06 已摘出启动链路（它从没接进任何链路）。这一条留着是防
+  //    谁手动起了它：voicePids 找不到进程就什么都不做，无害。
   for (const [key, port, note] of [
     ['话轮', 18766, 'smart-turn 端点检测'],
-    ['TTS', 18767, 'CosyVoice2 对话 TTS'],
+    ['TTS', 18767, 'CosyVoice2 对话 TTS（已停用，手动起了才收）'],
     ['全双工', 18768, '全双工接口状态机'],
   ]) {
     targets.push({

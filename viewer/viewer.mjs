@@ -294,7 +294,7 @@ async function buildData() {
 const SERVICES = [
   { name:'ASR 听写', port:18765, url:'http://127.0.0.1:18765/health', desc:'paraformer-zh · 语音转字；第一句要等冷启动' },
   { name:'smart-turn 话轮', port:18766, url:'http://127.0.0.1:18766/health', desc:'v3.2 CPU ONNX · 判「这句话说完了吗」，实测 40–110ms' },
-  { name:'对话 TTS · CosyVoice2', port:18767, url:'http://127.0.0.1:18767/health', desc:'本地音色 + 句间停顿 / [laughter] / [breath]；RTF≈5，适合异步语音条。没起时 her_voice 仍走 edge-tts' },
+  { name:'对话 TTS · CosyVoice2（已停用）', port:18767, url:'http://127.0.0.1:18767/health', desc:'2026-11-06 搭好、测过 3.6 秒就再没被调用过（业务代码 0 引用 / 日志 0 条 / 账本 0 次），同日摘出启动、删掉 12G。她的声音一直走 edge-tts（Yunxi，她自己挑的）' },
   { name:'全双工接口', port:18768, url:'http://127.0.0.1:18768/health', desc:'Moshi 7B 需约 15G 显存，本机 8G 跑不动；这里是「边听边说 + 打断不重置人格」的状态机原型' },
   { name:'QQ 桥', port:6199, url:'http://127.0.0.1:6199/', desc:'bridge · QQ 收发' },
   { name:'查看器', port:PORT, url:'http://127.0.0.1:'+PORT+'/api/data', desc:'本页' },
