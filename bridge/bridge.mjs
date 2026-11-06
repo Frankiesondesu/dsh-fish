@@ -581,12 +581,14 @@ async function forwardNote(forwards) {
     }
     if (body.length <= FORWARD_INLINE_MAX) {
       log(`聊天记录：${msgs.length} 条 / ${body.length} 字，直接递给她`)
-      blocks.push(`（他转过来一段聊天记录，${msgs.length} 条：\n${body}\n）`)
+      blocks.push(`（他转过来一段聊天记录，${msgs.length} 条。里面的话是记录里那些人说的，不是他：
+${body}
+）`)
     } else {
       const stamp = new Date().toISOString().replace(/[:.]/g, '-')
       const saved = saveInbox(`聊天记录-${stamp}.txt`, Buffer.from(body, 'utf8'))
       log(`聊天记录：${msgs.length} 条 / ${body.length} 字 → ${saved.path}`)
-      blocks.push(`（他转过来一段聊天记录，${msgs.length} 条，太长没全贴。在 ${saved.path}。her_open 能打开它。）`)
+      blocks.push(`（他转过来一段聊天记录，${msgs.length} 条，太长没全贴。在 ${saved.path}。her_open 能打开它——里面的话是记录里那些人说的，不是他。）`)
     }
   }
   if (forwards.length > FORWARD_MAX_SEGS) {
