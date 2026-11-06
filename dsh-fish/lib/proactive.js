@@ -86,7 +86,43 @@ export function proactiveConfig(config = {}) {
     gainPerHour: num(raw.gainPerHour, PROACTIVE_DEFAULTS.gainPerHour, 0, 1),
     maxChance: num(raw.maxChance, PROACTIVE_DEFAULTS.maxChance, 0, 1),
     cooldownHours: num(raw.cooldownHours, PROACTIVE_DEFAULTS.cooldownHours, 0, 240),
+    // fork.54：免打扰时段（他不想被打扰的时间，跟"她醒着"的 window 是两回事）。
+    dnd: normalizeDnd(raw.dnd),
   }
+}
+
+/**
+ * fork.54（2026-11-06）：免打扰时段。来自 AstrBot proactive_chat（522★）的那一课：
+ * `window` 是"她什么时候醒着"，不是"他什么时候不想被打扰"——这两个是两件事。
+ * PAUSE 是手动档（fork.49），这里补自动档：config.proactive.dnd = [["23:00","07:30"]]
+ * 的形状，可以有多段，支持跨零点（复用 inWindow 的跨零点判定）。
+ *
+ * 语义边界：dnd 只挡**系统叫醒**那一路（劲儿/掷签开回合）；她自己的闹钟
+ * （forced，fork.43）不经过 proactiveState，照响——那是她自己定的约定，
+ * 跟 PAUSE 的默认语义（mute-alarm 才一起静音）一致。
+ *
+ * @param {unknown} v 配置里的 dnd 字段，形状 [["23:00","07:30"], …]
+ * @returns {string[][]} 归一化后的合法时段对；形状不对的整对丢掉
+ */
+export function normalizeDnd(v) {
+  if (!Array.isArray(v)) return []
+  const okTime = (s) => /^([01]?\d|2[0-3]):[0-5]\d$/.test(String(s ?? '').trim())
+  const out = []
+  for (const pair of v) {
+    if (!Array.isArray(pair) || pair.length !== 2) continue
+    const a = String(pair[0] ?? '').trim()
+    const b = String(pair[1] ?? '').trim()
+    if (okTime(a) && okTime(b)) out.push([a, b])
+  }
+  return out
+}
+
+/** 此刻是否落在任一免打扰段内（跨零点段按 inWindow 同一套规则）。 */
+export function dndActive(dnd, now = new Date()) {
+  for (const pair of Array.isArray(dnd) ? dnd : []) {
+    if (inWindow({ window: pair }, now)) return true
+  }
+  return false
 }
 
 /**
@@ -307,6 +343,8 @@ export function proactiveState({ config = {}, events = [], now = Date.now(), awa
   // 配置里没有 window 时（测试/老数据）不拦，保持纯函数可测。
   const win = Array.isArray(config?.window) && config.window.length === 2 ? config.window : null
   if (win && !inWindow({ window: win }, new Date(now))) return { ...base, ok: false, why: '这个点不在她醒着的时段里' }
+  // fork.54：免打扰时段。他在睡觉/开会，劲儿再满也不是时候。
+  if (cfg.dnd.length && dndActive(cfg.dnd, new Date(now))) return { ...base, ok: false, why: '现在是免打扰时段' }
   if (away?.kind) return { ...base, ok: false, why: '她不在家' }
   if (rested) return { ...base, ok: false, why: '她今天请了假' }
   if (turnsToday(events, dk) >= cfg.maxPerDay) return { ...base, ok: false, why: '今天已经到上限' }
