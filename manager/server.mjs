@@ -97,6 +97,10 @@ function doAll(action) {
   throw new Error(`不认识的动作：${action}`)
 }
 
+function openBrowser(url) {
+  spawn('cmd', ['/c', 'start', '', url], { detached: true, stdio: 'ignore', windowsHide: true }).unref()
+}
+
 createServer(async (req, res) => {
   const url = (req.url || '/').split('?')[0]
 
@@ -157,6 +161,17 @@ createServer(async (req, res) => {
   } catch (err) {
     json(res, 500, { ok: false, error: String(err?.message ?? err) })
   }
+}).on('error', (err) => {
+  // 双击两次 .cmd 是很常见的事（第一次开着的窗口被忘在任务栏）。
+  // 端口被占说明已经有一个管理器在跑 —— 那就直接开浏览器指过去，别再起第二个。
+  // 不加这段的话，第二次双击只会弹一个「EADDRINUSE」的黑框，用户会以为坏了。
+  if (err && err.code === 'EADDRINUSE') {
+    console.log(`  已经有一个管理器在 ${PORT} 端口上了，直接开浏览器。`)
+    openBrowser(`http://127.0.0.1:${PORT}`)
+    process.exit(0)
+  }
+  console.error('管理器起不来：', err)
+  process.exit(1)
 }).listen(PORT, '127.0.0.1', () => {
   const url = `http://127.0.0.1:${PORT}`
   console.log('')
@@ -169,7 +184,5 @@ createServer(async (req, res) => {
 
   // 自己开浏览器：这样 管理器.cmd 只留一个窗口，关窗口就等于关管理器。
   // --no-open 给测试用（起了服务但不想每次弹一个标签页）。
-  if (!process.argv.includes('--no-open')) {
-    spawn('cmd', ['/c', 'start', '', url], { detached: true, stdio: 'ignore', windowsHide: true }).unref()
-  }
+  if (!process.argv.includes('--no-open')) openBrowser(url)
 })
