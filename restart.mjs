@@ -79,7 +79,10 @@ function portsFor(target) {
   // DSH 不占这两个端口（她的通路是动态端口，桥发消息前会自己重新发现）。
   // 2026-11-05 用户选 3 时踩到：脚本傻等了 30 秒，还报了两条根本不成立的警告。
   if (/^dsh$/i.test(target)) return []
-  return [6199, 7788]
+  // 全部重启：语音三路也得等端口让出来。
+  // 2026-11-06 20:38 实测：shutdown 用 tree kill 收 venv launcher + uv 子进程，
+  // 收尾比桥/查看器慢；launch 一看「端口还在听」就跳过，三路于是全没起来。
+  return [6199, 7788, 18766, 18767, 18768]
 }
 
 /** 她那条会话的就绪信号：插件启动时写进 instance.json 的 bootAt。 */
@@ -159,9 +162,12 @@ out('')
 out('  验证')
 await sleep(2000)
 for (const p of portsFor(TARGET)) {
-  const open = await portOpen(p)
-  out(open ? `  ✅ ${p} 在听` : `  ❌ ${p} 没起来`)
-  if (!open) portsOk = false
+  // python 那三路（尤其 TTS 18767）要加载模型，给长一点的窗口；
+  // 桥/查看器是 node，2 秒内没听就是真没起来。
+  const slow = p >= 18766 && p <= 18768
+  const ms = await waitUntil(() => portOpen(p), slow ? 25_000 : 1_500, 500)
+  out(ms ? `  ✅ ${p} 在听${slow ? `（${(ms / 1000).toFixed(0)}s）` : ''}` : `  ❌ ${p} 没起来`)
+  if (!ms) portsOk = false
 }
 
 if (touchesDsh) {
