@@ -27,6 +27,9 @@ import { ensureVsPatch } from './vs-patch.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const CHECK_ONLY = process.argv.includes('--check')
+// restart.mjs 调这个脚本时传 --no-open：重启不该顺手弹一个浏览器窗口
+// （尤其「只重启桥」时，用户根本没要开查看器）
+const NO_OPEN = process.argv.includes('--no-open')
 
 const DSH_EXE = 'D:\\Program Files (x86)\\DeepSeek Harness\\DeepSeek Harness.exe'
 const LL_EXE = join(HERE, 'runtime', 'LL', 'LuckyLillia.exe')
@@ -107,6 +110,9 @@ function detach(exe, args, label, { cleanElectronEnv = false, cwd, hide = false 
   }
   // hide：语音三路是纯后台 HTTP 服务，stdio 已经丢了，没必要再弹三个黑框。
   const p = spawn(exe, args, { detached: true, stdio: 'ignore', windowsHide: hide, env, ...(cwd ? { cwd } : {}) })
+  // spawn 失败（路径没权限、被杀软拦、句柄耗尽）会 emit 'error'；不接住就是
+  // uncaughtException，整个启动器当场崩掉，后面几项一个都起不来。
+  p.on('error', (err) => out(`  ❌ ${label} 没启动：${err?.message ?? err}`))
   p.unref()
   out(`  ↑ 已启动 ${label}（PID ${p.pid}）`)
   return p
@@ -114,6 +120,16 @@ function detach(exe, args, label, { cleanElectronEnv = false, cwd, hide = false 
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms))
+}
+
+/** 轮询端口，返回用时（毫秒）；超时返回 0。 */
+async function waitPort(port, ms, step = 500) {
+  const t0 = Date.now()
+  while (Date.now() - t0 < ms) {
+    if (await portOpen(port)) return Date.now() - t0
+    await sleep(step)
+  }
+  return 0
 }
 
 // ---------------------------------------------------------------- 主流程
@@ -209,7 +225,12 @@ async function main() {
     }
     out(`  … ${s.key} 没开，正在拉起${s.port === 18767 ? '（模型加载要十几秒）' : ''}`)
     detach(s.exe, s.args, s.key, { cwd: s.cwd, hide: true })
-    report.push([s.key, '已启动'])
+    // 起完马上看一眼：python 依赖缺失时会秒退，而 stdio 已经丢了、什么都看不到。
+    // 6 秒只是「有没有立刻死」，不是「加载完」—— 18766 要十几秒，18767 要两三分钟。
+    const early = await waitPort(s.port, 6000)
+    if (early) out(`    ✅ ${s.key} 已经在听（${(early / 1000).toFixed(1)}s）`)
+    else out(`    … ${s.key} 进程已拉起，还在加载（端口晚点自己会开）`)
+    report.push([s.key, early ? '已启动' : '已拉起（加载中）'])
   }
 
   // 4) 桥
@@ -246,7 +267,7 @@ async function main() {
 
   // 等一下，让 HTTP 服务起来再把浏览器打开
   await sleep(1200)
-  if (await portOpen(7788)) {
+  if (!NO_OPEN && (await portOpen(7788))) {
     try {
       spawn('cmd', ['/c', 'start', '', VIEWER_URL], { detached: true, stdio: 'ignore', windowsHide: true }).unref()
       out(`  ↗ 浏览器已打开 ${VIEWER_URL}`)

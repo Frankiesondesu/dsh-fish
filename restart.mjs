@@ -117,6 +117,16 @@ if (process.argv.includes('--menu')) {
 }
 // 菜单选完才算得出来：只重启桥时不该去等 DSH 的 bootAt（否则白等 90 秒还报假警告）
 const touchesDsh = !TARGET || /^dsh$/i.test(TARGET)
+// 目标名拼错时 shutdown 只会打印「没有这一项」然后正常退出，restart 却会接着
+// 去等 6199/7788「让出来」（它们本来就听着）→ 白等 30 秒 + 两条假警告。
+// 2026-11-06 补：先在门口挡住。
+const KNOWN_TARGETS = ['桥', '查看器', 'ASR', '话轮', 'TTS', '全双工', 'LuckyLillia', 'DSH']
+if (TARGET && !KNOWN_TARGETS.some((k) => k.toLowerCase() === TARGET.toLowerCase())) {
+  out('')
+  out(`  ✗ 没有叫「${TARGET}」的这一项。可选的：${KNOWN_TARGETS.join(' / ')}`)
+  out('')
+  process.exit(2)
+}
 if (TARGET) out(`  只重启：${TARGET}`)
 
 if (CHECK) {
@@ -152,7 +162,7 @@ for (const p of portsFor(TARGET)) {
 // 3) 起
 out('')
 out('  [3/3] 起')
-if (!runNode(join(HERE, 'launch.mjs'), [])) {
+if (!runNode(join(HERE, 'launch.mjs'), ['--no-open'])) {
   out('  ✗ 启动器报错，下面自查')
   process.exit(1)
 }
@@ -162,10 +172,12 @@ out('')
 out('  验证')
 await sleep(2000)
 for (const p of portsFor(TARGET)) {
-  // python 那三路（尤其 TTS 18767）要加载模型，给长一点的窗口；
-  // 桥/查看器是 node，2 秒内没听就是真没起来。
+  // TTS 18767 要加载 CosyVoice2（5.3G），实测 2-3 分钟才监听；
+  // 话轮 18766 要加载 ONNX，实测约 14 秒。桥/查看器是 node，1.5 秒没听就是没起来。
+  // 2026-11-06：25 秒窗口对 TTS 必然误报，改成按端口给预算。
+  const budget = p === 18767 ? 240_000 : p >= 18766 ? 60_000 : 1_500
+  const ms = await waitUntil(() => portOpen(p), budget, 1000)
   const slow = p >= 18766 && p <= 18768
-  const ms = await waitUntil(() => portOpen(p), slow ? 25_000 : 1_500, 500)
   out(ms ? `  ✅ ${p} 在听${slow ? `（${(ms / 1000).toFixed(0)}s）` : ''}` : `  ❌ ${p} 没起来`)
   if (!ms) portsOk = false
 }
