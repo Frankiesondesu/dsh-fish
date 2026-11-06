@@ -54,6 +54,10 @@ const DEFAULTS = {
   allowGroup: false,
   // 她回的太长的按这个长度切段发（QQ 单条上限约 4500，留余量）
   chunkChars: 1500,
+  // 2026-11-07（用户）：**不再替她按空行拆**。她写的一段原样发一条，中间的空行就是空行；
+  // 想分几条就自己调 her_say（reply 模式），一次一条——条数由她定，不由工具定。
+  // 只剩一个技术性硬切：超过 chunkChars 还是得分段发，否则 QQ 收不下。
+  splitReplies: false,
   // 同一人连发几条时，等这么久再合并成一次递话（0 = 不合批，一条一轮）
   mergeMs: 1500,
   // 带图的消息压这么久，等一句补充说明接上来（真机上 5~10 秒很常见）
@@ -804,7 +808,7 @@ function splitForChat(text, maxChars, maxParts) {
 async function reply(ev, text, { strict = false } = {}) {
   const { text: clean, paths } = splitImages(text)
 
-  const split = cfg.splitReplies !== false
+  const split = cfg.splitReplies === true
   const maxChars = Number(cfg.chunkChars) || 1500
   const maxParts = Number(cfg.maxParts) || 6
   const parts = split ? splitForChat(clean, maxChars, maxParts) : [...chunks(clean, maxChars)]

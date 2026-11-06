@@ -32,6 +32,9 @@ import { openSync, closeSync, readSync, statSync, readFileSync, writeFileSync } 
 export const PUSH_MARKERS = Object.freeze([
   { tag: '（她主动说）', kind: 'proactive' },
   { tag: '（陪你看）', kind: 'watch' },
+  // 2026-11-07（用户）：她回复时分条用 —— `her_say` 的 reply 模式。
+  // 桥不再按空行替她切，她调一次就是一条，条数由她自己定。
+  { tag: '（她说）', kind: 'say' },
 ])
 
 /** 单次最多读这么多字节，免得账本暴涨时一次吞进来几十 MB */
