@@ -20,13 +20,13 @@
 
 import { spawn, execFileSync } from 'node:child_process'
 import { connect } from 'node:net'
-import { existsSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 import { ensureLlbotPatch } from './llbot-patch.mjs'
 import { ensureVsPatch } from './vs-patch.mjs'
-import { workbuddyPythons } from './shared/root.mjs'
+import { fishRoot, workbuddyPythons } from './shared/root.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const CHECK_ONLY = process.argv.includes('--check')
@@ -49,6 +49,36 @@ const want = (k) => !TARGET || TARGET === k
 // restart.mjs 调这个脚本时传 --no-open：重启不该顺手弹一个浏览器窗口
 // （尤其「只重启桥」时，用户根本没要开查看器）
 const NO_OPEN = process.argv.includes('--no-open')
+
+/**
+ * 每拉起一项就把时刻记进 `~/.dsh-fish/launch-stamp.json`（2026-11-07）。
+ *
+ * 为什么需要：GUI 管理器要告诉你「改了代码、这个服务得重启」，而判断的前提是
+ * 知道**这个进程是什么时候起的**。DSH 那边有 instance.json 的 bootAt，
+ * 其他六项没有——它们的启动时间只能从这儿记。
+ *
+ * 只在这个脚本里写，因为它是所有启动路径的唯一入口（管理器也转发到这里）。
+ * 你手动 `node bridge.mjs` 起的不会被记到，那属于「不知道启动时间」，
+ * 管理器会如实标成「不确定」而不是瞎猜。
+ */
+const STAMP_FILE = join(fishRoot(), 'launch-stamp.json')
+function stamp(key) {
+  if (CHECK_ONLY || !key) return
+  try {
+    let j = {}
+    try {
+      j = JSON.parse(readFileSync(STAMP_FILE, 'utf8'))
+    } catch {
+      j = {}
+    }
+    if (!j || typeof j !== 'object') j = {}
+    j[key] = Date.now()
+    mkdirSync(dirname(STAMP_FILE), { recursive: true })
+    writeFileSync(STAMP_FILE, JSON.stringify(j, null, 2) + '\n')
+  } catch {
+    // 记不下也不该影响启动本身
+  }
+}
 
 // 2026-11-06：DSH 装在哪台机可能不一样（有人装 D 盘、有人装 C 盘、有人装进
 // AppData）。原来写死一个路径，换台机就「❌ 找不到 DSH」。现在按常见位置挨个试，
@@ -197,6 +227,7 @@ async function main() {
   } else if (existsSync(DSH_EXE)) {
     out('  … DSH 没开，正在拉起')
     detach(DSH_EXE, [], 'DSH', { cleanElectronEnv: true, cwd: dirname(DSH_EXE) })
+    stamp('dsh')
     report.push(['DSH', '已拉起（要等它加载完插件）'])
   } else {
     out('  ❌ 找不到 DSH。找过这些位置：')
@@ -252,6 +283,7 @@ async function main() {
   } else if (existsSync(LL_EXE)) {
     out('  … LuckyLillia 没开，正在拉起（可能要点登录）')
     detach(LL_EXE, [], 'LuckyLillia')
+    stamp('ll')
     report.push(['LuckyLillia', '已拉起（首次要扫码登录）'])
   } else {
     out(`  ❌ 找不到 LuckyLillia：${LL_EXE}`)
@@ -280,6 +312,7 @@ async function main() {
     }
     out(`  … ${s.key} 没开，正在拉起`)
     detach(s.exe, s.args, s.key, { cwd: s.cwd, hide: true })
+    stamp(s.id)
     // 起完马上看一眼：python 依赖缺失时会秒退，而 stdio 已经丢了、什么都看不到。
     // 6 秒只是「有没有立刻死」，不是「加载完」—— 18766（ONNX）实测要十几秒。
     const early = await waitPort(s.port, 6000)
@@ -300,6 +333,7 @@ async function main() {
   } else {
     out('  … 桥没开，正在拉起')
     detach(process.execPath, [BRIDGE], '桥')
+    stamp('bridge')
     report.push(['桥', '已启动（6199）'])
   }
 
@@ -315,6 +349,7 @@ async function main() {
   } else {
     out('  … 查看器没开，正在拉起')
     detach(process.execPath, [VIEWER], '查看器')
+    stamp('viewer')
     report.push(['查看器', '已启动（7788）'])
   }
 

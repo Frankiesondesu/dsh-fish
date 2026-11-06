@@ -17,14 +17,97 @@
 import { execFile, spawn } from 'node:child_process'
 import { promisify } from 'node:util'
 import { connect } from 'node:net'
-import { dirname, join } from 'node:path'
+import { readdirSync, readFileSync, statSync } from 'node:fs'
+import { basename, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+
+import { fishRoot } from '../shared/root.mjs'
 
 const run = promisify(execFile)
 
 export const HERE = dirname(fileURLToPath(import.meta.url))
 /** 仓库根目录（manager/ 的上一级）。launch.mjs 那几个脚本都在这儿。 */
 export const ROOT = dirname(HERE)
+/** D:/Code/<同级目录> —— turn-taking 与 full-duplex 在仓库外面。 */
+const PLUG = dirname(ROOT)
+
+/**
+ * 每项服务对应哪些代码（2026-11-07）。
+ *
+ * 用来回答「我改了代码，哪个得重启」：拿目录里最新的 mtime 跟「这个进程什么
+ * 时候起的」比，新的就是待重启。
+ *
+ * watch 为空 = 没有我们改得动的代码（LuckyLillia 是 QQ 客户端，ASR 归 vs 管线）。
+ */
+const WATCH = Object.freeze({
+  dsh: [join(ROOT, 'dsh-fish', 'lib')],
+  ll: [],
+  turn: [join(PLUG, 'turn-taking', 'server.py')],
+  duplex: [join(PLUG, 'full-duplex', 'duplex.py')],
+  bridge: [join(ROOT, 'bridge')],
+  // 查看器自己也依赖 shared/root.mjs（路径解析），改了那个也要重启它
+  viewer: [join(ROOT, 'viewer'), join(ROOT, 'shared')],
+  asr: [],
+})
+
+/** 只看这些后缀，别被日志/图片的 mtime 干扰 */
+const CODE_EXT = ['.js', '.mjs', '.py', '.json']
+
+/**
+ * 这些 json 是运行时状态，不是代码 —— 桥每推一条就写一次 push-state.json，
+ * 不排除的话它会永远比进程新，桥就永远显示「待重启」。
+ * `config.json` 不在此列：它改了确实要重启桥才生效。
+ */
+const RUNTIME_JSON = new Set(['push-state.json', 'push-offset.json', 'instance.json', 'launch-stamp.json'])
+
+function readJsonSafe(p) {
+  try {
+    return JSON.parse(readFileSync(p, 'utf8'))
+  } catch {
+    return {}
+  }
+}
+
+/**
+ * 一组路径（文件或目录）里最新的代码文件 mtime。
+ * 目录递归，但跳过 node_modules / test / .git —— 测试和依赖包改了不需要重启服务。
+ * @returns {{ ms:number, file:string }}
+ */
+export function newestCode(paths, exts = CODE_EXT) {
+  let ms = 0
+  let file = ''
+
+  const walk = (p) => {
+    let st
+    try {
+      st = statSync(p)
+    } catch {
+      return // 路径不存在（换机/删了）→ 当没有
+    }
+    if (st.isFile()) {
+      if (!exts.some((e) => p.endsWith(e))) return
+      if (RUNTIME_JSON.has(basename(p))) return
+      if (st.mtimeMs > ms) {
+        ms = st.mtimeMs
+        file = p
+      }
+      return
+    }
+    if (!st.isDirectory()) return
+    const name = basename(p)
+    if (name === 'node_modules' || name === 'test' || name === '.git') return
+    let list = []
+    try {
+      list = readdirSync(p)
+    } catch {
+      return
+    }
+    for (const f of list) walk(join(p, f))
+  }
+
+  for (const p of paths || []) walk(p)
+  return { ms, file }
+}
 
 /**
  * 服务清单。顺序就是界面上卡片的顺序 —— 按「她」的依赖链排：
@@ -161,6 +244,13 @@ async function pidOfPort(port) {
  */
 export async function probeAll() {
   const procs = await processNames()
+  // 启动时间：DSH 有 instance.json 的 bootAt，其余六项靠 launch.mjs 写的 stamp。
+  // 两个都读不到就是 0 —— 那说明这个进程不是经 launch.mjs 起的（比如你手动 node），
+  // 界面上会如实标「不确定」，不瞎猜。
+  const inst = readJsonSafe(join(fishRoot(), 'instance.json'))
+  const stamps = readJsonSafe(join(fishRoot(), 'launch-stamp.json'))
+  const bootAt = Number(inst.bootAt) || 0
+
   const out = []
   for (const s of SERVICES) {
     let up = false
@@ -171,6 +261,15 @@ export async function probeAll() {
       up = await portOpen(s.probe.port)
       if (up) pid = await pidOfPort(s.probe.port)
     }
+
+    // 代码比进程新 → 待重启。+1000ms 是余量：写文件和启动进程几乎同时发生时
+    // 不该判成「你改过代码」。
+    const newest = newestCode(WATCH[s.key])
+    const startAt = s.key === 'dsh' ? bootAt : Number(stamps[s.key]) || 0
+    const watchable = (WATCH[s.key] || []).length > 0
+    const stale = up && watchable && startAt > 0 && newest.ms > startAt + 1000
+    const unknownStart = up && watchable && startAt === 0 && newest.ms > 0
+
     out.push({
       key: s.key,
       name: s.name,
@@ -180,6 +279,11 @@ export async function probeAll() {
       managed: s.managed !== false,
       up,
       pid,
+      stale,
+      unknownStart,
+      // 两种情况都给出文件名：让「要不要重启」这个决定有据可查
+      staleFile: stale || unknownStart ? basename(newest.file) : '',
+      startAt,
     })
   }
   return out

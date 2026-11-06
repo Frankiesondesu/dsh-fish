@@ -141,6 +141,18 @@
     background:rgba(245,189,98,.08); border:1px solid rgba(245,189,98,.16);
     border-radius:7px; padding:5px 9px; display:inline-block;
   }
+  /* 待重启：比 .warn 更醒目，因为它是「你现在该做的事」 */
+  .stale{
+    margin-top:9px; font-size:11.5px; color:#f3cd91; display:block;
+    background:rgba(245,189,98,.13); border:1px solid rgba(245,189,98,.32);
+    border-radius:7px; padding:6px 9px;
+  }
+  .stale .fn{color:var(--dim); font-size:10.5px}
+  .svc.stale-border{border-color:rgba(245,189,98,.42)}
+  .svc.stale-border::after{
+    content:''; position:absolute; inset:0; pointer-events:none; border-radius:var(--r);
+    box-shadow:inset 0 0 0 1px rgba(245,189,98,.14);
+  }
   .actions{
     display:flex; gap:7px; margin-top:13px; padding-top:13px;
     border-top:1px solid var(--line); position:relative; z-index:1;
@@ -271,9 +283,11 @@ function render() {
   const up = last.filter(s => s.up).length;
   const managed = last.filter(s => s.managed).length;
   const upManaged = last.filter(s => s.managed && s.up).length;
+  const staleCount = last.filter(s => s.stale).length;
 
   summaryEl.innerHTML =
     '<b>' + upManaged + '/' + managed + '</b> 运行中' +
+    (staleCount ? ' · <b style="color:#f5bd62">' + staleCount + '</b> 个待重启' : '') +
     (total !== managed ? ' · <b>' + (up - upManaged) + '</b> 外部服务在线' : '') +
     ' · ' + fmtSince();
 
@@ -281,7 +295,7 @@ function render() {
 
   grid.innerHTML = last.map(s => {
     const st = stateOf(s);
-    const cls = ['svc', st, s.managed ? '' : 'unmanaged', gridBusy ? 'busy' : ''].filter(Boolean).join(' ');
+    const cls = ['svc', st, s.managed ? '' : 'unmanaged', gridBusy ? 'busy' : '', s.stale ? 'stale-border' : ''].filter(Boolean).join(' ');
     const dis = (!s.managed || gridBusy || st === 'working') ? ' disabled' : '';
 
     return '<article class="' + cls + '" data-key="' + esc(s.key) + '">' +
@@ -292,6 +306,9 @@ function render() {
       '</div>' +
       '<p class="desc">' + esc(s.desc) + '</p>' +
       '<div class="status-line"><span class="st">' + esc(statusText(s, st)) + '</span></div>' +
+      (s.stale
+        ? '<span class="stale">代码有改动，<b>需要重启</b> <span class="fn">' + esc(s.staleFile) + '</span></span>'
+        : (s.unknownStart ? '<span class="stale">启动时间不明——如果改过代码，建议重启 <span class="fn">' + esc(s.staleFile) + '</span></span>' : '')) +
       (s.warn ? '<div class="warn">' + esc(s.warn) + '</div>' : '') +
       '<div class="actions">' +
         '<button class="primary" data-a="start"' + dis + '>启动</button>' +

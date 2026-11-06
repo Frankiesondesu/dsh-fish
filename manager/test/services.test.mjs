@@ -65,3 +65,39 @@ test('七项里至少要有她自己那几样（防止有人把清单删空还�
     assert.ok(keys.includes(k), '清单里少了 ' + k)
   }
 })
+
+// ---------------------------------------------------------------- 变更检测（2026-11-07）
+
+test('newestCode：不被运行时 json 骗到（桥每推一条就写 push-state.json）', async () => {
+  const { newestCode } = await import('../services.mjs')
+  const { mkdtemp, writeFile, utimes, rm } = await import('node:fs/promises')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+
+  const dir = await mkdtemp(join(tmpdir(), 'fish-stale-'))
+  try {
+    const code = join(dir, 'a.mjs')
+    const state = join(dir, 'push-state.json')
+    const cfg = join(dir, 'config.json')
+    await writeFile(code, 'x')
+    await writeFile(state, '{}')
+    await writeFile(cfg, '{}')
+    // 代码：旧；运行时状态：最新；配置：中等
+    await utimes(code, new Date(1000), new Date(1000))
+    await utimes(cfg, new Date(2000), new Date(2000))
+    await utimes(state, new Date(9999), new Date(9999))
+
+    const r = newestCode([dir])
+    // config.json 算代码（改它要重启桥），push-state.json 不算
+    assert.ok(r.file.endsWith('config.json'), '应该取 config.json，实际：' + r.file)
+    assert.equal(r.ms, 2000)
+  } finally {
+    await rm(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 })
+  }
+})
+
+test('newestCode：paths 里有不存在的路径也不抛（换机后 turn-taking 可能没搬）', async () => {
+  const { newestCode } = await import('../services.mjs')
+  const r = newestCode(['D:/绝对不存在的路径/xyz'])
+  assert.deepEqual(r, { ms: 0, file: '' })
+})
