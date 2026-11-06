@@ -16,8 +16,8 @@
  * 按概率附送、按对话选图——那些都是替她判断。
  */
 
-import { existsSync, mkdirSync, readdirSync, readFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync } from 'node:fs'
+import { join, isAbsolute, normalize, sep } from 'node:path'
 
 import { toJsonSchema } from './toolschema.js'
 import { rootDir, readEvents, appendEvent } from './store.js'
@@ -95,6 +95,41 @@ export function listMood(names = [], mood = '') {
   return list.filter((n) => matchMood(n, m))
 }
 
+/**
+ * fork.56（2026-11-06）：表情自收藏的三个纯函数（导出给测试）。
+ *
+ * 来源：AstrBot stealer（87★）的理念，按 fish 的形状改——
+ * 收藏是她的经历，不是系统爬包：他发来的图，她看过了、想留下，自己起名收进
+ * memes/，以后就真的会挑到它。系统不做的是：自动收藏、按概率入库、替她归类。
+ *
+ * 名字照样遵守「文件名就是它的意思」：类别-描述，由她自己写。
+ */
+
+/** 收藏用的名字清洗：去路径分隔符和系统里的非法字符，留中文/字母/数字/空格/-。 */
+export function sanitizeMemeName(name) {
+  return String(name ?? '')
+    .replace(/[\/:*?"<>|]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 40)
+}
+
+/** 路径必须落在她的这两个目录里（收件箱 = 他递来的，media/ = 他发过的图）；别的目录不算。 */
+export function insideHerDirs(p, root) {
+  const norm = normalize(String(p ?? '')).toLowerCase()
+  if (!isAbsolute(norm)) return false
+  const dirs = [join(root, 'home', 'inbox'), join(root, 'media')].map((d) => normalize(d).toLowerCase())
+  return dirs.some((d) => norm === d || norm.startsWith(d.endsWith(sep) ? d : d + sep))
+}
+
+/** 目标文件名：重名加时间戳，绝不覆盖她已收藏的图。 */
+export function memeTargetName(names, base, ext) {
+  let name = `${base}${ext}`
+  if (!names.includes(name)) return name
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
+  return `${base}-${stamp}${ext}`
+}
+
 export function registerMeme(ctx, deps = {}) {
   const root = deps.root ?? rootDir()
   const dir = memeDir(root)
@@ -120,6 +155,14 @@ export function registerMeme(ctx, deps = {}) {
           type: 'string',
           description: '指定发哪一张（预览里看到的文件名，写其中一段也行）。不填就随便挑一张。',
         },
+        savePath: {
+          type: 'string',
+          description: '想收下一张图就给它完整路径（只认他递来的：收件箱里的和你收过的 media/）。给了这个就是收藏，不发送。',
+        },
+        saveName: {
+          type: 'string',
+          description: '收藏时给它起的名字，文件名就是它的意思：类别-描述（比如 无语-翻白眼2）。',
+        },
       }),
       output: {
         schema: {
@@ -131,6 +174,7 @@ export function registerMeme(ctx, deps = {}) {
             note: { type: 'string' },
             options: { type: 'array', items: { type: 'string' } },
             more: { type: 'number' },
+            saved: { type: 'boolean' },
           },
           required: ['ok', 'note'],
         },
@@ -140,12 +184,46 @@ export function registerMeme(ctx, deps = {}) {
             const tail = more > 0 ? ` …还有 ${more} 张` : ''
             return [{ type: 'text', text: `[这一类有 ${out.options.length + more} 张：${out.options.join(' / ')}${tail}]` }]
           }
+          if (out.saved) return [{ type: 'text', text: out.ok ? `[收下了：${out.picked}]` : `[没收下：${out.note}]` }]
           return [{ type: 'text', text: out.ok ? `[发了一张表情：${out.picked}]` : `[没发出去：${out.note}]` }]
         },
       },
       async execute(args, exec) {
         const who = guardWrite(deps.tenant, exec, 'her_meme')
         if (!who.ok) return { ok: false, picked: '', why: '', note: who.note }
+
+        // fork.56：收藏分支——把一张图收进 memes/，名字她起。只收藏，不发送。
+        const savePath = String(args?.savePath ?? '').trim()
+        if (savePath) {
+          const root = deps.root ?? rootDir()
+          if (!insideHerDirs(savePath, root)) {
+            return { ok: false, picked: '', why: '', saved: false, note: '只收他递来的图（收件箱里的和你收过的 media/），别的路径不碰。' }
+          }
+          const ext = MEME_EXT.find((e) => savePath.toLowerCase().endsWith(e))
+          if (!ext) {
+            return { ok: false, picked: '', why: '', saved: false, note: '这种格式不是表情（png/jpg/gif/webp 才收）。' }
+          }
+          const base = sanitizeMemeName(args?.saveName)
+          if (!base) {
+            return { ok: false, picked: '', why: '', saved: false, note: '给它起个名字（类别-描述，比如 开心-笑死），这就是它以后的意思。' }
+          }
+          try {
+            if (statSync(savePath).size > MEME_MAX_BYTES) {
+              return { ok: false, picked: '', why: '', saved: false, note: '这张太大（超过 5MB），收不下。' }
+            }
+          } catch {
+            return { ok: false, picked: '', why: '', saved: false, note: '这张图读不出来（可能已经被清掉了）。' }
+          }
+          try { mkdirSync(dir, { recursive: true }) } catch { /* 已存在 */ }
+          const names0 = existsSync(dir) ? readdirSync(dir) : []
+          const finalName = memeTargetName(names0, base, ext)
+          try {
+            copyFileSync(savePath, join(dir, finalName))
+          } catch {
+            return { ok: false, picked: '', why: '', saved: false, note: '没收下来（写文件失败）。' }
+          }
+          return { ok: true, picked: finalName, why: '', saved: true, note: '' }
+        }
 
         let names = []
         try {
