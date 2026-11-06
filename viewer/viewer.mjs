@@ -291,8 +291,8 @@ async function buildData() {
 const SERVICES = [
   { name:'ASR 听写', port:18765, url:'http://127.0.0.1:18765/health', desc:'paraformer-zh · 语音转字；第一句要等冷启动' },
   { name:'smart-turn 话轮', port:18766, url:'http://127.0.0.1:18766/health', desc:'v3.2 CPU ONNX · 判「这句话说完了吗」，实测 40–110ms' },
-  { name:'对话 TTS · CosyVoice2', port:18767, url:'http://127.0.0.1:18767/health', desc:'本地音色 + 呼吸/停顿标记；没起时 her_voice 仍走 edge-tts' },
-  { name:'全双工', port:18768, url:'http://127.0.0.1:18768/health', desc:'Moshi 7B 需约 15G 显存，本机 8G 跑不动；此路只落「边听边说 + 打断不重置人格」的接口' },
+  { name:'对话 TTS · CosyVoice2', port:18767, url:'http://127.0.0.1:18767/health', desc:'本地音色 + 句间停顿 / [laughter] / [breath]；RTF≈5，适合异步语音条。没起时 her_voice 仍走 edge-tts' },
+  { name:'全双工接口', port:18768, url:'http://127.0.0.1:18768/health', desc:'Moshi 7B 需约 15G 显存，本机 8G 跑不动；这里是「边听边说 + 打断不重置人格」的状态机原型' },
   { name:'QQ 桥', port:6199, url:'http://127.0.0.1:6199/', desc:'bridge · QQ 收发' },
   { name:'查看器', port:PORT, url:'http://127.0.0.1:'+PORT+'/api/data', desc:'本页' },
 ]
