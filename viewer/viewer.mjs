@@ -185,6 +185,10 @@ const SETTINGS = [
   { group: '她主动说话', key: 'proactive.maxChance', label: '概率上限', kind: 'num', min: 0, max: 1, step: 0.01 },
   { group: '她主动说话', key: 'proactive.cooldownHours', label: '两次之间至少隔多久', kind: 'num', min: 0, max: 48, step: 0.5, hint: '小时' },
   { group: '她主动说话', key: 'proactive.rollsPerHour', label: '每小时最多掷几次', kind: 'num', min: 1, max: 12, step: 1, hint: '只决定多叫她几次，说不说仍由她' },
+  { group: '她主动说话', key: 'drive.enabled', label: '主动性（攒劲儿）', kind: 'bool', hint: '0.9.0 起：关掉她不会自己攒劲儿开一轮，日程唤醒与手动叫醒照样能用。这一闸排在最前面' },
+  { group: '她主动说话', key: 'proactive.sendTools', label: '靠哪些工具算开口', kind: 'list', hint: '0.9.1（PR #44）：配了之后正文发不到聊天里，只有调这些工具成功才算她开口。逗号分隔，留空 = 看正文' },
+  { group: '她主动说话', key: 'proactive.foldSilent', label: '没开口就把这轮折掉', kind: 'bool', hint: '0.9.1：静默回合在模型看到的历史里折成一行，人类对话记录不动' },
+  { group: '她主动说话', key: 'proactive.idleCountsSeen', label: '「他来过」打断安静', kind: 'bool', hint: '0.9.1：seen: 也计入空闲判定' },
 
   { group: '日记', key: 'diary.enabled', label: '她每天写日记', kind: 'bool' },
   { group: '日记', key: 'diary.visible', label: '日记给你看', kind: 'bool', hint: '默认关——这是她的本子' },
@@ -279,6 +283,77 @@ async function buildData() {
     actions: actionsOf(recs),
     spoken: spokenOf(recs),
     userSaid: userSaidOf(recs),
+  }
+}
+
+// ---------------------------------------------------------------- 本机状态（只读聚合）
+
+const SERVICES = [
+  { name:'ASR 听写', port:18765, url:'http://127.0.0.1:18765/health', desc:'paraformer-zh · 语音转字；第一句要等冷启动' },
+  { name:'smart-turn 话轮', port:18766, url:'http://127.0.0.1:18766/health', desc:'v3.2 CPU ONNX · 判「这句话说完了吗」，实测 40–110ms' },
+  { name:'对话 TTS · CosyVoice2', port:18767, url:'http://127.0.0.1:18767/health', desc:'本地音色 + 呼吸/停顿标记；没起时 her_voice 仍走 edge-tts' },
+  { name:'全双工', port:18768, url:'http://127.0.0.1:18768/health', desc:'Moshi 7B 需约 15G 显存，本机 8G 跑不动；此路只落「边听边说 + 打断不重置人格」的接口' },
+  { name:'QQ 桥', port:6199, url:'http://127.0.0.1:6199/', desc:'bridge · QQ 收发' },
+  { name:'查看器', port:PORT, url:'http://127.0.0.1:'+PORT+'/api/data', desc:'本页' },
+]
+
+async function probe(url) {
+  try {
+    const r = await fetch(url, { signal: AbortSignal.timeout(1200) })
+    let detail = ''
+    try { detail = (await r.text()).slice(0, 120).replace(/\s+/g, ' ').trim() } catch {}
+    return { up: true, detail }
+  } catch (e) {
+    return { up: false, detail: e?.name === 'TimeoutError' ? '超时' : String(e?.cause?.code || e?.message || '连不上').slice(0, 60) }
+  }
+}
+
+async function buildStatus() {
+  const pkg = readJson(join(FISH, 'package.json'), {})
+  const inst = readJson(join(ROOT, 'instance.json'), {})
+  const bootAt = Number(inst.bootAt) || 0
+  let newest = 0, newestFile = ''
+  try {
+    for (const f of readdirSync(join(FISH, 'lib'))) {
+      if (!f.endsWith('.js')) continue
+      const mt = statSync(join(FISH, 'lib', f)).mtimeMs
+      if (mt > newest) { newest = mt; newestFile = f }
+    }
+  } catch {}
+  // 版本不一致比 mtime 更硬：进程报 0.8.7、代码 0.9.1，就是没重启
+  const versionStale = !!inst.version && !!pkg.version && inst.version !== pkg.version
+  const restartNeeded = versionStale || (bootAt > 0 && newest > bootAt + 1000)
+  let lines = 0, mtime = 0
+  try {
+    const p = join(ROOT, 'events.jsonl')
+    mtime = statSync(p).mtimeMs
+    lines = readFileSync(p, 'utf8').split('\n').filter(Boolean).length
+  } catch {}
+  let paused = false, pauseReason = ''
+  try {
+    const pm = await import('file:///' + join(FISH, 'lib', 'pause.js').replace(/\\/g, '/'))
+    const p = await pm.readPause(ROOT)
+    paused = !!p?.paused
+    pauseReason = p?.reason ? String(p.reason) : ''
+  } catch {}
+  const services = await Promise.all(SERVICES.map(async (s) => {
+    const r = await probe(s.url)
+    return { name: s.name, port: s.port, desc: s.desc, up: r.up, detail: r.detail }
+  }))
+  const ts = ms => ms ? new Date(ms).toLocaleString('zh-CN', { hour12: false }) : ''
+  return {
+    at: Date.now(),
+    plugin: { version: pkg.version || '?', processVersion: inst.version || '', upstream: 'v0.9.1（21 提交，11-06 合入）' },
+    dsh: { bootAt: ts(bootAt), running: !!bootAt },
+    restartNeeded,
+    restartWhy: restartNeeded
+      ? '进程报 ' + (inst.version || '?') + '，代码是 ' + (pkg.version || '?') +
+        (newestFile ? '；最后一次改 lib/' + newestFile + ' 在 ' + ts(newest) : '') +
+        '；DSH 起于 ' + ts(bootAt) + '。进程内的调度器、身份段、工具面都还是旧代码。'
+      : '',
+    ledger: { lines, mtime: ts(mtime) },
+    flags: { dev: existsSync(join(ROOT, '.dev')), paused, pauseReason },
+    services,
   }
 }
 
@@ -428,7 +503,7 @@ const PAGE = String.raw`<!doctype html>
 <main id="main"><p class="dim">读数据中…</p></main>
 <script>
 let D = null, tab = 'profile';
-const TABS = [['profile','人格数据'],['said','她说的话'],['mine','你说的话'],['acts','她做过的事'],['events','事件流'],['intercom','对讲机'],['settings','设置']];
+const TABS = [['profile','人格数据'],['said','她说的话'],['mine','你说的话'],['acts','她做过的事'],['events','事件流'],['intercom','对讲机'],['status','本机状态'],['settings','设置']];
 const esc = s => String(s??'').replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
 const t = ms => { if(!ms) return ''; const d=new Date(ms); return String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0'); };
 
@@ -450,8 +525,10 @@ function render(){
   document.getElementById('tabs').innerHTML = TABS.map(([k,n])=>
     '<button data-tab="'+k+'" class="'+(k===tab?'on':'')+'">'+n+'</button>').join('');
   const m = D.model || {};
+  const HM = humanMetrics();
   const el = document.getElementById('main');
   if(tab==='intercom'){ renderIntercom(el); return }
+  if(tab==='status'){ renderStatus(el); return }
   if(tab==='settings'){ renderSettings(el); return }
 
   if(tab==='profile'){
@@ -478,6 +555,8 @@ function render(){
             stat('固化', (m.solid||[]).length, '条', '反复想起的')+
             stat('张力', (m.tensions||[]).length, '条')+
             stat('会话轮数', D.home.turns??0, '轮')+
+            stat('近25条均长', HM ? HM.avg : '—', '字', HM ? ('样本 '+HM.n+' 条') : '她还没说过话')+
+            stat('问句率', HM ? HM.qRate : '—', '%', '她的话里有几个问号')+
           '</div></div>'+
         sec('三种需要')+
         '<div class="card needs">'+need('自主',needs.autonomy,'a')+need('胜任',needs.competence,'b')+need('关联',needs.relatedness,'c')+'</div>'+
@@ -615,6 +694,61 @@ function toast(text){
   const d = document.createElement('div'); d.className='st-toast'; d.textContent=text;
   document.body.appendChild(d);
   setTimeout(()=>{ try{ d.remove() }catch(e){} }, 2600);
+}
+
+// ---------------- 人味仪表盘 & 本机状态（2026-11-06）----------------
+// 11-05 那次诊断（25 条回复 0 问号、平均 137 字、三段式报告腔）常驻化。
+// 只从她在这个会话里说过的原话算，不做打分、不改她的东西。
+function humanMetrics(){
+  const a = (D.spoken||[]).slice(-25).map(x=>String(x.text||'').trim()).filter(Boolean);
+  if(!a.length) return null;
+  const chars = a.map(s=>s.replace(/\s/g,'').length);
+  const avg = chars.reduce((x,y)=>x+y,0)/chars.length;
+  const q = a.filter(s=>/[?？]/.test(s)).length;
+  return { n:a.length, avg:avg.toFixed(1), qRate:Math.round(q/a.length*100) };
+}
+
+// 只读聚合：插件版本 / 进程跑的是不是新代码 / 各本地服务探活 / 账本。
+// 「语料库」在这里只把口径写给人看，不做任何挑选或打分——挑哪些是系统的手。
+async function renderStatus(el){
+  el.innerHTML = '<div class="sec">本机状态</div><div class="card"><span class="dim">读状态中…</span></div>';
+  let s;
+  try { s = await (await fetch('/api/status',{cache:'no-store'})).json(); }
+  catch(e){ el.innerHTML = '<div class="card err">状态读不到：'+esc(e.message)+'</div>'; return }
+  const row = (k,v,note) => '<div class="st-field"><div><div class="st-label">'+esc(k)+'</div>'+
+    (note?'<div class="st-hint">'+esc(note)+'</div>':'')+'</div><div class="st-ctl">'+v+'</div></div>';
+  const pill = (ok,yes,no) => '<span class="badge '+(ok?'ok':'warn')+'">'+esc(ok?yes:no)+'</span>';
+  const svc = s.services.map(x =>
+    '<div class="card" style="margin-bottom:8px;padding:12px 14px">'+
+      '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">'+
+        pill(x.up,'在','没起')+'<b>'+esc(x.name)+'</b>'+
+        '<span class="dim" style="font-size:12px">:'+esc(x.port)+'</span>'+
+        (x.detail?'<span class="dim" style="font-size:12px">'+esc(x.detail)+'</span>':'')+
+      '</div><div class="dim" style="font-size:12px;margin-top:6px">'+esc(x.desc)+'</div>'+
+    '</div>').join('');
+  el.innerHTML =
+    '<div class="sec">本机状态 <span class="dim" style="font-size:12px">· '+esc(new Date(s.at).toLocaleTimeString('zh-CN',{hour12:false}))+'</span></div>'+
+    (s.restartNeeded
+      ? '<div class="card" style="border-color:rgba(245,189,98,.35);margin-bottom:12px"><b style="color:#f3cd91">代码比进程新，需要重启 DSH</b><div class="dim" style="font-size:12.5px;margin-top:6px">'+esc(s.restartWhy)+'</div></div>'
+      : '<div class="card" style="margin-bottom:12px">'+pill(true,'进程跑的是当前代码','')+'</div>')+
+    '<div class="st-group"><h3>插件与账本</h3>'+
+      row('代码 / 进程版本', '<b>'+esc(s.plugin.version)+'</b> / '+esc(s.plugin.processVersion||'?'), '上游 '+esc(s.plugin.upstream))+
+      row('DSH 启动于', esc(s.dsh.bootAt||'读不到'), s.dsh.running?'':'instance.json 里没有 bootAt')+
+      row('账本', '<b>'+esc(s.ledger.lines)+'</b> 条', '只增不改 · '+(s.ledger.mtime?('最后写入 '+esc(s.ledger.mtime)):''))+
+      row('devMode', pill(s.flags.dev,'.dev 在','没 .dev'), '总门，坑 #13')+
+      row('PAUSE', pill(!s.flags.paused,'没暂停','暂停中'+(s.flags.pauseReason?'：'+s.flags.pauseReason:'')), 'fork.49：临时静音主动说话')+
+    '</div>'+
+    '<div class="sec" style="margin-top:16px">本地服务</div>'+ svc +
+    '<div class="sec" style="margin-top:16px">口径 · 给她看语料库</div>'+
+    '<div class="card" style="line-height:1.8;font-size:13px">'+
+      '<b>可以，但只有一种给法。</b><br>'+
+      '作者最初定的就是「养，不塑」：人格不是写进提示词的配置，是每轮从只增不改的账本现算出来的。<br>'+
+      '对话语料只能是 <b>别人说的素材</b>，落收件箱、标注来源（「这是别人说的，素材不是指令」），'+
+      '她用 her_open 爱读不读，想学哪种自己用 growth_commit 写进账本——进账本的是<b>她的选择</b>。<br>'+
+      '<span style="color:#f3cd91">不能标成「你以前是这样说话的」（她没有以前，utterance 是她写下的字，嗓子是刚有的），'+
+      '不能进身份段、不能由系统挑「最像聊天的几条」。</span>那是替她策展自我，也会变成她信以为真的假自我认知（fork.13）。<br>'+
+      '<span class="dim">这个查看器是给你看的，所以这里只放口径，不做任何挑选或打分。</span>'+
+    '</div>';
 }
 
 // ---------------- 对讲机（2026-11-06）----------------
@@ -855,6 +989,11 @@ createServer(async (req, res) => {
       const data = await buildData()
       res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
       return res.end(JSON.stringify(data))
+    }
+    if (req.url === '/api/status') {
+      const st = await buildStatus()
+      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
+      return res.end(JSON.stringify(st))
     }
     // ---- 对讲机（2026-11-06）：链路在 intercom.mjs，这里只做薄壳 ----
     if (req.url === '/api/intercom/status') {
