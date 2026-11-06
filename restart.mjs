@@ -33,6 +33,14 @@ const NODE = process.execPath
 let CHECK = process.argv.includes('--check')
 let TARGET = process.argv.slice(2).find((a) => !a.startsWith('-')) ?? ''
 
+// 2026-11-06：也认 `node restart.mjs 3` 这种数字写法（和菜单同一个编号）。
+// 以前只认中文名，传 3 会被当成不认识的目标，连一项都关不掉。
+if (/^[1-4]$/.test(TARGET)) {
+  const n = TARGET
+  TARGET = n === '2' ? '桥' : n === '3' ? 'DSH' : ''
+  if (n === '4') CHECK = true
+}
+
 const out = (...a) => console.log(...a)
 
 function runNode(script, args) {
@@ -85,7 +93,6 @@ function herBootAt() {
   }
 }
 
-const touchesDsh = !TARGET || /^dsh$/i.test(TARGET)
 const before = herBootAt()
 
 out('')
@@ -96,8 +103,17 @@ if (process.argv.includes('--menu')) {
   if (pick === '2') TARGET = '桥'
   else if (pick === '3') TARGET = 'DSH'
   else if (pick === '4') CHECK = true
+  else if (pick !== '1' && pick !== '') {
+    // 2026-11-06（用户）：以前「没认出来」会静默走默认＝全部重启。
+    // 他按全角「３」时整条链路被关了一次——宁可什么都不做，也不能按最危险的那个默认跑。
+    out('')
+    out('  ✗ 只认 1 / 2 / 3 / 4（直接回车＝全部重启）。什么都没动。')
+    process.exit(2)
+  }
   out('')
 }
+// 菜单选完才算得出来：只重启桥时不该去等 DSH 的 bootAt（否则白等 90 秒还报假警告）
+const touchesDsh = !TARGET || /^dsh$/i.test(TARGET)
 if (TARGET) out(`  只重启：${TARGET}`)
 
 if (CHECK) {
@@ -189,7 +205,23 @@ async function choose() {
   out('  3. 只重启 DSH  改完插件代码用这个（fork 生效）')
   out('  4. 只看会关什么，不动手')
   out('')
-  const ans = String(await ask('  选一个（1-4，直接回车=全部重启）：')).trim()
+  const raw = await ask('  选一个（1-4，直接回车=全部重启）：')
   rl.close()
+  const ans = normPick(raw)
+  // 回显：让他一眼看到脚本到底理解成了什么，别默默按默认跑完才发现不对
+  const LABEL = { '1': '全部重启', '2': '只重启桥', '3': '只重启 DSH', '4': '只看会关什么（不动手）' }
+  const what = ans === '' ? '全部重启（按了回车）' : (LABEL[ans] ?? `不认识：「${raw}」`)
+  out(`  → 你选的是：${what}`)
   return ans
+}
+
+/**
+ * 归一化菜单输入。2026-11-06 用户踩到：中文输入法下按 3，上屏的是全角「３」，
+ * `pick === '3'` 不成立，脚本就静默走了「直接回车＝全部重启」——整条链路被关了一次。
+ * 全角数字按 Unicode 规律减 0xFEE0 就是半角；顺手去掉空格和常见标点。
+ */
+function normPick(s) {
+  return String(s ?? '')
+    .replace(/[\uFF10-\uFF19]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0xfee0))
+    .replace(/[\s.。、,，]/g, '')
 }
