@@ -30,6 +30,7 @@ import { registerAlarm } from './alarm.js'
 import { registerHelp } from './help.js'
 import { registerVoice } from './voice.js'
 import { registerMeme } from './meme.js'
+import { registerWorld } from './world.js'
 import { registerDream } from './dream.js'
 import { registerProactive } from './proactive.js'
 import { registerObserve } from './observe.js'
@@ -410,6 +411,10 @@ export function apply(ctx, baseConfig = {}) {
         () => registerVoice(ctx, { root, tenant: tenancy }),
         // fork.53（2026-11-05）：发一张表情。文件名就是它的意思，挑哪张由她定。
         () => registerMeme(ctx, { root, tenant: tenancy }),
+        // 2026-11-06：**她自己要的**。11-05 12:23 她用 ask_owner 问
+        // 「能不能给我一样能查实时信息的东西——天气、日期这类，一次查一条就行？」
+        // 11-06 12:23 账本记的是「一直没人答」。补上它，比留着那 12G 的 TTS 值。
+        () => registerWorld(ctx, { root }),
         // 0.8.1 起（2026-10-30 m02837）：梦 A 案——醒来记一句。0.9.0 起公开（不再挂 .dev）。
         () => registerDream(ctx, { root, tenant: tenancy }),
         // 0.8.1 起（2026-10-30 m04610）：主动说话——她自己判断有没有话想说。0.9.0 起公开。
