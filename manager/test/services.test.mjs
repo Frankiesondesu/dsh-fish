@@ -101,3 +101,39 @@ test('newestCode：paths 里有不存在的路径也不抛（换机后 turn-taki
   const r = newestCode(['D:/绝对不存在的路径/xyz'])
   assert.deepEqual(r, { ms: 0, file: '' })
 })
+
+// ---------------------------------------------------------------- 一键重启待重启（2026-11-07）
+
+test('一键重启待重启：路由与编排都在（源码形状守卫）', async () => {
+  const { readFile } = await import('node:fs/promises')
+  const here = new URL('.', import.meta.url)
+  const svc = await readFile(new URL('../services.mjs', import.meta.url), 'utf8')
+  const srv = await readFile(new URL('../server.mjs', import.meta.url), 'utf8')
+
+  // 编排必须走 restartOne（它有「等真退干净再拉起」的流程）——
+  // 在这里另写一套关起逻辑，就是 11-06「只关不起」那个坑的重演
+  assert.match(svc, /export async function restartStale\(\)/, 'restartStale 要存在')
+  assert.match(svc, /await restartOne\(s\.key\)/, '逐项重启必须复用 restartOne')
+  // 只动 stale 且 managed 的；unknownStart（手动起的）不进目标
+  assert.match(svc, /s\.stale && s\.managed/, '目标筛选必须是 stale && managed')
+  // 一项失败不挡后面
+  assert.match(svc, /results\.push\(\{ key: s\.key, name: s\.name, ok: false/, '失败要记录并继续')
+
+  assert.match(srv, /\/api\/restart-stale/, 'server 要有这条路由')
+  assert.match(srv, /restartStale\(\)/, '路由要调 restartStale')
+  assert.match(srv, /没有需要重启的服务/, '没目标时要给人话，不是 500')
+})
+
+test('一键重启待重启：目标清单里不该有 ASR 和 LuckyLillia（它们没有我们改得动的代码）', async () => {
+  const { SERVICES } = await import('../services.mjs')
+  // WATCH 为空的项永远 stale 不了——一键重启永远不会替用户重启 QQ 客户端
+  for (const s of SERVICES.filter((x) => !(x.watch || []).length)) {
+    // watch 不在 SERVICES 上，在模块内的 WATCH 表里；这里用 managed + 探测方式反推：
+    // asr（managed:false）本来就不进目标；ll 的 WATCH 是空数组
+    if (s.key === 'asr') assert.equal(s.managed, false, 'asr 必须保持只读')
+  }
+  // 直接核 WATCH 表：ll 和 asr 的 watch 必须为空，否则「全部重启待重启」会动到 QQ 客户端
+  const svc = await import('node:fs/promises').then((m) => m.readFile(new URL('../services.mjs', import.meta.url), 'utf8'))
+  assert.match(svc, /ll: \[\]/, 'LuckyLillia 的 WATCH 必须为空——QQ 客户端不是我们改得动的')
+  assert.match(svc, /asr: \[\]/, 'ASR 的 WATCH 必须为空——它归 vs 管线管')
+})

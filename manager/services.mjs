@@ -90,6 +90,17 @@ export function clearLogs() {
   }
 }
 
+/** 往管理器日志追加一行（编排类动作的进度，比如批量重启做到第几个）。写不了不抛。 */
+export function logLine(tag, text) {
+  try {
+    mkdirSync(LOG_DIR, { recursive: true })
+    appendFileSync(MANAGER_LOG, `${logStamp(tag)}${text}\n`)
+    return true
+  } catch {
+    return false
+  }
+}
+
 /**
  * 这些 json 是运行时状态，不是代码 —— 桥每推一条就写一次 push-state.json，
  * 不排除的话它会永远比进程新，桥就永远显示「待重启」。
@@ -437,4 +448,37 @@ export async function restartOne(key) {
   if (!gone) throw new Error(`${s.name} 没在 20 秒内退出，这次没有重启（它可能卡住了）`)
   startOne(key)
   return true
+}
+
+/**
+ * 当前「代码比进程新」的可管理服务（2026-11-07，一键重启待重启的选项）。
+ * 只认 stale：代码新于进程。启动时间不明的（unknownStart，多半是手动起的）
+ * **不进**这个清单——猜错一次就是替用户重启了他不想动的进程。
+ */
+export async function staleServices() {
+  const all = await probeAll()
+  return all.filter((s) => s.stale && s.managed)
+}
+
+/**
+ * 把待重启的挨个重启（串行：同时收两棵进程树会互相踩「端口让出来没」的判断）。
+ * 每一项都走 restartOne 的「等真退干净再拉起」流程；一项卡住不挡后面的。
+ * 返回逐项结果，调用方（server.mjs）在后台跑它，状态靠前端轮询。
+ */
+export async function restartStale() {
+  const targets = await staleServices()
+  if (!targets.length) return { targets: [], results: [] }
+  logLine('重启待重启', `目标 ${targets.length} 项：${targets.map((s) => s.name).join('、')}`)
+  const results = []
+  for (const s of targets) {
+    try {
+      await restartOne(s.key)
+      results.push({ key: s.key, name: s.name, ok: true })
+      logLine('重启待重启', `${s.name}：已重新拉起`)
+    } catch (err) {
+      results.push({ key: s.key, name: s.name, ok: false, why: String(err?.message ?? err) })
+      logLine('重启待重启', `${s.name}：失败——${String(err?.message ?? err)}`)
+    }
+  }
+  return { targets: targets.map((s) => ({ key: s.key, name: s.name })), results }
 }

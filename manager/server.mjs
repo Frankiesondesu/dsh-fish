@@ -16,7 +16,7 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { spawn } from 'node:child_process'
 
-import { HERE, ROOT, probeAll, startOne, stopOne, restartOne, serviceOf, readLogs, clearLogs, spawnLogged } from './services.mjs'
+import { HERE, ROOT, probeAll, startOne, stopOne, restartOne, restartStale, staleServices, serviceOf, readLogs, clearLogs, spawnLogged } from './services.mjs'
 
 const PORT = Number(process.env.FISH_MANAGER_PORT || 7789)
 const UI = join(HERE, 'ui.html')
@@ -149,6 +149,29 @@ createServer(async (req, res) => {
         await sleep(1200)
         busy = ''
       }
+    }
+
+    // 一键重启「需要重启的服务」（2026-11-07，用户要求）：
+    // 只动 stale=true 的（代码比进程新），启动时间不明的不算——猜错就是替用户
+    // 重启了他手动起的进程。串行在后台跑（DSH 等退干净最多 20 秒，多项得一两分钟），
+    // HTTP 立即返回目标清单，进度看日志面板和卡片。
+    if (url === '/api/restart-stale' && req.method === 'POST') {
+      if (busy) return json(res, 409, { ok: false, error: `正忙（${busy}），等它完` })
+      const targets = await staleServices()
+      if (!targets.length) return json(res, 200, { ok: true, count: 0, names: [], message: '没有需要重启的服务，一切是新的。' })
+      busy = `待重启 · ${targets.map((t) => t.name).join('、')}`
+      // 后台逐项跑，全程占着 busy（单项动作会被挡住，防中途插一个「全部停止」把顺序搅乱）
+      restartStale()
+        .catch(() => {})
+        .finally(() => {
+          setTimeout(() => { busy = '' }, 600)
+        })
+      return json(res, 200, {
+        ok: true,
+        count: targets.length,
+        names: targets.map((t) => t.name),
+        message: `正在重启 ${targets.length} 项：${targets.map((t) => t.name).join('、')}…（进度看下面的日志）`,
+      })
     }
 
     if (url === '/' || url === '/index.html') {

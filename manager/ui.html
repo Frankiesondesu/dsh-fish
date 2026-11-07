@@ -227,6 +227,7 @@
     <div class="summary" id="summary">探测中…</div>
     <div class="spacer"></div>
     <div class="bulk">
+      <button class="primary" id="stalebtn" data-stale disabled>重启待重启</button>
       <button class="primary" data-all="start">全部启动</button>
       <button data-all="restart">全部重启</button>
       <button class="danger" data-all="stop">全部停止</button>
@@ -329,6 +330,14 @@ function render() {
     (staleCount ? ' · <b style="color:#f5bd62">' + staleCount + '</b> 个待重启' : '') +
     (total !== managed ? ' · <b>' + (up - upManaged) + '</b> 外部服务在线' : '') +
     ' · ' + fmtSince();
+
+  // 一键重启待重启：没有目标就禁用，有目标高亮并带数量
+  const staleBtn = document.getElementById('stalebtn');
+  if (staleBtn) {
+    staleBtn.textContent = staleCount ? '重启待重启（' + staleCount + '）' : '没有待重启';
+    staleBtn.disabled = !staleCount || gridBusy;
+    staleBtn.classList.toggle('primary', !!staleCount);
+  }
 
   const gridBusy = !!busy;
 
@@ -440,6 +449,43 @@ async function actAll(action) {
   }
 }
 
+// 一键重启「需要重启的服务」（2026-11-07）：只动卡片上标着橙色「需要重启」的。
+// 启动时间不明的（多半是手动起的）不算，弹窗里说清楚，要动就单独点。
+async function actStale() {
+  const targets = last.filter(s => s.stale && s.managed);
+  if (!targets.length) return;
+  const names = targets.map(s => s.name).join('、');
+  const dsh = targets.find(s => s.key === 'dsh');
+  const unknown = last.filter(s => s.unknownStart).length;
+  let msg = '重启这些服务：' + names + '。';
+  if (dsh) msg += '\n\n⚠️ DSH 重启会断她当前会话。';
+  if (unknown) msg += '\n\n另有 ' + unknown + ' 项「启动时间不明」，这次不动——要动就在它的卡片上单独点重启。';
+  if (!confirm(msg + '\n\n现在开始吗？')) return;
+  // 每张目标卡先进「正在重启…」状态；服务真正回来（up）时 stateOf 会自动清掉。
+  // 时限给宽些：串行重启 + DSH 慢退出，一项最多可能等 20 秒。
+  targets.forEach(t => pending.set(t.key, { until: Date.now() + targets.length * 90_000, action: 'restart' }));
+  busy = '重启待重启';
+  render();
+  try {
+    const r = await fetch('/api/restart-stale', { method: 'POST' });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || !j.ok) {
+      targets.forEach(t => pending.delete(t.key));
+      toast(j.error || '操作失败', 'err');
+      render();
+      return;
+    }
+    if (!j.count) { targets.forEach(t => pending.delete(t.key)); toast(j.message || '没有需要重启的服务', 'ok'); render(); return }
+    toast(j.message, 'ok');
+    setTimeout(refresh, 1200);
+  } catch (e) {
+    targets.forEach(t => pending.delete(t.key));
+    toast('连不上管理器：' + e.message, 'err');
+  } finally {
+    setTimeout(() => { busy = ''; refresh() }, targets.length * 3000);
+  }
+}
+
 // 事件代理：卡片按钮
 grid.addEventListener('click', (ev) => {
   const btn = ev.target.closest('button[data-a]');
@@ -453,6 +499,8 @@ grid.addEventListener('click', (ev) => {
 
 // 顶栏批量
 document.querySelector('.bulk').addEventListener('click', (ev) => {
+  const staleBtn = ev.target.closest('button[data-stale]');
+  if (staleBtn) { if (!staleBtn.disabled) actStale(); return }
   const btn = ev.target.closest('button[data-all]');
   if (!btn || btn.disabled) return;
   actAll(btn.dataset.all);
