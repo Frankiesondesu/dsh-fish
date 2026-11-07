@@ -296,6 +296,23 @@ export function registerObserve(ctx, deps = {}) {
     send(res, 200, r)
   }
 
+  /**
+   * 叫醒她一次。`/wake`（界面用）和 `/local/wake`（7788 查看器用，2026-11-07）共用，
+   * 免得两条路的行为哪天悄悄分叉——同 handleSay 的理由。
+   */
+  async function handleWake(req, res) {
+    if (req.method !== 'POST') return send(res, 405, { error: 'method not allowed' })
+    // ?focus=browse：设置页那个「让她去刷 B 站」按钮（仅本机测试版）。
+    // 传下去之后 wakeNow 会跳过「今天该不该醒」的判断，只做一件事：叫醒她，并让这一轮
+    // 的处境明确指向 B 站首页。
+    let focus = ''
+    try { focus = new URL(String(req.url ?? '/'), 'http://localhost').searchParams.get('focus') ?? '' } catch { /* 解析失败就当没传 */ }
+    const r = await wakeNow(ctx, { root, focus, log: (...a) => console.log('[dsh-fish]', ...a) })
+    // 失败时补一个 error 字段：前端 jpost 只认得 error，不然界面只会显示「HTTP 409」，
+    // 而真正的原因（「今天已经叫过三次了」这类）就在 r.why 里。
+    send(res, r.ok ? 200 : 409, r.ok ? r : { ...r, error: r.why || '这次没叫醒' })
+  }
+
   const routes = [
     ['/status', async (req, res) => {
       // 旁观者视角：全部由宿主写下的 meta + 配置 + 时钟算出，她不参与
@@ -1062,18 +1079,7 @@ export function registerObserve(ctx, deps = {}) {
       })
     }],
 
-    ['/wake', async (req, res) => {
-      if (req.method !== 'POST') return send(res, 405, { error: 'method not allowed' })
-      // ?focus=browse：设置页那个「让她去刷 B 站」按钮（仅本机测试版）。
-      // 传下去之后 wakeNow 会跳过「今天该不该醒」的判断，只做一件事：叫醒她，并让这一轮
-      // 的处境明确指向 B 站首页。
-      let focus = ''
-      try { focus = new URL(String(req.url ?? '/'), 'http://localhost').searchParams.get('focus') ?? '' } catch { /* 解析失败就当没传 */ }
-      const r = await wakeNow(ctx, { root, focus, log: (...a) => console.log('[dsh-fish]', ...a) })
-      // 失败时补一个 error 字段：前端 jpost 只认得 error，不然界面只会显示「HTTP 409」，
-      // 而真正的原因（「今天已经叫过三次了」这类）就在 r.why 里。
-      send(res, r.ok ? 200 : 409, r.ok ? r : { ...r, error: r.why || '这次没叫醒' })
-    }],
+    ['/wake', handleWake],
 
     // ---- P3-1：对话入口 ----
     // 这是唯一一条"你说的话会进到她那里"的路由。POST { text }。
@@ -2305,6 +2311,9 @@ export function registerObserve(ctx, deps = {}) {
       send(res, 200, { ok: true, version: deps.version ?? '', pid: process.pid })
     }],
     ['/local/say', handleSay],
+    // 2026-11-07：7788 查看器的「叫醒」按钮走这条。与 /wake 共用 handleWake，
+    // 同一把 local.key——能读它的人本来就能读这个数据目录，不扩大攻击面。
+    ['/local/wake', handleWake],
   ]
 
   for (const [p, h] of localRoutes) {
