@@ -1004,7 +1004,12 @@ async function flush(p) {
       }
       fileNote = lines.join('\n') + '\n\n'
     }
-    const r = await fishSay(fwdNote + fileNote + voiceNote + text)
+    // 2026-11-07（用户定案）：QQ 来的消息要标来源。以前投进会话的正文不带任何
+    // 「来自 QQ」的字样，她分不清这句话是他在手机上发的、还是他在 DSH 窗口里说的——
+    // 而统一后「要不要发回 QQ」由她自己调 her_say 决定，不知道来源就没法决定。
+    // 这行标注她的提示词里写着（PROACTIVE_BRIEF），两边是一对。
+    const qqNote = '（这条消息从 QQ 发来）\n\n'
+    const r = await fishSay(qqNote + fwdNote + fileNote + voiceNote + text)
     const ms = Date.now() - t0
     if (!r?.ok) {
       log(`没送到（${ms}ms）：${r?.note ?? '未知'}`)
@@ -1014,16 +1019,14 @@ async function flush(p) {
       }
       return
     }
-    // 只发她会话里**说出口**的那句（spoken）。
-    // herReply 在老版本里是她"说出口的 + 记下的判断"拼起来的，把后者发到 QQ 会
-    // 像是她在回复里夹了一段第三人称的自我分析；接口给了 spoken 就优先用它。
-    const said = String(r.spoken || r.herReply || '').trim()
-    if (!said) {
+    // 2026-11-07（用户定案）：不再替她转接。以前这里取她说出口的正文自动发回 QQ；
+    // 现在她的回话统一走 her_say（写账本 → push 扫到 → 发 QQ），发不发、发几条由她定。
+    // 等待（fishSay 里的 turn 等待）保留——他的下一句要排在这一轮之后，顺序不能乱。
+    if (r.spoken || r.herReply) {
+      log(`她在窗口里说了 ${String(r.spoken || r.herReply).length} 字，没转接——到不到 QQ 看她调不调 her_say（${ms}ms）`)
+    } else {
       log(`她没说话（${ms}ms）`)
-      return
     }
-    log(`她回了 ${said.length} 字（${ms}ms）`)
-    await reply(ev, said)
   })
 }
 

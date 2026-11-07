@@ -60,8 +60,18 @@ test('只转发不写字也是合法消息（不能只放行 files）', () => {
 test('fetch 回来的东西要真的进到这一轮的话里', () => {
   assert.match(src, /const fwdNote = await forwardNote\(forwards\)/,
     '算出来不拼进去等于没做')
-  assert.match(src, /fishSay\(fwdNote \+ fileNote \+ voiceNote \+ text\)/,
-    '11-06 顺序：转发 → 文件 → 语音 → 他说的话（图片已并入文件，不再单列）')
+  assert.match(src, /fishSay\(qqNote \+ fwdNote \+ fileNote \+ voiceNote \+ text\)/,
+    '11-07 顺序：QQ 来源标注 → 转发 → 文件 → 语音 → 他说的话（图片已并入文件，不再单列）')
+})
+
+test('QQ 来源标注必须在（她自己决定发不发，得先知道这话从哪来）', () => {
+  assert.match(src, /const qqNote = '（这条消息从 QQ 发来）/, '投递正文前要标来源')
+})
+
+test('不再替她转接正文（2026-11-07 统一：QQ 上她的话只走 her_say → push）', () => {
+  assert.doesNotMatch(src, /await reply\(ev, said\)/,
+    '自动转发已拆：她写不发到 QQ 由她自己调 her_say 决定')
+  assert.match(src, /不再替她转接/, '拆的地方要留注释说明口径')
 })
 
 test('合批窗口要带上 forwards，且一次不处理太多段', () => {
