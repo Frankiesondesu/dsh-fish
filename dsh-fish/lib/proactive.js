@@ -464,8 +464,8 @@ export function proactiveSection({ now = Date.now(), state = {}, material = [], 
   if (sendTools.length > 0) lines.push(`想说什么就用 ${sendTools.join('、')}，不用等他先问。这一轮写下的正文只留在这条会话里，发不到聊天里。不想说，就什么都别写：不要写任何字，也不要解释为什么不说——这一轮没有回复也算正常。`)
   else lines.push(
     '想说什么就说，不用等他先问——这一轮你写下的字会落进你们俩这条对话里，他回到这个窗口就看得见。' +
-      '但对话只在窗口里：他不在的时候（多半在手机上），能到他眼前的只有你用 her_say 记进流水的话。' +
-      '想让他这会儿就收到，就记一笔（refs 指回上面真实发生的事，1–6 条 id）；只想写在这儿，也行。' +
+      '但对话只在窗口里：他不在的时候（多半在手机上），能到他眼前的只有你用 her_say 发的话。' +
+      '想让他这会儿就收到，就调一次 her_say（最好用 refs 指回上面真实发生的事，1–6 条 id；瞎指会被拒）；只想写在这儿，也行。' +
       '不想说，就什么都别写：不要写任何字，也不要解释为什么不说——这一轮没有回复也算正常。',
   )
   // 2026-11-06（用户）：11-05 把「唤醒自动刷站」停了（scheduler 的 showWorld=false），
@@ -494,42 +494,31 @@ function refProblem(events, refs) {
 }
 
 /**
- * 记一句她主动说的话。
+ * 记一句她说的话（2026-11-07 统一：主动开口与回复分条是同一个动作）。
  * @returns {Promise<{ok:boolean, id?:string, note:string}>}
  */
-export async function writeSay(root, { text = '', refs = [], sessionId = '', why = '', reply = false, now = Date.now() } = {}) {
+export async function writeSay(root, { text = '', refs = [], sessionId = '', why = '', now = Date.now() } = {}) {
   const body = String(text ?? '').trim()
   if (!body) return { ok: false, note: '把想说的话写出来再记。' }
   if (body.length > PROACTIVE_MAX) return { ok: false, note: `一句最多 ${PROACTIVE_MAX} 字，说短一点。` }
   const list = (Array.isArray(refs) ? refs : []).map((x) => String(x ?? '').trim()).filter(Boolean)
-
-  // 2026-11-07（用户）：reply 模式 —— 她在回复里分条用。
-  // 跟「主动开口」不是一件事：她不是在没人找她时凭空说一句，是在接话。
-  // 所以不要求 refs（refs 防的是编造，接话不需要），也不占 maxPerDay。
-  // 但照样落事件流，桥认 `（她说）` 前缀直接发出去。
-  if (!reply && !list.length) return { ok: false, note: '得指回真实发生过的事：refs 填 1–6 条事件 id。' }
   if (list.length > PROACTIVE_REFS_MAX) return { ok: false, note: `一条最多引 ${PROACTIVE_REFS_MAX} 件事。` }
 
   const { events } = await readEvents(root)
-  // refs 给了就要真：reply 模式可以不给，给了照样校验不能瞎指
+  // 2026-11-07（用户）：refs 变成可选——给就校验（瞎指照拒），不给也放行。
+  // 原先「主动开口必须指认材料」的防编造闸不能挡回复（接话有上下文，不需要锚），
+  // 统一后防编造降为「指了就要真」：提示词仍建议主动开口时指认，校验兜底。
   if (list.length) {
     const problem = refProblem(events, list)
     if (problem) return { ok: false, note: problem }
   }
 
   const { config } = await loadConfig(root)
-  const cfg = proactiveConfig(config)
   const dk = dateKey(new Date(now))
-  // 2026-11-06（issue #41）：说明书与设置页都写着「一天最多几次」、到了上限就说不出去，
-  // 但这里原来读了 config 根本没看——maxPerDay 设 0 也能一句接一句地写。
-  // 现在按她自己记下的 `proactive-say:` 数到位就停。开关（enabled）只管「要不要自己开一轮」，
-  // 不管这个工具本身：工具留着，她想用还是能用，这一点与 README 的说明一致。
-  if (!reply) {
-    const said = saysToday(events, dk)
-    if (said >= cfg.maxPerDay) {
-      return { ok: false, note: `今天已经主动开口 ${said} 次，到上限了。明天再说；这不是工具坏了。` }
-    }
-  }
+  // 2026-11-07（用户）：maxPerDay 不再拦截——her_say 现在是他 QQ 上能看到她说话的
+  // 唯一通路，回复也走这里，2 次/天的闸会把回复挡死。拦截拆掉；`proactive-say:`
+  // 记账行照旧落（不再是配额计数器，但仍是「她今天开口几次」的凭据，统计认它）。
+  // 开关（enabled）本来就只管「要不要自己开一轮」，不管这个工具。
   // day/stage 必须是真实的成长坐标（2026-11-06，issue #41）：原来写死 {day:1, stage:1}，
   // 而 writeDream 用的是 deriveSelf 的 model.day/model.stage。写死的那条会被
   // consistency() 当成阶段 1 的旧话去处，跟真正说过的话配不上对。
@@ -538,21 +527,17 @@ export async function writeSay(root, { text = '', refs = [], sessionId = '', why
   // appendEvent 返回的就是写进去的那条事件（不是 {ok, event}，0.7.4 那次参数错位就是栽在这），
   // 所以判空只能判返回值本身。
   const stored = await appendEvent(
-    { type: 'utterance', text: `${reply ? '（她说）' : '（她主动说）'}${body}`, refs: list, ...(sessionId ? { sessionId } : {}) },
+    { type: 'utterance', text: `（她说）${body}`, refs: list, ...(sessionId ? { sessionId } : {}) },
     stamp,
     root,
   ).catch(() => null)
   if (!stored?.id) return { ok: false, note: '这条没记下。' }
-  // 只有「主动开口」才记这一笔：它既是配额计数器，也是「她今天主动了几次」的凭据。
-  // reply 模式不记——否则她分条说三句话就把一天的主动额度吃光了。
-  if (!reply) {
-    await appendEvent(
-      { type: 'meta', text: `proactive-say:${dk}:${why || 'free'}` },
-      { day: model.day, stage: model.stage, source: 'system' },
-      root,
-    ).catch(() => {})
-  }
-  return { ok: true, id: stored.id, note: reply ? '发出去了。' : '记下了。' }
+  await appendEvent(
+    { type: 'meta', text: `proactive-say:${dk}:${why || 'free'}` },
+    { day: model.day, stage: model.stage, source: 'system' },
+    root,
+  ).catch(() => {})
+  return { ok: true, id: stored.id, note: '发出去了。' }
 }
 
 /**
@@ -566,21 +551,20 @@ export function registerProactive(ctx, deps = {}) {
     defineTool({
       name: 'her_say',
       description: [
-        '你自己想开口的时候用这个：不是回复谁，是你主动说一句。',
-        '必须指回真实发生过的事（refs 填 1–6 条你那几天写下/听见的事件 id）；不指认材料就等于编，写不进去。一天最多几次，说不说都可以。',
-        '回复他的时候也能用它分条：加 reply: true，一次调用就是一条消息——想分几条说就调几次，不用挤在一段里。这种用法不需要 refs，也不占「主动开口」的次数。',
-        '不管哪种用法，写下的这句都会由桥送到他的 QQ 上。',
+        '把一句话发到他的 QQ 上：一次调用就是一条消息，想分几条说就调几次。',
+        '主动开口（没人找你，你自己想说）和回复他，都用这个——桥不再替你转接，窗口里的正文他看不到。',
+        '可以给 refs 指认这条话锚在哪几件真实的事上（1–6 条事件 id，用 her_recall 翻得到）；给了就校验，瞎指会被拒。',
+        '桥没开的时候写下了也送不出去——不会报错，但那条到不了他那儿。',
       ].join(''),
       parameters: toJsonSchema({
         type: 'object',
         properties: {
           text: { type: 'string', minLength: 1, maxLength: PROACTIVE_MAX, description: '你要说的那句话。' },
-          reply: { type: 'boolean', description: 'true = 这是回复里的一条，不是主动开口：不用 refs，也不占次数。' },
           refs: {
             type: 'array',
             maxItems: PROACTIVE_REFS_MAX,
             items: { type: 'string' },
-            description: '指回真实事件 id（1–6 条），用 her_recall 或最近记录里查到的。主动开口时必填；reply 模式可以不给。',
+            description: '可选：指认这条话锚在哪几件真实的事上（1–6 条事件 id）。给了就校验，瞎指会被拒。',
           },
           why: { type: 'string', maxLength: 80, description: '为什么现在想说（可选，只写进记录）。' },
         },
@@ -615,7 +599,7 @@ export function registerProactive(ctx, deps = {}) {
         if (!who.ok) return { ok: false, id: '', note: who.note || '这条没记下。' }
         const sid = who?.sessionId ?? ''
         try {
-          const r = await writeSay(root, { text: args.text, refs: args.refs, why: args.why, reply: args.reply === true, sessionId: sid })
+          const r = await writeSay(root, { text: args.text, refs: args.refs, why: args.why, sessionId: sid })
           if (!r.ok) logLine('info', ['her_say：没记下', r.note], root)
           // 配了发送工具的部署里，这一句确实只进了流水，回执得照实说
           const { config } = await loadConfig(root).catch(() => ({ config: {} }))

@@ -211,7 +211,7 @@ test('空手回合的正文只说事实和许可，不写「你应该」', () =>
   assert.match(text, /他回到这个窗口就看得见/, '得说她的话有收件人，不然她以为只是记一笔')
   // 2026-11-02 真机：原来只写「也可以再用 her_say」，她按字面理解就没记，QQ 那边什么都收不到。
   // 两个去处必须如实说清——只写在对话里的，他不在这个窗口就看不到。
-  assert.match(text, /只有你用 her_say 记进流水的话/, '得说清「他不在窗口时，只有记进流水的才到得了他眼前」')
+  assert.match(text, /只有你用 her_say 发的话/, '得说清「他不在窗口时，只有 her_say 发的才到得了他眼前」')
   // 0.9.1（issue #41）：上游从另一头修同一个谎——「他看得见」只在回到窗口时成立，
   // 能保证的部分是「字落进这条对话」，两边的话都留在正文里。
   assert.match(text, /落进你们俩这条对话里/, '能保证的那一半也要在')
@@ -263,19 +263,20 @@ test('材料只取她自己的话与听见的东西，悬着的事只列未答�
   assert.equal(looseEnds(answered, { now }).length, 0, '答过了就不再算悬着')
 })
 
-test('her_say 必须指回真实事件：没 refs、超量、不存在、不是材料都写不进去', () => withRoot(async (root) => {
+test('her_say 的 refs 给了就要真：超量、不存在、不是材料都拒；不给也放行（2026-11-07 统一）', () => withRoot(async (root) => {
   line(root, ev({ id: 'ev_say', type: 'utterance', text: '我先前的记录', ts: new Date().toISOString() }))
   line(root, ev({ id: 'ev_meta', type: 'meta', text: 'diary:2026-10-30', ts: new Date().toISOString() }))
 
-  assert.match((await writeSay(root, { text: '想说的话' })).note, /refs/)
+  // refs 变成可选：不给放行（回复接话有上下文，不需要锚）
+  assert.equal((await writeSay(root, { text: '想说的话' })).ok, true)
   assert.match((await writeSay(root, { text: '想说的话', refs: ['ev_say', 'ev_say', 'ev_say', 'ev_say', 'ev_say', 'ev_say', 'ev_say'] })).note, /最多/)
   assert.match((await writeSay(root, { text: '想说的话', refs: ['ev_nope'] })).note, /不存在/)
   assert.match((await writeSay(root, { text: '想说的话', refs: ['ev_meta'] })).note, /不能当材料/)
-  assert.match((await writeSay(root, { text: '想'.repeat(PROACTIVE_MAX + 1), refs: ['ev_say'] })).note, /最多/)
-  assert.match((await writeSay(root, { text: '   ', refs: ['ev_say'] })).note, /写出来/)
+  assert.match((await writeSay(root, { text: '想'.repeat(PROACTIVE_MAX + 1) })).note, /最多/)
+  assert.match((await writeSay(root, { text: '   ' })).note, /写出来/)
 }))
 
-test('写下的一句会落成 utterance（带「她主动说」前缀）并留一条 proactive-say 记账', () => withRoot(async (root) => {
+test('写下的一句会落成 utterance（带「（她说）」前缀）并留一条 proactive-say 记账', () => withRoot(async (root) => {
   const now = Date.now()
   line(root, ev({ id: 'ev_say', type: 'utterance', text: '我今天有点累', ts: new Date(now - 3_600_000).toISOString() }))
 
@@ -285,7 +286,7 @@ test('写下的一句会落成 utterance（带「她主动说」前缀）并留�
   const { events } = await readEvents(root)
   const said = events.find((e) => e.id === r.id)
   assert.equal(said.type, 'utterance')
-  assert.match(said.text, /^（她主动说）我想问你/)
+  assert.match(said.text, /^（她说）我想问你/)
   assert.deepEqual(said.refs, ['ev_say'])
 
   const meta = events.find((e) => e.type === 'meta' && String(e.text ?? '').startsWith(`proactive-say:${dateKey(new Date(now))}`))
@@ -293,22 +294,18 @@ test('写下的一句会落成 utterance（带「她主动说」前缀）并留�
   assert.match(meta.text, /care/)
 }))
 
-test('her_say 真的按「一天最多几次」拦住，不是只在说明书写着（issue #41）', () => withRoot(async (root) => {
+test('her_say 不再有每日上限，proactive-say 记账照落（2026-11-07 统一）', () => withRoot(async (root) => {
   const now = Date.now()
   const dk = dateKey(new Date(now))
-  line(root, ev({ id: 'ev_say', type: 'utterance', text: '我今天有点累', ts: new Date(now - 3_600_000).toISOString() }))
   await writeConfig(normalizeConfig({ proactive: { enabled: true, maxPerDay: 2 } }), root)
 
-  const a = await writeSay(root, { text: '第一句。', refs: ['ev_say'], now })
-  assert.equal(a.ok, true, a.note)
-  const b = await writeSay(root, { text: '第二句。', refs: ['ev_say'], now })
-  assert.equal(b.ok, true, b.note)
-  // 第三句该被挡住：原来这里读了 config 却没用，连写八次都成功。
-  const c = await writeSay(root, { text: '第三句。', refs: ['ev_say'], now })
-  assert.equal(c.ok, false)
-  assert.match(c.note, /上限/)
-
-  assert.equal(saysToday(await readEvents(root).then((r) => r.events), dk), 2)
+  // 原先 maxPerDay=2 时第三句会被挡（issue #41 那道闸）；统一后 her_say 是回复的
+  // 唯一通路，闸拆了，三句都发得出去——记账行留着给统计，不再当闸门。
+  for (const t of ['第一句。', '第二句。', '第三句。']) {
+    const r = await writeSay(root, { text: t, now })
+    assert.equal(r.ok, true, r.note)
+  }
+  assert.equal(saysToday(await readEvents(root).then((r) => r.events), dk), 3)
 }))
 
 test('her_say 写下的 day/stage 是真实成长坐标，不是写死的 1/1（issue #41）', () => withRoot(async (root) => {
@@ -342,8 +339,7 @@ test('her_say 在 0.9.0 起对所有人注册', () => {
   registerProactive(ctx, { root: tmpdir(), log: () => {} })
   assert.equal(registered.length, 1)
   assert.equal(registered[0].name, 'her_say')
-  // 2026-11-07：refs 不再写进 required —— reply 模式（回复时分条）不需要它，
-  // 主动开口时缺 refs 由 writeSay 报错，报的那句比 schema 报错更像人话。
+  // 2026-11-07：refs 本就可选（统一后连必填场景都没了），required 只有 text。
   assert.deepEqual(registered[0].parameters.required, ['text'])
 })
 
@@ -517,30 +513,30 @@ test('tick：主动说话开着，每一趟照旧先算 deriveSelf', async () =>
 
 // ---------------------------------------------------------------- reply 模式（2026-11-07）
 
-test('reply 模式：不用 refs 也能发，落「（她说）」前缀，不占主动开口的额度', async () => {
-  // 场景：桥不再按空行替她切了，她想在回复里分三条说就调三次。
-  // 这三条不该吃掉「主动开口」的次数——那个额度是给「没人找她、她自己想说」用的。
+test('回复也走同一个工具：不用 refs，一次调用一条，记账照落（2026-11-07 统一）', async () => {
   await withRoot(async (root) => {
-    const r = await writeSay(root, { text: '这是回复里的第一条', reply: true })
+    const r = await writeSay(root, { text: '这是回复里的一条' })
     assert.equal(r.ok, true)
     assert.equal(r.note, '发出去了。')
 
     const { events } = await readEvents(root)
     const say = events.find((e) => e.type === 'utterance')
     assert.ok(say, '应该落一条 utterance')
-    assert.equal(say.text, '（她说）这是回复里的第一条')
+    assert.equal(say.text, '（她说）这是回复里的一条')
     assert.equal(say.source, 'tool', 'source 必须是 tool，桥的 push 只认这个')
-
-    // 没有 proactive-say: 计数 → 不占额度（连调几次都不会把一天的主动额度用光）
-    assert.equal(events.filter((e) => String(e.text ?? '').startsWith('proactive-say:')).length, 0)
+    assert.equal(events.filter((e) => String(e.text ?? '').startsWith('proactive-say:')).length, 1, '记账行照落：统计认它，不再当闸')
   })
 })
 
-test('主动模式没被 reply 带松：不给 refs 照样写不进去', async () => {
+test('her_say 的 schema 不再有 reply 字段：主动与回复是同一个动作（2026-11-07 统一）', async () => {
+  const src = readFileSync(new URL('../lib/proactive.js', import.meta.url), 'utf8')
+  assert.doesNotMatch(src, /reply: \{ type: 'boolean'/, '工具参数里不该再有 reply')
   await withRoot(async (root) => {
-    const r = await writeSay(root, { text: '没人找我时想说一句' })
-    assert.equal(r.ok, false)
-    assert.match(r.note, /refs/)
+    // writeSay 的 reply 参数已删；就算调用方还传着，也只是被忽略——同一个入口、同一个前缀
+    const r = await writeSay(root, { text: '随便谁先开口', reply: true })
+    assert.equal(r.ok, true)
+    const { events } = await readEvents(root)
+    assert.equal(events.find((e) => e.type === 'utterance').text, '（她说）随便谁先开口')
   })
 })
 
