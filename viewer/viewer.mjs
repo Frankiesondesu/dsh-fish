@@ -21,6 +21,7 @@ import { zstdDecompressSync } from 'node:zlib'
 import { dshSessionsDir, fishRoot } from '../shared/root.mjs'
 import { intercomStatus, talk } from './intercom.mjs'
 import { readUsage } from './usage.mjs'
+import { observeData, settleAsk, decideOffer, markInboxRead, clearBiliRisk, backupBundle, wakeHer, reportFor } from './observe.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const FISH = join(HERE, '..', 'dsh-fish')
@@ -28,7 +29,9 @@ const FISH = join(HERE, '..', 'dsh-fish')
 // 优先级（DSH_FISH_HOME → 指针文件 → ~/.dsh-fish）见 shared/root.mjs。
 const ROOT = fishRoot()
 const DSH_SESSIONS = dshSessionsDir(ROOT)
-const PORT = 7788
+// 2026-11-07：端口可配（VIEWER_PORT 环境变量）。默认 7788 不变；
+// 主要是给测试/并行验证用——真机 viewer 在跑的时候，新代码能在旁边端口先冒烟。
+const PORT = Number(process.env.VIEWER_PORT) || 7788
 
 // ---------------------------------------------------------------- 读数据
 
@@ -161,84 +164,11 @@ function userSaidOf(recs) {
 // ---------------------------------------------------------------- 组装
 
 /**
- * 设置页的字段清单（2026-11-04，用户要求「能改的都放进查看器」）。
- *
- * 只描述「怎么显示、怎么校验」，不复制默认值——默认值从插件的 DEFAULTS 现读，
- * 免得两边各写一份、哪天对不上。
- *
- * kind：
- *   num    数字（min/max/step）
- *   bool   开关
- *   window 两个 HH:MM
- *   list   逗号分隔的字符串数组
- * danger=true 的项，改了会明显改变她的世界，前端会多问一句。
+ * 设置页字段清单（2026-11-07 全量化）搬到了 settings-schema.mjs：
+ * 那边要被防漂移测试单独 import（viewer.mjs 一 import 就会占 7788 端口）。
+ * 这里只留引用，字段定义见 settings-schema.mjs 的头注释。
  */
-const SETTINGS = [
-  { group: '成长节奏', key: 'growthDays', label: '成长天数', kind: 'num', min: 7, max: 180, step: 1, hint: '走完四个阶段用多少天' },
-  { group: '成长节奏', key: 'wakesPerDay', label: '每天醒来几次', kind: 'num', min: 0, max: 4, step: 1, hint: '0 = 只在你找她的时候才在' },
-  { group: '成长节奏', key: 'window', label: '她醒着的时间', kind: 'window', hint: '之外不叫她、不主动说话' },
-
-  { group: '每日配额', key: 'daily.events', label: '每天推几条成长事件', kind: 'num', min: 0, max: 10, step: 1 },
-  { group: '每日配额', key: 'daily.questions', label: '其中她向你提问几条', kind: 'num', min: 0, max: 5, step: 1, hint: '防退化成问答机器' },
-
-  { group: '她主动说话', key: 'proactive.enabled', label: '开着', kind: 'bool', hint: '关掉她就只在被叫醒时才能开口' },
-  { group: '她主动说话', key: 'proactive.maxPerDay', label: '一天最多开几次空手回合', kind: 'num', min: 0, max: 20, step: 1 },
-  { group: '她主动说话', key: 'proactive.minIdleHours', label: '多久没人说话才够格', kind: 'num', min: 0, max: 48, step: 0.5, hint: '小时' },
-  { group: '她主动说话', key: 'proactive.baseChance', label: '每次掷骰的基础概率', kind: 'num', min: 0, max: 1, step: 0.01 },
-  { group: '她主动说话', key: 'proactive.gainPerHour', label: '每多等一小时加多少', kind: 'num', min: 0, max: 0.5, step: 0.01 },
-  { group: '她主动说话', key: 'proactive.maxChance', label: '概率上限', kind: 'num', min: 0, max: 1, step: 0.01 },
-  { group: '她主动说话', key: 'proactive.cooldownHours', label: '两次之间至少隔多久', kind: 'num', min: 0, max: 48, step: 0.5, hint: '小时' },
-  { group: '她主动说话', key: 'proactive.rollsPerHour', label: '每小时最多掷几次', kind: 'num', min: 1, max: 12, step: 1, hint: '只决定多叫她几次，说不说仍由她' },
-  { group: '她主动说话', key: 'drive.enabled', label: '主动性（攒劲儿）', kind: 'bool', hint: '0.9.0 起：关掉她不会自己攒劲儿开一轮，日程唤醒与手动叫醒照样能用。这一闸排在最前面' },
-  { group: '她主动说话', key: 'proactive.sendTools', label: '靠哪些工具算开口', kind: 'list', hint: '0.9.1（PR #44）：配了之后正文发不到聊天里，只有调这些工具成功才算她开口。逗号分隔，留空 = 看正文' },
-  { group: '她主动说话', key: 'proactive.foldSilent', label: '没开口就把这轮折掉', kind: 'bool', hint: '0.9.1：静默回合在模型看到的历史里折成一行，人类对话记录不动' },
-  { group: '她主动说话', key: 'proactive.idleCountsSeen', label: '「他来过」打断安静', kind: 'bool', hint: '0.9.1：seen: 也计入空闲判定' },
-
-  { group: '日记', key: 'diary.enabled', label: '她每天写日记', kind: 'bool' },
-  { group: '日记', key: 'diary.visible', label: '日记给你看', kind: 'bool', hint: '默认关——这是她的本子' },
-  { group: '日记', key: 'diary.keepDays', label: '保留多少天', kind: 'num', min: 0, max: 365, step: 1, hint: '0 = 永久' },
-
-  { group: '回忆与遗忘', key: 'recall.oldDays', label: '多久以前的事开始忘', kind: 'num', min: 0, max: 365, step: 1, hint: '天；0 = 不设门槛' },
-  { group: '回忆与遗忘', key: 'recall.minCue', label: '要多具体的线索才想得起来', kind: 'num', min: 0, max: 1, step: 0.05, hint: '0 = 什么都翻得到，调大忘得更狠' },
-  { group: '回忆与遗忘', key: 'recall.jitter', label: '门槛的「今天状态」浮动', kind: 'num', min: 0, max: 1, step: 0.05, hint: '0 = 完全确定；0.2 = 上下浮 20%' },
-
-  { group: '冷落', key: 'absenceAfterDays', label: '你多久不出现算冷落', kind: 'num', min: 1, max: 30, step: 1, hint: '天' },
-
-  { group: '刷站', key: 'browse.enabled', label: '她能上网', kind: 'bool' },
-  { group: '刷站', key: 'browse.perDay', label: '每天刷几次', kind: 'num', min: 0, max: 10, step: 1 },
-  { group: '刷站', key: 'browse.topN', label: '一次看几条', kind: 'num', min: 1, max: 10, step: 1 },
-  { group: '刷站', key: 'browse.window', label: '什么时候能上网', kind: 'window', hint: '醒着不一定要上网，上网只在醒着时发生' },
-  { group: '刷站', key: 'browse.voices', label: '让她读评论区', kind: 'bool', hint: '关掉也能上网，只是她再也读不到别人的说法' },
-
-  { group: '避雷', key: 'avoid.keywords', label: '不想看的关键词', kind: 'list', hint: '逗号分隔' },
-  { group: '避雷', key: 'avoid.minDuration', label: '太短的不看（秒）', kind: 'num', min: 0, max: 3600, step: 10 },
-
-  { group: '请求节奏', key: 'bili.minIntervalMs', label: '两次 B 站请求至少间隔', kind: 'num', min: 0, max: 10000, step: 100, hint: '毫秒；机房 IP 要放慢' },
-  { group: '请求节奏', key: 'bili.jitterMs', label: '在间隔上再随机多等', kind: 'num', min: 0, max: 5000, step: 100, hint: '毫秒' },
-
-  { group: '高级', key: 'tools.restrict', label: '工具面收窄', kind: 'bool', danger: true, hint: '关掉她会看到全部 37 个工具，会开始做很多她本来不做的事' },
-]
-
-/** 按 "a.b" 取/设嵌套值 */
-function getPath(obj, path) {
-  return path.split('.').reduce((o, k) => (o == null ? undefined : o[k]), obj)
-}
-function setPath(obj, path, val) {
-  const keys = path.split('.')
-  const last = keys.pop()
-  const t = keys.reduce((o, k) => (o[k] ?? (o[k] = {})), obj)
-  t[last] = val
-}
-
-/** 从插件读默认值；读不到就用空对象（页面会显示「读不到默认值」）。 */
-async function readDefaults() {
-  try {
-    const m = await import('file:///' + join(FISH, 'lib', 'settings.js').replace(/\\/g, '/'))
-    return m?.DEFAULTS ?? {}
-  } catch {
-    return {}
-  }
-}
+import { SETTINGS, getPath, setPath, readDefaults, UNIT } from './settings-schema.mjs'
 
 async function buildData() {
   const events = readEvents()
@@ -507,7 +437,7 @@ const PAGE = String.raw`<!doctype html>
 <main id="main"><p class="dim">读数据中…</p></main>
 <script>
 let D = null, tab = 'profile';
-const TABS = [['profile','人格数据'],['said','她说的话'],['mine','你说的话'],['acts','她做过的事'],['events','事件流'],['intercom','对讲机'],['usage','用量'],['status','本机状态'],['settings','设置']];
+const TABS = [['profile','人格数据'],['said','她说的话'],['mine','你说的话'],['acts','她做过的事'],['events','事件流'],['observe','观测台'],['bili','上网'],['memory','记忆'],['data','数据'],['intercom','对讲机'],['usage','用量'],['status','本机状态'],['settings','设置']];
 const esc = s => String(s??'').replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
 const t = ms => { if(!ms) return ''; const d=new Date(ms); return String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0'); };
 
@@ -535,6 +465,18 @@ function render(){
   if(tab==='usage'){ renderUsage(el); return }
   if(tab==='status'){ renderStatus(el); return }
   if(tab==='settings'){ renderSettings(el); return }
+  if(tab==='observe'||tab==='bili'||tab==='memory'||tab==='data'){
+    // 数据没拉过或超过 30 秒就先拉一轮（拉的时候显示读取中，回来重画这一页）
+    if(!OB || Date.now()-(OB._at||0) > 30000){
+      el.innerHTML = '<p class="dim">读观测台数据中…</p>';
+      obFresh().then(()=>{ if(tab==='observe'||tab==='bili'||tab==='memory'||tab==='data') render() }).catch(()=>{});
+      return;
+    }
+  }
+  if(tab==='observe'){ renderObserve(el); return }
+  if(tab==='bili'){ renderBili(el); return }
+  if(tab==='memory'){ renderMemory(el); return }
+  if(tab==='data'){ renderData(el); return }
 
   if(tab==='profile'){
     if(m.__error){ el.innerHTML = '<div class="card err">取模型失败：'+esc(m.__error)+'</div>'; }
@@ -628,6 +570,236 @@ function render(){
     : '读取中';
 }
 
+// ---------------- 观测台 / 上网 / 记忆 / 数据（2026-11-07 迁移）----------------
+// 数据层在 observe.mjs：直接 import 插件 lib 的同一批纯文件函数，口径与 DSH 侧一致。
+// 进程绑定的功能（出门/请神/B站扫码/自升级/重置执行/恢复）不在这里，页面注明。
+let OB = null;
+const fts = s => { if(!s) return ''; const d = new Date(s); return isNaN(d) ? String(s).slice(5,16) : String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0')+' '+String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0'); };
+async function obFresh(){
+  OB = await fetch('/api/observe',{cache:'no-store'}).then(r=>r.json()).catch(e=>({fatal:String(e.message||e)}));
+  OB._at = Date.now();
+  return OB;
+}
+async function obAction(action, params, confirmText){
+  if(confirmText && !confirm(confirmText)) return;
+  const r = await fetch('/api/observe/action',{method:'POST',headers:{'content-type':'application/json'},
+    body:JSON.stringify(Object.assign({action},params||{}))}).then(r=>r.json()).catch(e=>({ok:false,why:String(e.message||e)}));
+  if(r && r.ok !== false){ await obFresh(); render(); toast('完成'); }
+  else toast('没成：'+esc(String(r?.why || r?.error || '未知')));
+}
+function obHead(title, note){
+  return sec(title)+'<div class="dim" style="font-size:12px;margin:0 0 12px">'+note+'</div>';
+}
+
+function renderObserve(el){
+  const head = obHead('观测台','2026-11-07 从 DSH 侧迁来——同一批 lib 函数现算，数字和那边一致。出门/请神/B 站扫码/自升级/重置是进程绑定的，仍在 DSH 侧。');
+  if(!OB || OB.fatal){ el.innerHTML = head + '<div class="card err">数据读不到：'+esc(String(OB?.fatal||'还没拉到，稍等会自动重试'))+'</div>'; return }
+  const S = OB.state || {};
+  if(S.ok === false){ el.innerHTML = head + '<div class="card err">'+esc(S.why||'状态算不出来')+'</div>'; return }
+  const c = S.counts || {};
+  const q = S.quality || {};
+  const pending = S.pending;
+  const asks = (OB.asks && OB.asks.ok !== false) ? (OB.asks.pending||[]) : [];
+  const box = (OB.inbox && OB.inbox.ok !== false) ? ((OB.inbox.box||{}).rows||[]) : [];
+  const unread = box.filter(r=>r.unread).length;
+  const home = S.home || {};
+
+  el.innerHTML = head +
+    '<div class="hero"><div class="top">'+
+      '<div><div class="day">第 '+esc(S.day??'?')+' 天<span>阶段 '+esc(S.stage??'?')+' · '+esc(S.stageName||'')+'</span></div>'+
+      '<div class="sub">'+esc(S.name||'')+' · '+esc(home.turns??0)+' 轮会话 · '+(S.absenceDays??0)+' 天没见你</div></div>'+
+      '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">'+
+        (S.pendingGate ? badge('warn','阶段门 · 待 '+S.pendingGate) : badge('ok','阶段门 · 已过'))+
+        '<button class="st-btn" id="obwake">叫醒她一次</button>'+
+      '</div></div>'+
+      '<div class="stats">'+
+        stat('判断', S.beliefCount??0, '条')+
+        stat('张力', (S.tension&&S.tension.count)||0, '对')+
+        stat('固化', S.solidCount??0, '条')+
+        stat('疤', S.scarCount??0, '件')+
+        stat('立场', S.stanceReady ? (S.stanceCount+' 条') : '还没走到', '', S.stanceCount?('四道门 '+(Array.isArray(S.stanceReady)?S.stanceReady.length:0)+'/3'):'')+
+        stat('她的事', c.total??0, '条', '整份 '+ (c.all??0))+
+      '</div></div>'+
+    sec('事件构成')+
+    '<div class="card"><div class="stats">'+
+      stat('她自己记的', c.utterance??0, '条')+
+      stat('答你的话', c.chat??0, '条', 'uncommitted，不落账')+
+      stat('改口', c.revise??0, '条')+
+      stat('拒绝', c.refusal??0, '条')+
+      stat('重聚', c.reunion??0, '条')+
+      stat('系统记账', c.meta??0, '行', '其中纯噪音 '+ (c.noise??0))+
+    '</div></div>'+
+    sec('判断漂移 · 三个诊断值，不是分数')+
+    '<div class="card"><div class="stats">'+
+      stat('稳定', (q.stability&&q.stability.value!=null)?Number(q.stability.value).toFixed(2):'—', '', (q.stability&&q.stability.band)?String(q.stability.band):'')+
+      stat('一致', q.consistency!=null?Number(q.consistency).toFixed(2):'—')+
+      stat('新鲜', q.novelty!=null?Number(q.novelty).toFixed(2):'—')+
+    '</div><div class="dim" style="font-size:12px;margin-top:8px">稳定 = 抽掉一条她还在拿着的判断、重算自我描述还像不像她；一致 = 前后说法对得上；新鲜 = 还在长新的。看趋势，别拿它调性格。</div></div>'+
+    sec('规则 · 她遵守什么、哪些还不会')+
+    ((S.rules&&S.rules.length)
+      ? '<div class="card">'+S.rules.map(r=>
+          '<div class="belief"><span class="idx">'+(r.active?'✓':(r.ready?'◆':'·'))+'</span>'+
+          '<span class="txt">'+esc(r.title||r.id)+'</span>'+
+          (r.active?'<span class="tag">已解锁</span>':(r.pending?'<span class="tag" style="background:rgba(245,189,98,.12);border-color:rgba(245,189,98,.3);color:#f3cd91">待裁决</span>':''))+
+          '</div>').join('')+'</div>'
+      : emptyBox('还没有规则记录'))+
+    (pending
+      ? sec('待裁决的申请')+
+        '<div class="card"><div class="quote">'+esc(p.title?('['+p.title+'] '):'')+nl(p.text||'')+'</div>'+
+        '<div style="display:flex;gap:10px;margin-top:12px">'+
+        '<button class="st-btn" onclick=\'obAction("decide",{verdict:"approve"},"同意这张申请？会写进账本。")\'>同意</button>'+
+        '<button class="st-btn ghost" onclick=\'obAction("decide",{verdict:"reject"},"驳回这张申请？她会收到结果。")\'>驳回</button>'+
+        '</div></div>'
+      : '')+
+    sec('待答申请 · 她开口问你的')+
+    (asks.length
+      ? '<div class="card">'+asks.map(a=>
+          '<div class="belief"><span class="idx">'+esc(fts(a.ts))+'</span>'+
+          '<span class="txt"><b>'+esc(a.subject||a.kind)+'</b> — '+nl(a.question||'')+'</span>'+
+          '<span style="flex:none;display:flex;gap:6px">'+
+          '<button class="st-btn" style="padding:4px 12px;font-size:12px" onclick=\'obAction("settle",{askId:"'+esc(a.id)+'",verdict:"approve"},"同意这条申请？")\'>同意</button>'+
+          '<button class="st-btn ghost" style="padding:4px 12px;font-size:12px" onclick=\'obAction("settle",{askId:"'+esc(a.id)+'",verdict:"reject"},"拒绝这条申请？")\'>拒绝</button>'+
+          '</span></div>').join('')+
+        '<div class="dim" style="font-size:12px;margin-top:8px">配额：今天 '+((OB.asks.quota&&OB.asks.quota.usedDay)??'?')+'/'+((OB.asks.quota&&OB.asks.quota.perDay)??'?')+' 次，本周 '+((OB.asks.quota&&OB.asks.quota.usedWeek)??'?')+'/'+((OB.asks.quota&&OB.asks.quota.perWeek)??'?')+' 次</div></div>'
+      : emptyBox('她现在没有等着你答的事'))+
+    sec('信箱 · 她留给你的话'+(unread?(' · '+unread+' 封未读'):''))+
+    (box.length
+      ? '<div class="card">'+box.map(r=>
+          '<div class="belief"><span class="idx">'+esc(fts(r.ts))+'</span>'+
+          '<span class="txt">'+nl(r.text||'')+'</span>'+
+          (r.unread?'<span class="tag" style="background:rgba(245,189,98,.12);border-color:rgba(245,189,98,.3);color:#f3cd91">未读</span>':'')+
+          '</div>').join('')+
+        '<div style="margin-top:12px"><button class="st-btn ghost" onclick=\'obAction("markread")\'>全部标为已读</button></div></div>'
+      : emptyBox('还没有留话——这是起点，不是故障'));
+  const w = document.getElementById('obwake');
+  if(w) w.onclick = ()=>obAction('wake',{},'叫醒会开一轮真实回合（会断不了什么，但会花她的额度）。现在叫吗？');
+}
+
+function renderBili(el){
+  const head = obHead('上网','刷站记录 / 看过的画面 / 评论区，全部读账本里的记账行。B 站扫码登录与「等回复」扫描要 DSH 内存里的 cookie，仍在 DSH 侧。');
+  if(!OB || OB.fatal || !OB.bili || OB.bili.ok === false){ el.innerHTML = head + '<div class="card err">'+esc((OB&&OB.bili&&OB.bili.why)||'数据读不到')+'</div>'; return }
+  const B = OB.bili;
+  const t = B.today || {};
+  const cfg = B.config || {};
+  const his = (B.history && B.history.groups) || [];
+  const cm = B.comment || {};
+  const risk = B.risk || {};
+  el.innerHTML = head +
+    '<div class="hero"><div class="top">'+
+      '<div><div class="day">'+(t.watchedCount||0)+'<span>今天真看过画面</span></div>'+
+      '<div class="sub">翻到过 '+ (t.glancedCount||0) +' · 递了没看 '+ ((t.handed&&t.handed.length)||0) +' · 翻列表 '+ (t.lookedCount||0) +' 次'+(cfg.browseEnabled?'':' · 上网总开关关着')+'</div></div>'+
+      '<div style="display:flex;gap:8px;align-items:center">'+
+        (risk.cooling? badge('warn','风控冷却 · 剩 '+risk.remainMin+' 分') : badge('ok','无风控'))+
+        (risk.cooling?'<button class="st-btn ghost" onclick=\'obAction("risk-clear")\'>立即解冻</button>':'')+
+      '</div></div></div>'+
+    sec('看过什么 · 最近 14 天')+
+    (his.length ? his.map(g=>
+      '<div class="st-group"><h3>'+esc(g.dk||g[0])+'<small>'+((g.items||g[1]||[]).length)+' 条</small></h3>'+
+      (g.items||g[1]||[]).map(v=>
+        '<div class="belief"><span class="idx">'+(v.how==='watch'?'▶':'👁')+'</span>'+
+        '<span class="txt"><a href="'+esc(v.url||('https://www.bilibili.com/video/'+esc(v.bvid)))+'" target="_blank" style="color:var(--acc);text-decoration:none">'+esc(v.title||v.bvid)+'</a>'+
+        '<span class="dim" style="font-size:11.5px"> · '+esc(v.up||'')+(v.duration?(' · '+Math.round(v.duration/60)+' 分钟'):'')+'</span></span></div>').join('')+'</div>').join('')
+      : emptyBox('账本里还没有看视频的记录'))+
+    sec('她在评论区说过的话')+
+    ((cm.mine&&cm.mine.length)
+      ? '<div class="card">'+cm.mine.map(m=>
+          '<div class="belief"><span class="idx">'+esc(fts(m.ts||m.at))+'</span><span class="txt">'+nl(m.text||m.content||'')+'</span></div>').join('')+
+        '<div class="dim" style="font-size:12px;margin-top:8px">今天发了 '+(cm.usedToday||0)+'/'+(cm.perDay||0) +' 条 · 回了 '+(cm.replyUsedToday||0)+'/'+(cm.replyPerDay||0)+' 条。</div></div>'
+      : '<div class="card"><span class="dim">她还没在评论区说过话'+(cm.enabled?'':'（总开关也关着）')+'。</span></div>')+
+    '<div class="card" style="margin-top:12px;border-style:dashed"><span class="dim" style="font-size:12.5px">「有没有人回她」的扫描要 B 站 cookie，而 cookie 只活在 DSH 进程里——这一格在 DSH 侧的设置页看。</span></div>';
+}
+
+function renderMemory(el){
+  const head = obHead('记忆','她的上下文用量与记忆体检——只读诊断，她看不到这些数。');
+  if(!OB || OB.fatal || !OB.memory || OB.memory.ok === false){ el.innerHTML = head + '<div class="card err">'+esc((OB&&OB.memory&&OB.memory.why)||'数据读不到')+'</div>'; return }
+  const M = OB.memory;
+  const sd = M.selfDoc || {};
+  const sec2 = M.sections || {};
+  const h = M.health || {};
+  const pct = sd.budget ? Math.min(100, Math.round((sd.chars||0)/sd.budget*100)) : 0;
+  el.innerHTML = head +
+    '<div class="hero"><div class="top">'+
+      '<div><div class="day">'+(sd.chars||0)+'<span>/ '+(sd.budget||'?')+' 字</span></div>'+
+      '<div class="sub">身份文档预算用量 '+pct+'% · 最近「想一想」'+(M.lastSleep?fts(M.lastSleep):'还没发生过')+' · 日记 '+ (M.diaryCount||0) +' 篇</div></div>'+
+    '</div></div>'+
+    (sd.dropped&&sd.dropped.length
+      ? sec('这一轮被预算挤掉的段（她看不见的部分）')+
+        '<div class="card"><div class="err" style="font-size:13px">'+sd.dropped.map(d=>esc(d)).join('、')+'</div>'+
+        '<div class="dim" style="font-size:12px;margin-top:6px">调大 memory.docBudget 可以不挤——数字不是品格，只是别把已有的段挤掉。</div></div>'
+      : '')+
+    sec('构成')+
+    '<div class="card"><div class="stats">'+
+      stat('摆在眼前的判断', sec2.beliefsShown??0, '条', '折掉 '+ (sec2.beliefsFolded??0) +' 条')+
+      stat('被推翻的', sec2.refuted??0, '条')+
+      stat('拒绝', sec2.refused??0, '次')+
+      stat('张力', sec2.tensions??0, '对')+
+      stat('固化', sec2.solid??0, '条')+
+      stat('疤', sec2.hurts??0, '件')+
+      stat('他的反应·接受', (sec2.reactions||{}).accept??0, '次', '坚持 '+((sec2.reactions||{}).insist??0)+' · 受伤 '+((sec2.reactions||{}).hurt??0))+
+    '</div></div>'+
+    sec('记忆体检')+
+    (h.ok===false||h.empty
+      ? '<div class="card"><span class="dim">'+esc(h.why||'账本还太短，测不出什么。')+'</span></div>'
+      : '<div class="card"><div class="stats">'+
+          stat('跨度', h.days??'—', '天')+
+          stat('事件', h.events??'—', '条')+
+          stat('类型分布', (h.byType||[]).length, '种')+
+        '</div><pre style="margin-top:10px">'+esc(JSON.stringify(h, null, 2)).slice(0,2400)+'</pre></div>');
+}
+
+function renderData(el){
+  const head = obHead('数据','数据在哪、每天的报告、运行日志、备份。恢复/迁移执行/重置是破坏性或进程绑定操作，留在 DSH 侧。');
+  if(!OB || OB.fatal || !OB.data || OB.data.ok === false){ el.innerHTML = head + '<div class="card err">'+esc((OB&&OB.data&&OB.data.why)||'数据读不到')+'</div>'; return }
+  const Dp = OB.data;
+  const paths = Dp.paths || {};
+  el.innerHTML = head +
+    sec('数据在哪')+
+    '<div class="card">'+Object.entries(paths).map(([k,v])=>
+      '<div class="belief"><span class="idx">'+esc(k)+'</span><span class="txt" style="font-family:ui-monospace,monospace;font-size:12px;word-break:break-all">'+esc(String(v))+'</span></div>').join('')+
+      '<div class="dim" style="font-size:12px;margin-top:8px">换机/换盘走指针文件（~/.dsh-fish-location.json）或 DSH_FISH_HOME，见 ref/cross-machine 文档。</div></div>'+
+    sec('每日报告 · '+((Dp.reportDates||[]).length)+' 天')+
+    ((Dp.reportDates||[]).length
+      ? '<div class="card" id="rptbox">'+Dp.reportDates.map(d=>
+          '<div class="belief"><span class="idx"></span><span class="txt"><a href="#" data-rpt="'+esc(d)+'" style="color:var(--acc);text-decoration:none">'+esc(d)+'</a></span></div>').join('')+
+        '<pre id="rptpre" style="display:none;margin-top:10px"></pre></div>'
+      : '<div class="card"><span class="dim">还没有报告。她在 DSH 侧跑满一天会自动写。</span></div>')+
+    sec('运行日志 · 最近 '+((Dp.logTail&&Dp.logTail.lines)||'').toString().length+' 行')+
+    '<div class="card"><pre>'+esc((Dp.logTail&&Dp.logTail.text)||Dp.logTail&&Dp.logTail.tail||JSON.stringify(Dp.logTail||{})).slice(-4000)+'</pre>'+
+      '<div class="dim" style="font-size:12px">完整导出（含自检与脱敏配置）在 DSH 侧的 /dsh-fish/log/export。</div></div>'+
+    sec('备份')+
+    '<div class="card"><div class="dim" style="font-size:12.5px;margin-bottom:10px">'+esc(Dp.backupNote||'')+'</div>'+
+      '<button class="st-btn" id="bkdl">导出备份（单文件 JSON）</button></div>'+
+    sec('迁移 / 导入 / 重置 · 只看状态')+
+    '<div class="card">'+
+      '<div class="belief"><span class="idx">迁移</span><span class="txt">'+esc(JSON.stringify(Dp.moveStatus||{})).slice(0,200)+'</span></div>'+
+      '<div class="belief"><span class="idx">导入</span><span class="txt">'+esc((Dp.importStatus&&Dp.importStatus.reason)||'可以导入（她还没有起点）')+'</span></div>'+
+      '<div class="belief"><span class="idx">重置</span><span class="txt">执行要 ctx 归档会话，留在 DSH 侧设置页底部。</span></div>'+
+    '</div>';
+  el.querySelectorAll('[data-rpt]').forEach(a=>{
+    a.onclick = async (ev)=>{ ev.preventDefault();
+      const pre = document.getElementById('rptpre');
+      pre.style.display='block'; pre.textContent='读报告中…';
+      const r = await fetch('/api/observe/report?date='+a.dataset.rpt,{cache:'no-store'}).then(x=>x.json()).catch(e=>({why:String(e)}));
+      pre.textContent = r.md || ('读不到：'+(r.why||''));
+    };
+  });
+  const bk = document.getElementById('bkdl');
+  if(bk) bk.onclick = async ()=>{
+    bk.disabled = true; bk.textContent = '打包中…';
+    try{
+      const b = await fetch('/api/observe/backup',{cache:'no-store'}).then(r=>r.json());
+      const blob = new Blob([JSON.stringify(b, null, 2)], {type:'application/json'});
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = b.fileName || ('fish-backup-'+new Date().toISOString().slice(0,10)+'.json');
+      a.click();
+      setTimeout(()=>URL.revokeObjectURL(a.href), 3000);
+      toast('备份已导出');
+    }catch(e){ toast('导出失败：'+e.message) }
+    bk.disabled = false; bk.textContent = '导出备份（单文件 JSON）';
+  };
+}
+
 // ---------------- 设置页（2026-11-04，现代布局）----------------
 // 这段跑在模板字符串里，不能写美元花括号插值，全部用字符串拼接。
 let SCHEMA=null, CFG=null, DEFS=null, SAVED='{}';
@@ -654,6 +826,8 @@ function fieldHTML(s){
           '<span>→</span><input type="time" class="st-in" data-key="'+key+'" data-kind="win" value="'+z+'"></div>';
   } else if(s.kind==='list'){
     ctl = '<input class="st-in st-list" id="'+id+'" data-key="'+key+'" data-kind="list" value="'+esc((cur||[]).join('，'))+'">';
+  } else if(s.kind==='text'){
+    ctl = '<input class="st-in" id="'+id+'" data-key="'+key+'" data-kind="text" value="'+esc(cur==null?'':cur)+'" style="width:220px">';
   } else {
     ctl = '<input type="number" class="st-in st-num" id="'+id+'" data-key="'+key+'" data-kind="num" value="'+(cur==null?'':cur)+'"'+
           (s.min!=null?' min="'+s.min+'"':'')+(s.max!=null?' max="'+s.max+'"':'')+
@@ -677,6 +851,7 @@ function collect(){
     if(s.kind==='bool') v = ns[0].checked;
     else if(s.kind==='window') v = [ns[0].value, ns[1].value];
     else if(s.kind==='list') v = ns[0].value.split(/[，,]/).map(x=>x.trim()).filter(Boolean);
+    else if(s.kind==='text') v = String(ns[0].value).trim();
     else v = Number(ns[0].value);
     if(v==null || (Array.isArray(v) && (!v[0]||!v[1])) || (typeof v==='number' && !Number.isFinite(v))) continue;
     setIn(patch, s.key, v);
@@ -1128,9 +1303,53 @@ createServer(async (req, res) => {
       res.writeHead(200, { 'content-type': 'audio/mpeg', 'cache-control': 'no-store' })
       return res.end(readFileSync(f))
     }
+    // ---- 观测台/上网/记忆/数据（2026-11-07 迁移）：数据层在 observe.mjs ----
+    if (req.url === '/api/observe') {
+      const d = await observeData()
+      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
+      return res.end(JSON.stringify(d))
+    }
+    const reportMatch = /^\/api\/observe\/report\?date=(\d{4}-\d{2}-\d{2})$/.exec(req.url || '')
+    if (reportMatch) {
+      const r = await reportFor(reportMatch[1])
+      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
+      return res.end(JSON.stringify(r))
+    }
+    if (req.url === '/api/observe/backup') {
+      const b = await backupBundle()
+      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
+      return res.end(JSON.stringify(b))
+    }
+    if (req.url === '/api/observe/action' && req.method === 'POST') {
+      let body = ''
+      for await (const chunk of req) {
+        body += chunk
+        if (body.length > 1_000_000) { res.writeHead(413); return res.end('too large') }
+      }
+      let p = {}
+      try { p = JSON.parse(body || '{}') } catch {
+        res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' })
+        return res.end(JSON.stringify({ ok: false, why: '不是合法的 JSON' }))
+      }
+      let out
+      try {
+        switch (p.action) {
+          case 'settle': out = await settleAsk({ askId: p.askId, verdict: p.verdict, reason: p.reason }); break
+          case 'decide': out = await decideOffer({ verdict: p.verdict, reason: p.reason }); break
+          case 'markread': out = await markInboxRead(); break
+          case 'risk-clear': out = await clearBiliRisk(); break
+          case 'wake': out = await wakeHer({ focus: p.focus }); break
+          default: out = { ok: false, why: '没有这个动作' }
+        }
+      } catch (err) {
+        out = { ok: false, why: String(err?.message ?? err) }
+      }
+      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
+      return res.end(JSON.stringify(out))
+    }
     if (req.url === '/api/config' && req.method === 'GET') {
       const config = readJson(join(ROOT, 'config.json'), {})
-      const defaults = await readDefaults()
+      const defaults = await readDefaults(FISH)
       res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
       return res.end(JSON.stringify({ config, defaults, schema: SETTINGS }))
     }

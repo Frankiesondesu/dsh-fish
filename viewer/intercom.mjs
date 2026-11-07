@@ -103,8 +103,10 @@ export function clampForSpeech(text, max = SPEAK_MAX_CHARS) {
 }
 
 // ---------------------------------------------------------------- 她的通路（同 bridge.mjs 的发现逻辑，拷贝自那里）
+// 2026-11-07：observe.mjs（观测台的叫醒按钮）也用这一套——导出复用，
+// 不再拷第三份（坑 #17：同一件事不被写两遍）。
 
-function fishKey() {
+export function fishKey() {
   try {
     return readFileSync(KEY_FILE, 'utf8').trim()
   } catch {
@@ -150,7 +152,7 @@ async function probe(port, key) {
   }
 }
 
-async function discoverHer() {
+export async function discoverHer() {
   const key = fishKey()
   if (!key) return 0
   if (cachedPort && (await probe(cachedPort, key))) return cachedPort
