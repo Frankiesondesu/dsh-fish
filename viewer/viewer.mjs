@@ -531,7 +531,7 @@ function render(){
           '<div class="tl-item"><div class="tl-meta">'+
           (s.where==='qq'
             ? '<span class="pill said">QQ</span>'+esc(t(s.at))+' · her_say'
-            : '<span class="pill said">她</span>turn '+esc(s.turn)+' · '+esc(t(s.at))))+
+            : '<span class="pill said">她</span>turn '+esc(s.turn)+' · '+esc(t(s.at)))+
           '</div>'+
           '<div class="bubble">'+nl(s.text||'')+'</div></div>').join('')+'</div>'
       : emptyBox('这条会话里她还没说过话'));
