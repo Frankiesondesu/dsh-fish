@@ -101,6 +101,12 @@ const VIEWER_URL = 'http://127.0.0.1:7788'
 // 注意 venv/Scripts/python.exe 是 launcher：它还会拉起真正的 uv python 子进程，
 // 真正听端口、装模型的是那个子进程（关的时候要连树一起收，见 shutdown.mjs）。
 const PLUG = dirname(HERE)
+// 2026-11-07：试过换成 pythonw.exe，**不行，已回退**。
+// 原因：venv 的 pythonw.exe 也只是 launcher，它内部照样拉起 console 版的
+// python.exe（实测启动后进程列表里全是 python.exe，没有 pythonw）。
+// 而且 pythonw 下没有 stdout，出错就是静默死——那次 18766 直接起不来，
+// 连一句原因都看不到。所以老老实实用 python.exe。
+// 那个空窗口的成因见下面 VOICE 的注释：它是孙子进程开的，Node 管不到。
 const PY_TURN = join(PLUG, 'turn-taking', 'venv', 'Scripts', 'python.exe')
 // dialogue-tts 的 venv 2026-11-06 已删（12G）。这条留着是给「哪天手动重建了 TTS」
 // 的情况——路径不存在时 PY_STDLIB 的 find(existsSync) 会自动跳过它。
@@ -109,7 +115,7 @@ const PY_TTS = join(PLUG, 'dialogue-tts', 'venv', 'Scripts', 'python.exe')
 // python（那个路径带版本号，升级就失效）。最后一条是兜底。
 // 2026-11-06：最后那条原来写死 .../versions/3.13.12/python.exe——注释自己都在说
 // 「那个路径带版本号，升级就失效」，但兜底那行还是写死了。改成扫目录。
-const PY_STDLIB = [PY_TURN, PY_TTS, ...workbuddyPythons()].find(existsSync)
+const PY_STDLIB = [PY_TURN, PY_TTS, ...workbuddyPythons()].filter(Boolean).find(existsSync)
 
 const VOICE = [
   { id: 'turn', key: '话轮 18766', port: 18766, exe: PY_TURN,
