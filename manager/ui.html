@@ -324,6 +324,7 @@ function render() {
   const managed = last.filter(s => s.managed).length;
   const upManaged = last.filter(s => s.managed && s.up).length;
   const staleCount = last.filter(s => s.stale).length;
+  const gridBusy = !!busy;
 
   summaryEl.innerHTML =
     '<b>' + upManaged + '/' + managed + '</b> 运行中' +
@@ -338,8 +339,6 @@ function render() {
     staleBtn.disabled = !staleCount || gridBusy;
     staleBtn.classList.toggle('primary', !!staleCount);
   }
-
-  const gridBusy = !!busy;
 
   grid.innerHTML = last.map(s => {
     const st = stateOf(s);
