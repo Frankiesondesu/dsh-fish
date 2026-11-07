@@ -22,6 +22,7 @@ import { dshSessionsDir, fishRoot } from '../shared/root.mjs'
 import { intercomStatus, talk } from './intercom.mjs'
 import { readUsage } from './usage.mjs'
 import { observeData, settleAsk, decideOffer, markInboxRead, clearBiliRisk, backupBundle, wakeHer, reportFor } from './observe.mjs'
+import { qqSaidOf, mergeSaid } from './said.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const FISH = join(HERE, '..', 'dsh-fish')
@@ -216,6 +217,9 @@ async function buildData() {
     events,
     actions: actionsOf(recs),
     spoken: spokenOf(recs),
+    // 她经 her_say 发到 QQ 的话（账本里带推送标记的那几条）——用户主要用 QQ，
+    // 「她说的话」不收这些就等于漏了大半
+    qqSaid: qqSaidOf(events),
     userSaid: userSaidOf(recs),
   }
 }
@@ -520,11 +524,15 @@ function render(){
   }
 
   if(tab==='said'){
-    const a = (D.spoken||[]).slice().reverse();
-    el.innerHTML = sec('她说的话 · '+a.length+' 条') + (a.length
+    // 窗口正文（会话日志）+ 她发到 QQ 的话（her_say 落的账本），并成一条时间线
+    const a = mergeSaid(D.spoken||[], D.qqSaid||[]);
+    el.innerHTML = sec('她说的话 · '+a.length+' 条（含发到 QQ 的）') + (a.length
       ? '<div class="timeline">'+a.map(s=>
-          '<div class="tl-item"><div class="tl-meta"><span class="pill said">她</span>'+
-          'turn '+esc(s.turn)+' · '+esc(t(s.at))+'</div>'+
+          '<div class="tl-item"><div class="tl-meta">'+
+          (s.where==='qq'
+            ? '<span class="pill said">QQ</span>'+esc(t(s.at))+' · her_say'
+            : '<span class="pill said">她</span>turn '+esc(s.turn)+' · '+esc(t(s.at))))+
+          '</div>'+
           '<div class="bubble">'+nl(s.text||'')+'</div></div>').join('')+'</div>'
       : emptyBox('这条会话里她还没说过话'));
   }
