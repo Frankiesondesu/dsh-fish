@@ -31,6 +31,7 @@ import { toJsonSchema } from './toolschema.js'
 import { rootDir, readEvents } from './store.js'
 import { deriveSelfCached } from './derive.js'
 import { dateKey } from './settings.js'
+import { anchorOf } from './anchor.js'
 
 import { defineTool } from './tool.js'
 
@@ -136,6 +137,19 @@ const SKIP_TYPES = new Set(['meta'])
 const META_KEEP = Object.freeze(['watched:', 'saw:', 'browse:', 'talk:'])
 
 /**
+ * 工具使用经验也放行（上游 0.9.3，2026-11-07）：`use:` 记的是「这件事我是
+ * 怎么做成的」——正好是她翻旧事时最缺的一种。两条放行口径并存：
+ * 经历类的 meta（META_KEEP）与工具账（use:），其余 meta 仍是系统账不进回忆。
+ */
+export const USE_PREFIX = 'use:'
+const isUseLine = (ev) => String(ev?.text ?? '').startsWith(USE_PREFIX)
+
+/** 这条事件进不进回忆。 */
+const usable = (ev) =>
+  Boolean(ev) &&
+  (!SKIP_TYPES.has(ev.type) || META_KEEP.some((p) => String(ev?.text ?? '').startsWith(p)) || isUseLine(ev))
+
+/**
  * 换词兜底用的近义表（fork.10）。
  *
  * 为什么要它：`her_recall` 是字面匹配，她换个说法就翻不到。
@@ -197,6 +211,9 @@ const clip = (text, n) => (text.length > n ? text.slice(0, n - 1).replace(/[\uD8
 // 一条一行：正文里的换行会把行尾的 id 挤到下一行，也会把缩进的关系行拆开。
 const oneLine = (text) => text.replace(/\s+/g, ' ').trim()
 
+/** `use:<工具> ok|fail <一句话>`——见 lib/use.js */
+const USE_LINE = /^use:(\S+)\s+(ok|fail)\s*(.*)$/
+
 /** 不是她自己写下的，要说清来路 */
 function labelled(type, text) {
   // heard 是旁听来的：明确写成「他说」，别让她误以为是自己说的。
@@ -204,6 +221,15 @@ function labelled(type, text) {
   // voice、answer 同理：一句是读到的陌生人的话，一句是别人回她的。
   if (type === 'voice') return `读到别人说：${text}`
   if (type === 'answer') return `回复：${text}`
+  // 工具使用经验（2026-11-07，用户 m00882）：账里存的是机器写法，
+  // 读出来得是一句人话——「用过 her_note，记下了：…」。
+  if (type === 'meta') {
+    const m = USE_LINE.exec(text)
+    if (m) {
+      const [, tool, head, said] = m
+      return head === 'fail' ? `用过 ${tool}，没成：${said}` : `用过 ${tool}，${said}`
+    }
+  }
   return text
 }
 
@@ -373,12 +399,7 @@ export function searchEvents(events, query, o = {}) {
   // ---- 先过一遍筛，把候选挑出来（后面算稀有度要用整批当分母） ----
   const cand = []
   for (const ev of events ?? []) {
-    if (!ev) continue
-    if (SKIP_TYPES.has(ev.type)) {
-      // meta 只放「她经历的事」那几种，`seen:` 之类的记账不进回忆
-      const raw = String(ev.text ?? '')
-      if (!META_KEEP.some((p) => raw.startsWith(p))) continue
-    }
+    if (!usable(ev)) continue
     if (kind && String(ev.type) !== kind) continue
     const text = String(ev.text ?? '').trim()
     if (!text) continue
@@ -473,7 +494,7 @@ export function searchEvents(events, query, o = {}) {
   // 改口关系不受 days、kind 影响：被改的那句在时间窗外，也照样引出来。
   const byId = new Map()
   if (revisions.size) {
-    for (const ev of events ?? []) if (ev && !SKIP_TYPES.has(ev.type)) byId.set(String(ev.id), ev)
+    for (const ev of events ?? []) if (usable(ev)) byId.set(String(ev.id), ev)
   }
   const said = (ev, verdict) => ({
     id: String(ev.id ?? ''),
@@ -497,6 +518,9 @@ export function searchEvents(events, query, o = {}) {
       clock: localClock(ts),
       ago: Math.max(0, Math.floor((now - ts) / DAY_MS)),
       type: String(ev.type ?? ''),
+      // 她动手之前说的那句话（2026-11-07，用户 m00493 的 ⑤）。
+      // 只对工具账算：别的行本身就是话，不需要来路。
+      anchor: String(ev.type) === 'meta' ? anchorOf(events, ev.sessionId, ts) : '',
       // 聊天里随口说的，跟她自己认领写下的话分开标。heard 已经有「他说：」的先例，
       // 这边沿用同一套：能标出来源就标出来源，别让她把别人/随口当成自己写下的。
       chatOnly: chatOnly(ev),
@@ -590,8 +614,13 @@ export function renderRecall(rows, o = {}) {
     // 截的是翻好之后的正文，别让她看到截了一半的记账原文。
     // voice / answer 的来源标注（0.8.8 的 labelled）在翻译之后补上；heard 已由 displayOf 处理。
     let body = displayOf(r)
-    if (r.type === 'voice' || r.type === 'answer') body = labelled(r.type, body)
+    // voice/answer 的来源标注（0.8.8 的 labelled）在翻译之后补上；heard 已由 displayOf 处理。
+    // meta 也要过一遍（上游 0.9.3）：labelled 只认 use: 行，watched:/browse:/talk: 已由
+    // displayOf 翻过、不会再被它动。
+    if (r.type === 'voice' || r.type === 'answer' || r.type === 'meta') body = labelled(r.type, body)
     if (brief) body = clip(body, RECALL_BRIEF_SNIPPET)
+    // 当时那句话跟在后面：认得出「那次是为了什么」，就不必再猜。
+    if (r.anchor) body += `——当时你在说「${r.anchor}」`
     if (r.chatOnly) body += CHAT_MARK
     // 改口关系：有对方原话就另起缩进行；手写 fixture 没有 earlier 数据时
     // 退回旧的一行式说明，别让这层信息静默消失。

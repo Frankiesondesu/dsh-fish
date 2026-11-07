@@ -44,6 +44,7 @@ import { normalizeScene } from './schema.js'
 import { queueNote } from './sessionnote.js'
 import { classifyReaction } from './refuse.js'
 import { lengthBudget } from './budget.js'
+import { redactOwner } from './redact.js'
 
 // 等她说完最多等这么久。一次普通回话 8–30 秒，但 fork.22 起她看画面走 vs 全管线
 // （要下载整条视频），一条 20–40 秒；他一条消息丢两条链接就是 80 秒。
@@ -534,6 +535,12 @@ export async function sayToHer(ctx, text, deps = {}) {
     }
     // 事件流里的条数（真正落了盘的）。时间线、轮数、信箱都只认这个数。
     const committed = fresh.length
+    // 出口脱敏（2026-11-07，上游 #57 批次）：群聊/外客私聊是公开场合，名字只留在私下。
+    // 只改这一次返回给桥的文字，事件流原文不动。
+    if (foreign) {
+      for (const s of said) s.text = redactOwner(s.text, model.name)
+    }
+    // herReply 仍优先给说出口的正文（fork.2 口径）：不把 growth_commit 的内心判断当回话
     const herReply = spoken || said.map((s) => s.text).filter(Boolean).join('\n\n')
 
     // 信箱落盘：真有话写进事件流了才重写（没落盘就没必要动文件）

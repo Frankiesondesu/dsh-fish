@@ -53,6 +53,7 @@ import { registerSkillCatalogGuard } from './skillcatalog.js'
 // 停用时不清的话下次启用会带着上一次的残留（2026-10-25）。
 import { clearWakeSection, registerIdentity } from './identity.js'
 import { registerPossession } from './possess.js'
+import { withUseDuringRegistration } from './use.js'
 
 import { checkUpgrade } from './upgrade.js'
 import { sweepCaches } from './sweep.js'
@@ -387,71 +388,70 @@ export function apply(ctx, baseConfig = {}) {
     // 工具：一个写（growth_commit）、一个看（bili_look）。
     // 两者都必须成功注册；缺了任何一个她都会变残（只会说不会看，或只会记不会看）。
     if (ctx.tools?.register) {
-      for (const reg of [
-        () => registerCapture(ctx, { root, tenant: tenancy }),
-        // 2026-11-01（issue #16 第二半，用户 m03454）：这两个以前没拿到 tenancy，
-        // 于是同机任何工作区加载这个插件都能替她写一条 looked:（"她看过了"）——
-        // 看过就是永久判决，而按下判决的人不留名字。现在与 growth_commit 同一条闸。
-        () => registerLook(ctx, { root, client: baseConfig.client, tenant: tenancy }),
-        // 工具说明随说话开关走（2026-10-29）：关着时身份文档里没有「在网上说话」那一节，
-        // 说明里就不该再许诺"可以留评论"。启动时按当时读到的配置定一次，之后由 execute 同步。
-        () => registerSpeak(ctx, {
-          root,
-          client: baseConfig.client,
-          tenant: tenancy,
-          speakEnabled: config?.comment?.enabled === true,
-        }),
-        // fork.36（2026-11-04）：把「可及性门槛」的系数带进去。
-        // 账本不动，遗忘发生在取用这一层——线索不够就调不出来。
-        () => registerRecall(ctx, { root, reach: config?.recall }),
-        // issue #7：日记不进事件流，所以她需要一个只读的窗口回头翻（her_diary）。
-        () => registerHerDiary(ctx, { root }),
-        () => registerWatch(ctx, { root, tenant: tenancy }),
-        // fork.35（2026-11-03）：看过之后把某一格放大重看。不占额度，同一条一天最多 3 次。
-        () => registerZoom(ctx, { root, tenant: tenancy }),
-        // fork.47（2026-11-05）：他 QQ 递过来的文件落到 home/inbox，她调 her_open 自己读。
-        () => registerHerOpen(ctx, { root }),
-        // 2026-11-06：他直接递过来的本地视频，走同一条 vs 管线（input 换成本地路径）。
-        () => registerLocalWatch(ctx, { root, tenant: tenancy }),
-        // R4：留话（不审批）。和 growth_commit 一样是纯追加，但收件人明确。
-        () => registerLetter(ctx, { root, tenant: tenancy }),
-        // issue #22 乙档（2026-11-04）：醒来看的那张便条。写完会不会到期、
-        // 到期那天摆不摆在最前面，都由 lib/note.js 与 scheduler 的唤醒正文负责，
-        // 这个工具只做两件事：记一张、划掉一张。**常驻注册**，不像梦与主动说话那样要 .dev。
-        () => registerNote(ctx, { root, tenant: tenancy }),
-        // 0.6.17：纪念品。她只能「问」，真带回去要那个人在出门页点头。
-        () => registerBringBack(ctx, { root, tenant: tenancy }),
-        // 0.7.6（2026-10-30 m01274）：请求事件。她有事想征得同意时弹一张卡，
-        // 每天 1 次、每周 3 次；只有 time / rest 真会改东西（见 lib/ask.js）。
-        () => registerAsk(ctx, { root, tenant: tenancy }),
-        // fork.43（2026-11-04）：她自己定一个时刻。到点叫醒她一次，说不说由她；
-        // 不占 proactive 的配额、不限次数，只能落在作息窗口内（见 lib/alarm.js）。
-        () => registerAlarm(ctx, { root, tenant: tenancy }),
-        // fork.44（2026-11-04）：查工具说明。说明书不常驻上下文，按需取（lib/toolguide.js）。
-        () => registerHelp(ctx, { root }),
-        // fork.46（2026-11-04）：把一句话说成声音。说不说由她定，不是自动管道。
-        () => registerVoice(ctx, { root, tenant: tenancy }),
-        // fork.53（2026-11-05）：发一张表情。文件名就是它的意思，挑哪张由她定。
-        () => registerMeme(ctx, { root, tenant: tenancy }),
-        // 2026-11-06：**她自己要的**。11-05 12:23 她用 ask_owner 问
-        // 「能不能给我一样能查实时信息的东西——天气、日期这类，一次查一条就行？」
-        // 11-06 12:23 账本记的是「一直没人答」。补上它，比留着那 12G 的 TTS 值。
-        () => registerWorld(ctx, { root }),
-        // 0.8.1 起（2026-10-30 m02837）：梦 A 案——醒来记一句。0.9.0 起公开（不再挂 .dev）。
-        () => registerDream(ctx, { root, tenant: tenancy }),
-        // 0.8.1 起（2026-10-30 m04610）：主动说话——她自己判断有没有话想说。0.9.0 起公开。
-        // 2026-10-30 真机：这里原来只有 { root, log }，guardWrite 拿到 undefined 的 state，
-        // checkCaller(undefined) 每次都判「不在这个家」；写入守卫要的是 tenancy。
-        () => registerProactive(ctx, { root, tenant: tenancy, log: (...a) => logger.info(...a) }),
-      ]) {
-        try {
-          const d = reg()
-          if (typeof d === 'function') disposers.push(d)
-          else if (d && typeof d.dispose === 'function') disposers.push(() => d.dispose())
-        } catch (err) {
-          logger.warn('[dsh-fish] 工具注册失败', err?.message ?? err)
+      // 工具使用经验（2026-11-07，用户 m00882）：注册期间把 register 换成
+      // 「包一层 execute 再交出去」的版本，用完立刻换回来。这样 12 个 registerXxx
+      // 一行都不用改，`defineTool` 的「定义原样交出去」约定也不动。
+      withUseDuringRegistration(ctx, root, () => {
+        for (const reg of [
+          () => registerCapture(ctx, { root, tenant: tenancy }),
+          // 2026-11-01（issue #16 第二半，用户 m03454）：这两个以前没拿到 tenancy，
+          // 于是同机任何工作区加载这个插件都能替她写一条 looked:（"她看过了"）——
+          // 看过就是永久判决，而按下判决的人不留名字。现在与 growth_commit 同一条闸。
+          () => registerLook(ctx, { root, client: baseConfig.client, tenant: tenancy }),
+          // 工具说明随说话开关走（2026-10-29）：关着时说明里不该许诺"可以留评论"，
+          // 只说「这会儿还说不出去」（上游 P3：这一节本身不再消失）。
+          // 启动时按当时读到的配置定一次，之后由 execute 同步。
+          () => registerSpeak(ctx, {
+            root,
+            client: baseConfig.client,
+            tenant: tenancy,
+            speakEnabled: config?.comment?.enabled === true,
+          }),
+          // fork.36（2026-11-04）：把「可及性门槛」的系数带进去。
+          // 账本不动，遗忘发生在取用这一层——线索不够就调不出来。
+          // （上游 0.9.3 改写了 recall 的 meta 口径，fork 的 META_KEEP 已并进 usable()）
+          () => registerRecall(ctx, { root, reach: config?.recall }),
+          // issue #7：日记不进事件流，所以她需要一个只读的窗口回头翻（her_diary）。
+          () => registerHerDiary(ctx, { root }),
+          () => registerWatch(ctx, { root, tenant: tenancy }),
+          // fork.35（2026-11-03）：看过之后把某一格放大重看。不占额度，同一条一天最多 3 次。
+          () => registerZoom(ctx, { root, tenant: tenancy }),
+          // fork.47（2026-11-05）：他 QQ 递过来的文件落到 home/inbox，她调 her_open 自己读。
+          () => registerHerOpen(ctx, { root }),
+          // 2026-11-06：他直接递过来的本地视频，走同一条 vs 管线（input 换成本地路径）。
+          () => registerLocalWatch(ctx, { root, tenant: tenancy }),
+          // R4：留话（不审批）。和 growth_commit 一样是纯追加，但收件人明确。
+          () => registerLetter(ctx, { root, tenant: tenancy }),
+          // issue #22 乙档（2026-11-04）：醒来看的那张便条。**常驻注册**，不像梦与主动说话那样要 .dev。
+          () => registerNote(ctx, { root, tenant: tenancy }),
+          // 0.6.17：纪念品。她只能「问」，真带回去要那个人在出门页点头。
+          () => registerBringBack(ctx, { root, tenant: tenancy }),
+          // 0.7.6（2026-10-30 m01274）：请求事件。每天 1 次、每周 3 次；只有 time / rest 真会改东西。
+          () => registerAsk(ctx, { root, tenant: tenancy }),
+          // fork.43（2026-11-04）：她自己定一个时刻。到点叫醒她一次，只能落在作息窗口内。
+          () => registerAlarm(ctx, { root, tenant: tenancy }),
+          // fork.44（2026-11-04）：查工具说明。说明书不常驻上下文，按需取（lib/toolguide.js）。
+          () => registerHelp(ctx, { root }),
+          // fork.46（2026-11-04）：把一句话说成声音。说不说由她定，不是自动管道。
+          () => registerVoice(ctx, { root, tenant: tenancy }),
+          // fork.53（2026-11-05）：发一张表情。文件名就是它的意思，挑哪张由她定。
+          () => registerMeme(ctx, { root, tenant: tenancy }),
+          // 2026-11-06：**她自己要的**（11-05 ask_owner 问天气/日期，一天没人答）。
+          () => registerWorld(ctx, { root }),
+          // 0.8.1 起（2026-10-30 m02837）：梦 A 案——醒来记一句。0.9.0 起公开（不再挂 .dev）。
+          () => registerDream(ctx, { root, tenant: tenancy }),
+          // 0.8.1 起（2026-10-30 m04610）：主动说话。guardWrite 要的是 tenancy。
+          () => registerProactive(ctx, { root, tenant: tenancy, log: (...a) => logger.info(...a) }),
+        ]) {
+          try {
+            const d = reg()
+            if (typeof d === 'function') disposers.push(d)
+            else if (d && typeof d.dispose === 'function') disposers.push(() => d.dispose())
+          } catch (err) {
+            logger.warn('[dsh-fish] 工具注册失败', err?.message ?? err)
+          }
         }
-      }
+      })
     }
 
     // 观测台路由

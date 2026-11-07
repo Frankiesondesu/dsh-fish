@@ -42,7 +42,7 @@ import { restedToday, settleStaleAsks } from './ask.js'
 import { takeDueAlarm, markAlarmFired } from './alarm.js'
 import { devModeSync } from './devmode.js'
 import { readPause } from './pause.js'
-import { proactiveConfig, proactiveState, proactiveSection, recentMaterial, looseEnds, TOOL_ASK_NOTE } from './proactive.js'
+import { proactiveConfig, proactiveState, proactiveSection, recentMaterial, looseEnds } from './proactive.js'
 import { deliverWake, ensureSessionLive, reviveIfBlank, WAKE_PING } from './deliver.js'
 import { followWake, planWakeCompaction, compactWake, looksLikeNothingSaid, looksLikeStreamFailure } from './compact.js'
 import { logLine } from './log.js'
@@ -50,6 +50,8 @@ import { recordGrant, GRANT_YES, GRANT_NO } from './grant.js'
 import { readNotes, renderNotes } from './note.js'
 import { curiosityOf, renderEcho } from './curiosity.js'
 import { deskFor } from './desk.js'
+import { wishesOf } from './wish.js'
+import { gapwallsOf } from './gapwall.js'
 import { driveOf, deskHasMaterial } from './drive.js'
 import { interestOf, topicLabel } from './interest.js'
 import { lastLeaveAt, lastSeenAt } from './curiosity.js'
@@ -337,19 +339,21 @@ export function startScheduler(ctx, deps = {}) {
     // 骰子退役（fork.50 之前的那套 chance 掷签不再用）——劲儿决定「该不该醒」，
     // 醒来说什么仍旧是模型的事。fork.50 的「想不想」保留，折在劲儿值上（见下）。
     // 这张桌子是**判据用的摘要**，不是正文那段（正文那段在 wake() 里现算现摆）。
-    // 0.9.1：pc 在函数级——proactiveSection / 结账那段都要用 sendTools / foldSilent
+    // 它决定「该不该醒」，醒来说什么仍旧是模型的事。0.9.1：pc 在函数级——
+    // proactiveSection / 结账那段都要用 sendTools / foldSilent。
+    const gaps = curiosityOf(events, now)
+    // 兴趣也算一笔冲动（2026-11-05，用户 m02031 的目标）：手上有惦记的事，
+    // 更容易想开口——兴趣不只排桌面，也回灌到劲儿里。
+    const interest = interestOf(events, now)
+    const leave = lastLeaveAt(events)
+    const seen = lastSeenAt(events)
+    const echoBack = !!(leave && seen && seen >= leave && now - leave <= 72 * 3600_000)
+    // 上游 0.9.3：桌上多两笔——wish（她攒着的想要）与 wall（撞过的墙）。
+    const driveDesk = { gaps: gaps.length, stale: 0, echo: echoBack, favorite: interest.length > 0, wish: wishesOf(events, { now }).length, wall: gapwallsOf(events, { now }).length }
     const pc = proactiveConfig(config)
     let drv = null
     if (!forced) {
-      const gaps = curiosityOf(events, now)
-      // 兴趣也算一笔冲动（0.9.0，用户 m02031 的目标）：手上有惦记的事，
-      // 更容易想开口——兴趣不只排桌面，也回灌到劲儿里。
-      const interest = interestOf(events, now)
-      const leave = lastLeaveAt(events)
-      const seen = lastSeenAt(events)
-      const echoBack = !!(leave && seen && seen >= leave && now - leave <= 72 * 3600_000)
-      const driveDesk = { gaps: gaps.length, stale: 0, echo: echoBack, favorite: interest.length > 0 }
-      // 0.9.1：seen 算不算打断安静，配置可切
+      // 0.9.1：seen 算不算打断安静，配置可切（桌面在函数级已算好，含上游的 wish/wall）
       drv = driveOf({ events, now, stage: model.stage, desk: driveDesk, seenCountsAsHeard: pc.idleCountsSeen })
       // 空桌不醒（0.9.0，用户 m02937）：桌上什么都没有时，劲儿再满也不起——
       // 否则她只能回一句「没什么要说的」，既占额度又在对话里留一条噪音。
@@ -991,8 +995,13 @@ async function wake(ctx, root, model, config, decision, dk, log, deps = {}) {
   // 交给 deskFor 并成一段，配额与去重都在那个纯函数里；回音是另一件事（他有没有来过），
   // 仍然单独一句话，不并进桌子。
   // 只摆**事实**：不派活、不写「你可以去想想」、不给任何数字——派活了就又变成任务清单。
-  // 2026-11-05（用户 m02634）：「兴趣」有开关。关掉 = 桌子那几行（好奇/旧句子/回音）
-  // 一概不摆；缺工具那句仍留着，它不是活、是她世界里的常量。
+  // 2026-11-05（用户 m02634）：「兴趣」有开关。关掉 = 桌子那几行（好奇/旧句子/回音/
+  // 够不着的那件事）一概不摆。
+  // 2026-11-07（用户 m01602）：「缺工具就开口要」原来那句每轮常量的 TOOL_ASK_NOTE
+  // 撤掉了。它读两天就成了系统的吩咐，不是她的念头。现在换成 B + D：
+  //   B —— 真被守卫拦下的那一下，在 blockedTalk() 里补一句（lib/restrict.js）。
+  //   D —— 这件事攒进劲儿里（lib/drive.js 的 boostWish），攒够了这一轮才醒；
+  //        醒的时候它作为桌上一行出现（lib/wish.js + deskFor 的 wishes）。
   // 读失败绝不拖垮一次唤醒：她醒着这件事比桌上的东西重要。
   if (config?.interest?.enabled !== false) {
     try {
@@ -1010,15 +1019,16 @@ async function wake(ctx, root, model, config, decision, dk, log, deps = {}) {
           stale: staleForDesk(tableText, staleRows),
           free: !!free,
           favorite: fav,
+          // 够不着的那件事：她提过、手上没有的（用户 m01602）。
+          wishes: wishesOf(evc, { now: now.getTime() }),
+          // 撞过墙的那件事：她试过、手上没有的（用户 m00493 的 ②）。
+          walls: gapwallsOf(evc, { now: now.getTime() }),
           at: now,
         })
         if (desk) parts.push('', desk)
         const echo = renderEcho(evc, now)
         if (echo) parts.push('', echo)
       }
-      // 缺工具就开口要：每次醒来都摆这一句，不派活，只给路径。
-      // 摆料那一轮也留着——它不是活，是她世界里的常量（用户 m01128）。
-      parts.push('', TOOL_ASK_NOTE)
     } catch (err) {
       log('curiosity', err?.message ?? err)
     }
@@ -1045,8 +1055,8 @@ async function wake(ctx, root, model, config, decision, dk, log, deps = {}) {
         await markRepliesSeen(root, shown, { dateKey: dk }).catch(() => 0)
       }
     }
-    // 能说话这件事的说明在身份文档的「在网上说话」一节（开关打开时 selfdoc 才写），
-    // 不在这儿重复。
+    // 能说话这件事的说明在身份文档的「在网上说话」一节（关着时那节写「这会儿还说不出去」，
+    // P3，2026-11-07），不在这儿重复。
   }
 
   // 日记：**不再在叫醒消息里推**（2026-10-26，用户 m00928：「叫醒仅仅只是叫醒」）。
