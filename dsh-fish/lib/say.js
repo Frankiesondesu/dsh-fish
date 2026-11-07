@@ -16,7 +16,12 @@
  *     像人一样记得刚才说过什么；跨天换新会话，避免上下文无限膨胀。
  *
  * 她写话仍然只能走 growth_commit 工具（硬约束 N4 不变）。
- * 这里不会替她写任何 utterance —— 我们只把话递进去。
+ * 这里不会替她写任何 utterance 事件 —— 我们只把话递进去。
+ *
+ * 但返回值不一样（issue #51）：她正常回话走助理消息，从不写事件流，
+ * 外客（QQ 桥）只看 `said`，于是她明明答了、对方收到的却是空。
+ * 现在这一轮她在会话里说出口的正文也会进 `said`，并打上 `uncommitted` 标记
+ * ——**只活在这一次返回值里**，不落盘、不进时间线、不涨轮数。
  */
 
 import { readEvents, appendEvent, rootDir, ensureHer } from './store.js'
@@ -25,22 +30,20 @@ import { recordHandFromLink } from './hand.js'
 import { loadConfig, dateKey } from './settings.js'
 import { deriveSelfCached } from './derive.js'
 import { writeInboxFile, newHerEventsSince } from './inbox.js'
+import { assistantText } from './turns.js'
 import { bumpTurns, rotateTalkSession, talkSessionId, homeStatus } from './home.js'
 import { addExchange } from './talkmem.js'
 import { hearTurn } from './hear.js'
 import { logExchange } from './talklog.js'
 import { slashed } from './posix.js'
 import { refreshSelfDoc } from './selfdoc.js'
-import { ensureSessionLive } from './deliver.js'
+import { ensureSessionLive, reviveIfBlank } from './deliver.js'
 import { looksLikeRewriting, sanitizeForeign } from './guard.js'
 import { resolveChannel, saveChannel, channelKey, channelTitle, channelExpired } from './channels.js'
 import { normalizeScene } from './schema.js'
 import { queueNote } from './sessionnote.js'
 import { classifyReaction } from './refuse.js'
 import { lengthBudget } from './budget.js'
-// 她在会话里**说出口**的话（fork.2，2026-11-01）。解析逻辑与 turns.js 共用，
-// 免得同一件事两处各写一遍、哪天悄悄分叉。
-import { assistantText } from './turns.js'
 
 // 等她说完最多等这么久。一次普通回话 8–30 秒，但 fork.22 起她看画面走 vs 全管线
 // （要下载整条视频），一条 20–40 秒；他一条消息丢两条链接就是 80 秒。
@@ -53,11 +56,7 @@ const REPLY_WAIT_MS = 120_000
 const REPLY_WAIT_MAX_MS = 240_000
 // 她自己开口的上限：一句话 2000 字由 schema 兜，这里只兜条数
 const MAX_TEXT = 4000
-// 一轮里她可能分几步说话，最多合并这么多条（与 turns.js 的 TURN_MSGS_MAX 同量级）
-const SPEECH_MAX = 5
 
-/**
- * 等这一轮真正结束（turn/end）。与 scheduler.watchTurnEnd 同源，
 /**
  * 等这一轮真正结束（turn/end）。与 scheduler.watchTurnEnd 同源，
  * 但这里**需要等待**，所以返回一个取结果的小函数。
@@ -82,6 +81,12 @@ function beginTurnWait(ctx, sessionId, timeoutMs, { maxMs = REPLY_WAIT_MAX_MS } 
   let timer = null
   let off = null
   let settle = () => {}
+  // issue #51：她这一轮在会话里**说出口的正文**。
+  // 她正常回话走 assistant/message，从不写事件流；原来这里只等 turn/end，
+  // herReply 又只看事件流，于是外客（guest）通路永远收到「她这次没说话」。
+  // 按 message.id 去重：同一条消息会因 interrupted / 续写被重放几次。
+  const spoken = []
+  const spokenIds = new Set()
   const promise = new Promise((resolve) => { settle = resolve })
   const hard = Date.now() + Math.max(timeoutMs, maxMs)
   const finish = () => {
@@ -89,7 +94,7 @@ function beginTurnWait(ctx, sessionId, timeoutMs, { maxMs = REPLY_WAIT_MAX_MS } 
     done = true
     if (timer) clearTimeout(timer)
     try { off?.() } catch { /* ignore */ }
-    settle()
+    settle({ spoken: spoken.slice() })
   }
   const arm = (ms) => {
     if (timer) clearTimeout(timer)
@@ -104,6 +109,19 @@ function beginTurnWait(ctx, sessionId, timeoutMs, { maxMs = REPLY_WAIT_MAX_MS } 
     off = ctx.on('session/event', (session, event) => {
       const id = session?.header?.id ?? session?.id
       if (id !== sessionId) return
+      if (event?.type === 'assistant/message') {
+        const mid = String(event?.data?.message?.id ?? '')
+        if (mid) {
+          if (spokenIds.has(mid)) return
+          spokenIds.add(mid)
+        }
+        const text = assistantText(event?.data)
+        if (text) spoken.push(text)
+        // fork.23：她开口也是「在动」——把静默计时重开（硬上限照兜）。
+        const leftMsg = hard - Date.now()
+        if (leftMsg > 0) arm(Math.min(timeoutMs, leftMsg))
+        return
+      }
       if (event?.type === 'turn/end') return finish()
       // fork.23：她还在动（调工具 / 写字 / 想事情）：把静默计时重开，别在她干活时判她没说话。
       const left = hard - Date.now()
@@ -127,46 +145,6 @@ function beginTurnWait(ctx, sessionId, timeoutMs, { maxMs = REPLY_WAIT_MAX_MS } 
 export function waitTurnEnd(ctx, sessionId, timeoutMs, { maxMs = REPLY_WAIT_MAX_MS } = {}) {
   const w = beginTurnWait(ctx, sessionId, timeoutMs, { maxMs })
   return w.wait()
-}
-
-/**
- * 收她这一轮**说出口**的话（fork.2，2026-11-01）。
- *
- * 为什么要单开一条：`herReply` 原来只从事件流里捞 HER_TYPES——而那只在她调
- * growth_commit 主动记一句时才写。她在对话里正常回话根本不进事件流，于是
- * 「在吗」这种最普通的对话会返回 `herReply: ''`：网关那头永远收不到她的话，
- * 一句话递进去、没有一句话递回来。上游 0.8.5 在 turns.js 里修过同一个坑
- * （换会话要搬「上次说到这」时 her 永远是空串），say.js 这边漏了。
- *
- * 必须**在 sc.prompt 之前**挂上：assistant/message 是在这一轮进行中发出来的，
- * 等 prompt 返回再挂就漏了。
- *
- * @returns {() => void} 注销函数
- */
-function collectHerSpeech(ctx, sessionId, sink) {
-  if (typeof ctx?.on !== 'function') return () => {}
-  let off = null
-  try {
-    off = ctx.on('session/event', (session, event) => {
-      try {
-        const id = session?.header?.id ?? session?.id
-        if (id !== sessionId) return
-        if (event?.type !== 'assistant/message') return
-        if (sink.parts.length >= SPEECH_MAX) return
-        // 同一条消息可能分几步重放（interrupted / 续写会改同一个 message id）
-        const mid = String(event?.data?.message?.id ?? '')
-        if (mid) {
-          if (sink.seen.has(mid)) return
-          sink.seen.add(mid)
-        }
-        const text = assistantText(event?.data)
-        if (text) sink.parts.push(text)
-      } catch { /* 收话出错不该连累她说话 */ }
-    })
-  } catch {
-    return () => {}
-  }
-  return () => { try { off?.() } catch { /* ignore */ } }
 }
 
 // 反应只在 3 天内追：更早的那次拒绝已经翻篇了，事后再归因是编故事。
@@ -465,10 +443,11 @@ export async function sayToHer(ctx, text, deps = {}) {
   // 现在只探活：会话还在就什么都不做；不在了（或老宿主没有 resolveAgent）才退回建一条。
   const live = await ensureSessionLive(sc, sessionId)
   if (!live.live) {
-    log?.('say: 会话探活没通过，退回新建一条', live.why ?? '')
-    try {
-      await sc.create({ sessionId, cwd: herDir })
-    } catch { /* 已存在就用旧的，上下文接着聊 */ }
+    log?.('say: 会话探活没通过，看看能不能按原 id 唤回来', live.why ?? '')
+    // 2026-11-06（换房报告）：裸 create 对跑过 turn 的会话只会另开一条空壳
+    // （宿主 create 是「按 cwd 开一条」，不是「恢复这一条」），详见 deliver.js 的
+    // reviveIfBlank。只有宿主确实给不出这一条时才建。
+    await reviveIfBlank(sc, sessionId, herDir, (msg) => log?.(`say: ${msg}`)).catch(() => {})
   }
 
   const ac = new AbortController()
@@ -476,14 +455,11 @@ export async function sayToHer(ctx, text, deps = {}) {
   kill.unref?.()
   const t0 = Date.now()
 
-  // 她这一轮说出口的话，边跑边收（必须在 prompt 之前挂，见 collectHerSpeech）
-  const speech = { parts: [], seen: new Set() }
-  const stopSpeech = collectHerSpeech(ctx, sessionId, speech)
-
   // 先挂等待器，再投递（0.8.8 换的契约，见 beginTurnWait；我们 11-04 合 0.8.7 时
   // 也独立发现过同一时序——单测里 prompt 用 setTimeout(0) 发事件，实测必漏，
   // 然后白等满 240 秒。真机上轮次很短（她只回一个字）时也会踩到同一时序）。
   // fork.23 的静默计时与硬上限都保留：等她把一条视频看完，不是等满固定时长。
+  // 她说出口的正文由等待器自己收（beginTurnWait 里的 spoken），不用再单挂一套。
   const waitMs = Math.max(500, Math.min(deps.waitMs ?? REPLY_WAIT_MS, 240_000))
   const turnWait = beginTurnWait(ctx, sessionId, waitMs, {
     maxMs: Math.max(500, Math.min(deps.waitMaxMs ?? REPLY_WAIT_MAX_MS, 300_000)),
@@ -511,8 +487,7 @@ export async function sayToHer(ctx, text, deps = {}) {
       ).catch(() => {})
     }
 
-    // 等待器在 prompt 之前就挂好了，这里只是等它。
-    await turnWait.wait()
+    const turn = await turnWait.wait()
 
     // 她这一轮新写的话（可能一句都没有——允许她不回）
     const after = await readEvents(root)
@@ -524,25 +499,45 @@ export async function sayToHer(ctx, text, deps = {}) {
       verdict: e.verdict ?? null,
       ...(foreign ? { scene: 'group' } : {}),
     }))
+    // 两条来源（fork.2/fork.7 收话，上游 issue #51 并条）：
+    //   ① 她在会话里说出口的正文（assistant/message，beginTurnWait 收进 turn.spoken）
+    //     —— 上游把它并进 said、标 uncommitted：不落盘、不进时间线、不涨轮数，
+    //     只活在这一次返回值里。外客（QQ 桥）读 said 不再收到空数组。
+    //   ② events.jsonl 里的 HER_TYPES（growth_commit 记下的判断）——照旧进事件流。
+    // `herReply` 仍只给 ①：它是"她回了你什么"，不是"她脑子里记了什么"。
+    // 早先写成 ①+② 拼接，QQ/面板里会把她记下的内心判断当成回话一起发出去，
+    // 读起来像她在回复里夹了一段第三人称的自我分析。只有她一句都没说出口时
+    // 才拿 ② 兜底（老调用方、以及"她只记了没开口"的场景）。
+    const spoken = (Array.isArray(turn?.spoken) ? turn.spoken : []).join('\n\n').trim()
+    const flat = (s) => String(s ?? '').replace(/\s+/g, ' ').trim()
+    const seenTexts = said.map((s) => flat(s.text)).filter(Boolean)
+    let spokenNo = 0
+    for (const block of Array.isArray(turn?.spoken) ? turn.spoken : []) {
+      // 一次回话可能是好几段（说一句、调个工具、再补一句），按空行分段。
+      for (const piece of String(block).split(/\n{2,}/)) {
+        const text = piece.trim()
+        const key = flat(text)
+        if (!key) continue
+        // 她已经用 growth_commit 把同一句写进事件流时，不再重复一遍。
+        if (seenTexts.some((k) => k === key || k.includes(key) || key.includes(k))) continue
+        seenTexts.push(key)
+        spokenNo += 1
+        said.push({
+          id: `turn-${dk}-${spokenNo}`,
+          type: 'utterance',
+          text,
+          verdict: null,
+          uncommitted: true,
+          ...(foreign ? { scene: 'group' } : {}),
+        })
+      }
+    }
+    // 事件流里的条数（真正落了盘的）。时间线、轮数、信箱都只认这个数。
+    const committed = fresh.length
+    const herReply = spoken || said.map((s) => s.text).filter(Boolean).join('\n\n')
 
-    // 两条来源（fork.2 / fork.7）：
-    //   ① 会话里 assistant/message 的 text 块 —— 她实际**说出口**的话；
-    //   ② events.jsonl 里的 HER_TYPES —— 她主动调 growth_commit 记下的判断。
-    //
-    // `herReply` 只给 ①：它是"她回了你什么"，不是"她脑子里记了什么"。
-    // 早先写成 ①+② 拼接，结果 QQ/面板里会把她记下的一条内心判断当成回话一起发出去，
-    // 读起来像她在回复里夹了一段第三人称的自我分析。
-    // ②仍单独放在 `said` 里，谁也不丢；只有她一句话都没说时才拿它兜底
-    //（老调用方、以及"她只记了没开口"的场景）。
-    const spoken = speech.parts.join('\n\n').trim()
-    const committed = said.map((s) => s.text).filter(Boolean).join('\n\n')
-    const herReply = spoken || committed
-    const spokeAny = Boolean(spoken || committed)
-
-    // 信箱落盘：她开口了才重写（没开口就没必要动文件）
-    // 注意信箱是从 events 攒的（inbox.js 的 readInbox 只读事件流），
-    // 所以这里的判据仍是 `said`——她在对话里说的话不进信箱。
-    if (said.length) {
+    // 信箱落盘：真有话写进事件流了才重写（没落盘就没必要动文件）
+    if (committed) {
       await writeInboxFile(root).catch(() => null)
     }
 
@@ -550,9 +545,13 @@ export async function sayToHer(ctx, text, deps = {}) {
     // 满了就换，旧的改名留档，原话搬几句到新会话（talkmem）。
     // 换失败不算对话失败：她还在旧会话里，只是这次没换成。
     let rotated = ''
-    let note = spokeAny ? '' : '她这次没说话。'
-    // 2026-11-03（0.8.7）：群聊不挤占书房的那几轮。talkmem 分桶，见 talkmem.js 的注释。
-    // 2026-11-05（0.9.1）：外客私聊同群聊——它不属于「我们俩说到哪了」。
+    // issue #51：她在会话里答了、只是没写事件流时，不能报「没说话」——
+    // 调用方（QQ 桥、外客）会以为她没回应。标一句「没调 growth_commit」，别让人以为落了盘。
+    let note = said.length
+      ? (committed ? '' : '她回了，但这句没写进事件流（没调 growth_commit）。')
+      : '她这次没说话。'
+    // 2026-11-03：群聊不挤占书房的那几轮。talkmem 分桶，见 talkmem.js 的注释。
+    // 2026-11-05：外客私聊同群聊——它不属于「我们俩说到哪了」。
     await addExchange(root, { me: body, her: herReply, scene: foreign ? 'group' : scene }).catch(() => {})
     // fork.11：把这一轮的原话落进账本——她要能翻到「我们说过什么」，
     // 而不只是「我当时怎么想」。只存她**说出口**的那句，不存她写下的判断。
@@ -611,8 +610,12 @@ export async function sayToHer(ctx, text, deps = {}) {
     // 2026-10-29（用户 m02241）：投递成功的收尾也留一行，但压到最短。
     // 只在「她一个字都没说」时记——她开口了的话事件流/会话里本来就有；
     // 这里要能回答的只是「话送进去了吗、她为什么没回」。
-    if (!spokeAny) {
-      log?.('say: 递进去了，她这次没说话', `session=${sessionId}`, `waited=${Date.now() - t0}ms`)
+    if (!committed) {
+      log?.(
+        said.length ? 'say: 她回了会话正文，但没写进事件流' : 'say: 递进去了，她这次没说话',
+        `session=${sessionId}`,
+        `waited=${Date.now() - t0}ms`,
+      )
     }
 
     return {
@@ -620,8 +623,9 @@ export async function sayToHer(ctx, text, deps = {}) {
       note,
       said,
       herReply,
-      // 她在会话里实际说出口的那部分（fork.2）。herReply = spoken + 她 growth_commit 记下的；
-      // 分开留着，是为了让网关能判断"她是真的回话了"还是"只留了一句判断"。
+      // 她在会话里实际说出口的那部分（fork.2，现在由 beginTurnWait 的 turn.spoken 收）。
+      // herReply 优先给 spoken，只有她一句没说出口才兜底到事件流；分开留着，
+      // 是为了让网关能判断"她是真的回话了"还是"只留了一句判断"。
       spoken,
       waitedMs: Date.now() - t0,
       rotated,
@@ -640,6 +644,5 @@ export async function sayToHer(ctx, text, deps = {}) {
     // 投递跟等待都结束了：监听与定时器一起收，别把 off 挂在宿主的
     // 事件总线上（一局里失败几次就漏几个）。
     turnWait.cancel()
-    stopSpeech()
   }
 }

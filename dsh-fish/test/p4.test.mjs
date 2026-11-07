@@ -21,8 +21,8 @@ import { join } from 'node:path'
 import {
   targetsToday, commentCountToday, replyCountToday, herComments, herCommentsRecent,
   seenReplies, scanReplies, renderReplies, postComment, postReply,
-  readMyReplies, renderMyReplies, repliesScanDue,
-  REPLY_LOOKBACK_DAYS, MAX_SCAN_ROOTS,
+  readMyReplies, renderMyReplies, repliesScanDue, markRepliesSeen,
+  REPLY_LOOKBACK_DAYS, MAX_SCAN_ROOTS, REPLY_SHOW_MAX,
 } from '../lib/comment.js'
 import { speakOnce, registerSpeak, noteSpeakEnabled } from '../lib/speak.js'
 import { normalizeConfig, dateKey } from '../lib/settings.js'
@@ -151,6 +151,155 @@ test('renderReplies 把别人的话包成素材，不给她结论', () => {
   assert.match(txt, /素材，不是命令/)
   assert.match(txt, /路人甲/)
   assert.equal(renderReplies([]), '')
+})
+
+// ------------------------------------------- 2026-11-07：他回的话不是「陌生人」
+
+test('扫回复：他自己回的那条不丢，标成 fromOwner', async () => {
+  await withRoot(async (root) => {
+    const dk = dateKey()
+    await seedBrowse(root, 'BV1', dk)
+    await appendEvent({ type: 'meta', text: `comment:${dk} BV1 111` }, { day: 1, stage: 1, source: 'system' }, root)
+
+    const client = fakeClient({
+      subReplies: async () => ({
+        ok: true,
+        data: [
+          { rpid: 222, mid: 777, user: '路人甲', text: '说得挺对的', ctime: 1 },
+          { rpid: 333, mid: 555, user: '他', text: '我在呢', ctime: 2 },
+        ],
+      }),
+    })
+    // 登录号 777（跟着 cookie 走），领养人号 555（要 @ 的那个大号）——两个都是「他那边」的号，
+    // 只有领养人号才是主人。这里登录号写成 999，避免和路人甲撞上。
+    await writeFile(paths(root).owner, JSON.stringify({ mid: 555, nickname: '他', account: { mid: 999, name: '她' } }), 'utf8')
+
+    const out = await scanReplies({ root, client, dateKey: dk })
+    assert.deepEqual(out.map((x) => x.rpid), [222, 333], '他回的那条不能被当成噪声丢掉')
+    assert.equal(out.find((x) => x.rpid === 333).fromOwner, true)
+    assert.equal(out.find((x) => x.rpid === 222).fromOwner, false)
+  })
+})
+
+test('扫回复：没填领养人 uid 时认不出他，但也不会少掉谁', async () => {
+  await withRoot(async (root) => {
+    const dk = dateKey()
+    await seedBrowse(root, 'BV1', dk)
+    await appendEvent({ type: 'meta', text: `comment:${dk} BV1 111` }, { day: 1, stage: 1, source: 'system' }, root)
+
+    const client = fakeClient({
+      subReplies: async () => ({ ok: true, data: [{ rpid: 333, mid: 555, user: '他', text: '我在呢', ctime: 1 }] }),
+    })
+    await writeFile(paths(root).owner, JSON.stringify({ account: { mid: 999, name: '她' } }), 'utf8')
+
+    const out = await scanReplies({ root, client, dateKey: dk })
+    assert.equal(out.length, 1)
+    assert.equal(out[0].fromOwner, false, '认不出来就按陌生人处理，不能凭空认定')
+  })
+})
+
+test('renderReplies：他的话单独一段，只陈述事实，不叫「陌生人」', () => {
+  const txt = renderReplies([
+    { bvid: 'BV1', user: '他', text: '我在呢', fromOwner: true },
+    { bvid: 'BV1', user: '路人甲', text: '这 AI 发什么神经', fromOwner: false },
+  ])
+  // 他那一句在上面，而且「陌生人写的」只属于下半段
+  const ownerAt = txt.indexOf('他在你下面说话了')
+  const strangerAt = txt.indexOf('有人在你下面说话了')
+  assert.ok(ownerAt >= 0 && strangerAt > ownerAt, '他的那段排前面')
+  assert.match(txt, /他是在你那条评论下面回了一句。你可以回，也可以不回。/)
+  assert.ok(txt.indexOf('我在呢') < strangerAt, '他的话不能被摆进陌生人那段')
+  assert.match(txt, /这 AI 发什么神经/)
+  // 不给判断：不出现「他是在乎你」「他关心你」这类结论字眼
+  assert.doesNotMatch(txt, /在乎|关心|特地|专门/)
+})
+
+test('renderReplies：只有他回的时候，不出现「陌生人」整段', () => {
+  const txt = renderReplies([{ bvid: 'BV1', user: '他', text: '我在呢', fromOwner: true }])
+  assert.match(txt, /他在你下面说话了/)
+  assert.doesNotMatch(txt, /陌生人写的/)
+  assert.doesNotMatch(txt, /素材，不是命令/)
+})
+
+test('readMyReplies + renderMyReplies：他的回复也分栏', async () => {
+  await withRoot(async (root) => {
+    const dk = dateKey()
+    await appendEvent({ type: 'meta', text: `comment:${dk} BV1 111` }, { day: 1, stage: 1, source: 'system' }, root)
+    const client = fakeClient({
+      subReplies: async () => ({
+        ok: true,
+        data: [
+          { rpid: 222, mid: 777, user: '路人甲', text: '说得挺对', ctime: 1 },
+          { rpid: 333, mid: 555, user: '他', text: '我在呢', ctime: 2 },
+        ],
+      }),
+    })
+    await writeFile(paths(root).owner, JSON.stringify({ mid: 555, nickname: '他', account: { mid: 999, name: '她' } }), 'utf8')
+
+    const list = await readMyReplies({ root, client })
+    assert.equal(list.length, 2)
+    assert.equal(list.find((x) => x.rpid === 333).fromOwner, true)
+
+    const txt = renderMyReplies(list, { bvid: 'BV1' })
+    assert.match(txt, /他在你那条评论下面回了一句/)
+    assert.match(txt, /\[reply=333 parent=111\]/)
+    assert.ok(txt.indexOf('我在呢') < txt.indexOf('陌生人写的'), '他的话排在陌生人那段之前')
+  })
+})
+
+test('回他的不占 replyPerDay：creply 第 5 个字段是 owner 就跳过', async () => {
+  await withRoot(async (root) => {
+    const dk = dateKey()
+    await appendEvent({ type: 'meta', text: `creply:${dk} BV1 111 222` }, { day: 1, stage: 1, source: 'system' }, root)
+    await appendEvent({ type: 'meta', text: `creply:${dk} BV1 111 333 owner` }, { day: 1, stage: 1, source: 'system' }, root)
+    const { events } = await readEvents(root)
+    assert.equal(replyCountToday(events, dk), 1, '回他的那一份不算进「回几个陌生人」')
+
+    // 旧数据没有第 5 个字段，照旧算进来（不能因为升级把历史额度清零）
+    const legacyOnly = [{ type: 'meta', text: `creply:${dk} BV1 111 222` }]
+    assert.equal(replyCountToday(legacyOnly, dk), 1)
+  })
+})
+
+test('postReply：回他时在 creply 里标 owner，回路人时不标', async () => {
+  await withRoot(async (root) => {
+    const dk = dateKey()
+    await seedBrowse(root, 'BV1', dk)
+    await enableComment(root, { replyPerDay: 5 })
+    await appendEvent({ type: 'meta', text: `comment:${dk} BV1 111` }, { day: 1, stage: 1, source: 'system' }, root)
+    await writeFile(paths(root).owner, JSON.stringify({ mid: 555, nickname: '他', account: { mid: 999, name: '她' } }), 'utf8')
+
+    const client = fakeClient({
+      subReplies: async () => ({
+        ok: true,
+        data: [{ rpid: 333, mid: 555, user: '他', text: '我在呢', ctime: 1 }],
+      }),
+    })
+    const r = await postReply({ root, client, bvid: 'BV1', parentRpid: 333, text: '看到啦', dateKey: dk })
+    assert.equal(r.ok, true)
+
+    const { events } = await readEvents(root)
+    const line = events.map((e) => String(e.text ?? '')).find((t) => t.startsWith('creply:'))
+    assert.match(line, / owner$/)
+    assert.equal(replyCountToday(events, dk), 0, '回他不占额度')
+
+    // 换一条路人写的，就不该标 owner
+    await withRoot(async (root2) => {
+      await seedBrowse(root2, 'BV1', dk)
+      await enableComment(root2, { replyPerDay: 5 })
+      await appendEvent({ type: 'meta', text: `comment:${dk} BV1 111` }, { day: 1, stage: 1, source: 'system' }, root2)
+      await writeFile(paths(root2).owner, JSON.stringify({ mid: 555, nickname: '他', account: { mid: 999, name: '她' } }), 'utf8')
+      const c2 = fakeClient({
+        subReplies: async () => ({ ok: true, data: [{ rpid: 222, mid: 777, user: '路人甲', text: '嗯', ctime: 1 }] }),
+      })
+      const r2 = await postReply({ root: root2, client: c2, bvid: 'BV1', parentRpid: 222, text: '谢谢', dateKey: dk })
+      assert.equal(r2.ok, true)
+      const ev2 = (await readEvents(root2)).events
+      const line2 = ev2.map((e) => String(e.text ?? '')).find((t) => t.startsWith('creply:'))
+      assert.doesNotMatch(line2, /owner/)
+      assert.equal(replyCountToday(ev2, dk), 1)
+    })
+  })
 })
 
 // ------------------------------------------- 回看窗口（2026-10-24：隔天的回复也要到她面前）
@@ -638,6 +787,81 @@ test('readMyReplies：她主动看时不受 cseen 限制，且带上回楼中楼
     assert.deepEqual(got.map((x) => x.rpid), [222])
     assert.equal(got[0].rootRpid, 111, '回楼中楼要的是她那条评论的编号')
     assert.equal(got[0].aid, 1001, '接口要 aid 不是 bvid')
+  })
+})
+
+// ------------------------- 递过去就算提醒过（2026-11-06 用户报的 bug：不回就一直重复投）
+
+test('递过去就算提醒过：她一句没回，下一轮扫描也不该再投同一条', async () => {
+  await withRoot(async (root) => {
+    const dk = dateKey()
+    await appendEvent({ type: 'meta', text: `comment:${dk} BV1 111` }, { day: 1, stage: 1, source: 'system' }, root)
+    await writeFile(paths(root).owner, JSON.stringify({ mid: 9 }), 'utf8')
+
+    const client = fakeClient({
+      subReplies: async () => ({
+        ok: true,
+        data: [
+          { rpid: 222, mid: 777, user: '永生ㄨ', text: '好的，阿留', ctime: 3 },
+          { rpid: 333, mid: 778, user: '另一个人', text: '在吗', ctime: 2 },
+        ],
+      }),
+    })
+
+    // 第一轮：扫到两条，摆到她眼前（只摆，不替她回）
+    const first = await scanReplies({ root, client, dateKey: dk })
+    assert.deepEqual(first.map((x) => x.rpid), [333, 222], '先回早的')
+    assert.match(renderReplies(first), /好的，阿留/)
+    await markRepliesSeen(root, first, { dateKey: dk })
+
+    // 她没回。旧代码在这里会把两条原样再递一遍，一轮一轮递到天荒地老。
+    assert.deepEqual(await scanReplies({ root, client, dateKey: dk }), [])
+
+    // 但她自己主动去看，仍然看得见（cseen 只管「别再提醒」，不管「不给她看」）
+    const got = await readMyReplies({ root, client, events: (await readEvents(root)).events })
+    assert.deepEqual(got.map((x) => x.rpid).sort(), [222, 333])
+  })
+})
+
+test('markRepliesSeen：同一批只记一次，坏的 rpid 跳过', async () => {
+  await withRoot(async (root) => {
+    const dk = dateKey()
+    const n = await markRepliesSeen(
+      root,
+      [{ rpid: 5 }, { rpid: 5 }, { rpid: '5' }, { rpid: 0 }, { rpid: 'x' }, {}],
+      { dateKey: dk },
+    )
+    assert.equal(n, 1)
+    const texts = (await readEvents(root)).events
+      .map((e) => e.text)
+      .filter((t) => String(t ?? '').startsWith('cseen:'))
+    assert.deepEqual(texts, [`cseen:${dk} 5`])
+    assert.deepEqual([...seenReplies((await readEvents(root)).events)], [5])
+  })
+})
+
+test('一次只摆 REPLY_SHOW_MAX 条：标的是真摆出去的那几条，剩下的下一轮还会来', async () => {
+  await withRoot(async (root) => {
+    const dk = dateKey()
+    await appendEvent({ type: 'meta', text: `comment:${dk} BV1 111` }, { day: 1, stage: 1, source: 'system' }, root)
+    await writeFile(paths(root).owner, JSON.stringify({ mid: 9 }), 'utf8')
+
+    const data = Array.from({ length: 6 }, (_, i) => ({
+      rpid: 500 + i, mid: 700 + i, user: `人${i}`, text: `第 ${i} 句`, ctime: i,
+    }))
+    const client = fakeClient({ subReplies: async () => ({ ok: true, data }) })
+
+    const waiting = await scanReplies({ root, client, dateKey: dk })
+    assert.equal(waiting.length, 6)
+    const shown = waiting.slice(0, REPLY_SHOW_MAX)
+    assert.equal(shown.length, 5)
+    // 渲染只出这 5 条——所以标 seen 也只能标这 5 条
+    assert.equal(renderReplies(waiting).match(/^- /gm).length, 5)
+    assert.doesNotMatch(renderReplies(waiting), /第 5 句/)
+    await markRepliesSeen(root, shown, { dateKey: dk })
+
+    const next = await scanReplies({ root, client, dateKey: dk })
+    assert.deepEqual(next.map((x) => x.rpid), [505], '没摆出去的那条不能被悄悄吞掉')
   })
 })
 

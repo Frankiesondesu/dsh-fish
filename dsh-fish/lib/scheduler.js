@@ -5,7 +5,8 @@
  * （身份由 identity.js 以 system prompt 段承载、每轮现读，不拼进唤醒消息）。
  *
  * 三条安全线（B §7）：
- *   1. 定时器只是**提议**。任何一次唤醒失败都不重试、不阻塞下一分钟。
+ *   1. 定时器只是**提议**。唤醒失败不算今天的这一次，之后还会再试，但会隔开再试，同一天
+ *      最多试 WAKE_FAIL_MAX 次（wakeRetryBlocked）：事件流只能追加，不能每分钟写一行。
  *   2. 一天之内同一条事件模板不重复触发（once 靠 fired 标记，非 once 靠 daily 配额）。
  *   3. 停用插件 = dispose 定时器，不再有任何后台活动（不靠"记得关"）。
  *
@@ -22,14 +23,14 @@ import { findTemplate } from './events.js'
 import { offerPrompt, SLEEP_TODAY } from './persona.js'
 import { offerDueDay, pendingOffer, grantableRules } from './unlock.js'
 import { holdWake } from './wakewin.js'
-import { detectAbsence } from './absence.js'
+import { detectAbsence, lastAbsenceEvent } from './absence.js'
 import { createClient } from './bili.js'
 import { gather, browseCountToday, recordBrowse } from './browse.js'
 import { seenOn } from './whatseen.js'
 import { renderWatchList } from './history.js'
 import { fetchCover, coverLines } from './cover.js'
 import { riskState, browsePlan, noteRisk, isRiskCode } from './risk.js'
-import { scanReplies, renderReplies, repliesScanDue } from './comment.js'
+import { scanReplies, renderReplies, repliesScanDue, markRepliesSeen, REPLY_SHOW_MAX } from './comment.js'
 import { flushReport } from './report.js'
 import { talkSessionId, homeStatus } from './home.js'
 import { refreshSelfDoc } from './selfdoc.js'
@@ -42,10 +43,10 @@ import { takeDueAlarm, markAlarmFired } from './alarm.js'
 import { devModeSync } from './devmode.js'
 import { readPause } from './pause.js'
 import { proactiveConfig, proactiveState, proactiveSection, recentMaterial, looseEnds, TOOL_ASK_NOTE } from './proactive.js'
-import { deliverWake, ensureSessionLive, WAKE_PING } from './deliver.js'
+import { deliverWake, ensureSessionLive, reviveIfBlank, WAKE_PING } from './deliver.js'
 import { followWake, planWakeCompaction, compactWake, looksLikeNothingSaid, looksLikeStreamFailure } from './compact.js'
 import { logLine } from './log.js'
-import { recordGrant } from './grant.js'
+import { recordGrant, GRANT_YES, GRANT_NO } from './grant.js'
 import { readNotes, renderNotes } from './note.js'
 import { curiosityOf, renderEcho } from './curiosity.js'
 import { deskFor } from './desk.js'
@@ -95,6 +96,12 @@ const WAKE_TIMEOUT_MS = 5 * 60_000
 const REPORT_WAIT_MS = 90_000
 // 一天的第二次及以后的叫醒，离上一次至少隔这么久（见 nextWakeAt / lastWakeAt）
 const WAKE_MIN_GAP_MS = 45 * 60_000
+/** 一天最多试几次失败的叫醒。之后当天不再定时叫，手动叫不受影响。 */
+const WAKE_FAIL_MAX = 3
+/** 失败之后隔多久再试：第一次很快，时段快结束时只失败一次也不至于丢掉今天这一次。 */
+const WAKE_FAIL_GAPS_MS = [5 * 60_000, WAKE_MIN_GAP_MS]
+/** 手动叫醒失败只留记录，不算进定时的账：有人点了一下按钮，不该用掉今天定时的机会。 */
+const WAKE_FAIL_MANUAL = '手动 '
 // 她正在某一轮里时先等她说完，最多等这么久
 const IDLE_WAIT_MS = 10 * 60_000
 // turn/start 之后迟迟等不到 turn/end（宿主重启、事件丢了），超过这么久就不再当她在忙
@@ -127,6 +134,24 @@ const DAY_END_CUE = '（今天到这里了。这一刻是我自己的。）'
  */
 
 
+
+/**
+ * 今天失败的叫醒是不是已经够多，或者刚失败过。账记在事件流里，重启也算数。
+ * @param {Array} events
+ * @param {string} dk 今天的日期键
+ * @param {number} now
+ */
+export function wakeRetryBlocked(events = [], dk = dateKey(), now = Date.now()) {
+  let n = 0
+  let last = 0
+  for (const e of events) {
+    if (e?.type !== 'meta' || !String(e.text ?? '').startsWith(`wakefail:${dk}`)) continue
+    if (String(e.text).startsWith(`wakefail:${dk} ${WAKE_FAIL_MANUAL}`)) continue
+    n += 1
+    last = Math.max(last, Date.parse(e.ts || '') || 0)
+  }
+  return n >= WAKE_FAIL_MAX || (last > 0 && now - last < WAKE_FAIL_GAPS_MS[Math.min(n, WAKE_FAIL_GAPS_MS.length) - 1])
+}
 
 /**
  * 等这一轮真说完：认准「我们自己排进去的那一轮」的 turn/end。
@@ -172,6 +197,7 @@ export function startScheduler(ctx, deps = {}) {
   let lastTick = 0
   let running = false
   let disposed = false
+  let lastAbsenceKey = null
   let timer = null
   let wakeTimer = null
   // skip 日志去重（2026-10-28）：同一小时、同一原因只记一次。
@@ -405,7 +431,7 @@ export function startScheduler(ctx, deps = {}) {
     let gen = 0
     const watcher = watchTurnEnd(ctx, sessionId, () => {
       releaseWake()
-      clearWakeSection(gen)
+      clearWakeSection(gen, sessionId)
     })
     try {
       // 2026-11-05（0.9.0 用户 m03265）：原来这里是 `sc.create({ sessionId, cwd })`，
@@ -414,10 +440,12 @@ export function startScheduler(ctx, deps = {}) {
       // 现在先探活；探不通才退回建（老宿主没有 resolveAgent 时也走这条）。
       const live = await ensureSessionLive(sc, sessionId)
       if (!live.live) {
-        log('proactive: 会话探活没通过，退回新建一条', live.why ?? '')
-        await sc.create({ sessionId, cwd: await ensureHer(root) }).catch(() => {})
+        log('proactive: 会话探活没通过，看看能不能按原 id 唤回来', live.why ?? '')
+        // 2026-11-06（换房报告）：跑过 turn 的会话给不出原 id，裸 create 只会
+        // 另开一条空壳 —— 交给 reviveIfBlank 判，见 lib/deliver.js。
+        await reviveIfBlank(sc, sessionId, await ensureHer(root), (msg) => log(`proactive: ${msg}`)).catch(() => {})
       }
-      gen = setWakeSection(text)
+      gen = setWakeSection(text, sessionId)
 
       // 投递之前先把这一轮盯起来（0.9.0 用户 m00803）。认领信号是 rpcId：
       // 每次投递一个唯一值，命中之前一律当「还没开始」，所以早挂不会认错轮。
@@ -441,7 +469,7 @@ export function startScheduler(ctx, deps = {}) {
         // 没送进去就没有这一轮：处境和窗口当场收掉，监听也摘掉，
         // 不然要等到别的哪一轮结束才清，那一轮开头还挂着这次的处境（跟 wake() 失败时一样）
         try { follow.off() } catch { /* ignore */ }
-        clearWakeSection(gen)
+        clearWakeSection(gen, sessionId)
 
         releaseWake()
         try { watcher.off?.() } catch { /* ignore */ }
@@ -492,7 +520,10 @@ export function startScheduler(ctx, deps = {}) {
           let folded = 0
           if (plan) for (const run of plan.runs) if (await compactWake(out.session, run, { log })) folded += 1
           const tail = broken ? '，这一轮上游断流了（那行报错不算她开口）'
-            : out.spoke === true ? '，只说了句没什么要说的' : ''
+            : out.spoke !== true ? ''
+              // 配了发送工具时，只写正文是「没发出去」，不见得是没话说，这句可以写得很长。
+              // 也可能调了工具但失败了，所以不说「没调」
+              : pc.sendTools.length > 0 ? '，只写了正文，没发出去' : '，只说了句没什么要说的'
           const head = forced ? '按她定的点醒了一次' : '醒了一次'
           log('proactive', folded > 0
             ? `${head}，没有开口${tail}（这一轮折成 ${folded} 行，盖住 ${plan.shadowed} 个节点）`
@@ -505,7 +536,7 @@ export function startScheduler(ctx, deps = {}) {
     } catch (err) {
       // 没送进去就没有这一轮：处境和窗口当场收掉，监听也摘掉，
       // 不然要等到别的哪一轮结束才清，那一轮开头还挂着这次的处境（跟 wake() 失败时一样）
-      clearWakeSection(gen)
+      clearWakeSection(gen, sessionId)
       releaseWake()
       try { watcher.off?.() } catch { /* ignore */ }
       throw err
@@ -548,11 +579,19 @@ export function startScheduler(ctx, deps = {}) {
       // 放在 tick 最前面，因为 wake 的提示词要读 absenceDays；
       // 晚一步的话今天这次唤醒就用的是昨天的冷落结论。
       const absence = await detectAbsence(root)
+      const { events } = await readEvents(root)
       // 冷落条数变了 = 她对自己的看法变了，身份文件要跟着重写。
       // 不写的话那份 system prompt 段会一直停在上一次的值上（她"不知道自己被晾过"）。
-      if (absence?.written) await refreshSelfDoc(root, { log })
+      // 他回来了、天数涨了也要重写：不然她一边跟他聊，身份里还写着「他有 2 天没出现」。
+      // 身份里的天数从 absence 写下那一刻起算，和 detectAbsence 的不在同一时刻跳（absence
+      // 写得晚的时候），两个都要看，不然会把旧数重写一遍，身份比叫醒的提示词晚一天。
+      // 初值是 null，因为启动时已经写过一次，第一拍不用再写。
+      const lastAbsence = lastAbsenceEvent(events)
+      const daysSinceWritten = lastAbsence ? Math.floor((now - Date.parse(String(lastAbsence.ts ?? 0))) / 86_400_000) : 0
+      const absenceKey = `${absence?.why ?? ''}:${absence?.days ?? 0}:${daysSinceWritten}`
+      if (absence?.written || (lastAbsenceKey !== null && absenceKey !== lastAbsenceKey)) await refreshSelfDoc(root, { log })
+      lastAbsenceKey = absenceKey
 
-      const { events } = await readEvents(root)
       const { config } = await loadConfig(root)
       const dk = dateKey()
 
@@ -594,12 +633,16 @@ export function startScheduler(ctx, deps = {}) {
           // 无论有没有人回都记一次：不记的话每 30 秒就会重新问一遍 B 站（-412 就是这么撞出来的）。
           await updateConfig({ comment: { lastScanAt: new Date(now).toISOString() } }, root).catch(() => {})
           if (waiting.length) {
-            const txt = renderReplies(waiting)
+            // 只递、只标前几条：标 seen 的是「真摆到她眼前的」，不是「扫到的」。
+            // 标多了等于把没看见的悄悄吞掉；不标就会一直重复投（2026-11-06 用户报的 bug）。
+            const shown = waiting.slice(0, REPLY_SHOW_MAX)
+            const txt = renderReplies(shown)
             if (txt) {
               await queueNote(root, txt).catch(() => null)
               const h = await homeStatus(root).catch(() => null)
               const agent = h?.sessionId ? liveAgentOf(ctx, h.sessionId) : null
               if (agent) await deliverQueued(agent, root, { home: true }).catch(() => null)
+              await markRepliesSeen(root, shown, { dateKey: dk }).catch(() => 0)
               log('comment', `有人回她了（${waiting.length} 条），已经递过去。`)
             }
           }
@@ -611,8 +654,12 @@ export function startScheduler(ctx, deps = {}) {
       // ---- 主动说话（0.8.1 本机实验，2026-10-30 用户 m04610）----
       // 它不是唤醒：不占 wakesPerDay，也不推成长事件。只在 .dev 下生效。
       // 开了就 return——这一趟由她自己决定说还是不说，不再叠一次醒一醒。
+      //
+      // 2026-11-06（0.9.2 反馈）：主动性也要受「每天几点醒」约束。
+      // 她要是能在窗口外自己醒过来找他，这个设置就等于没设——
+      // 用户关掉的是「这个时段别来打扰」，不是「别按日程醒来但可以主动开口」。
       try {
-        if (await maybeProactive({ events, config, dk, now })) return
+        if (inWindow(config, new Date(now)) && await maybeProactive({ events, config, dk, now })) return
       } catch (err) {
         log('proactive failed', err?.message ?? String(err))
       }
@@ -625,6 +672,9 @@ export function startScheduler(ctx, deps = {}) {
 
       const counts = await todayCounts(events, dk)
       if (now < scheduled.at) return    // 还没到今天的落点
+
+      // 叫醒一直失败时（会话没了、宿主起不来）别每分钟再试一次，每次都往事件流写一行 wakefail。
+      if (wakeRetryBlocked(events, dk, now)) return
 
       const model = deriveSelfCached(events, { growthDays: config.growthDays })
       // 空档补偿只影响这一次挑选的冷却判断（见 gapSqueeze）
@@ -987,8 +1037,13 @@ async function wake(ctx, root, model, config, decision, dk, log, deps = {}) {
     const events = (await readEvents(root).catch(() => ({ events: [] }))).events
     const waiting = await scanReplies({ root, events, dateKey: dk }).catch(() => [])
     if (waiting.length) {
-      const txt = renderReplies(waiting)
-      if (txt) parts.push('', txt)
+      const shown = waiting.slice(0, REPLY_SHOW_MAX)
+      const txt = renderReplies(shown)
+      if (txt) {
+        parts.push('', txt)
+        // 摆进叫醒消息就算提醒过了：不标的话，她没回就会每次叫醒都再投一遍。
+        await markRepliesSeen(root, shown, { dateKey: dk }).catch(() => 0)
+      }
     }
     // 能说话这件事的说明在身份文档的「在网上说话」一节（开关打开时 selfdoc 才写），
     // 不在这儿重复。
@@ -1128,10 +1183,9 @@ async function wake(ctx, root, model, config, decision, dk, log, deps = {}) {
   // 先探活，探不通才退回建一条。
   const live = await ensureSessionLive(sc, sessionId)
   if (!live.live) {
-    log('wake: 会话探活没通过，退回新建一条', live.why ?? '')
-    try {
-      await sc.create({ sessionId, cwd: herDir })
-    } catch { /* 已存在，继续用 */ }
+    log('wake: 会话探活没通过，看看能不能按原 id 唤回来', live.why ?? '')
+    // 同上（2026-11-06 换房报告）：只有宿主确实给不出这一条时才建。
+    await reviveIfBlank(sc, sessionId, herDir, (msg) => log(`wake: ${msg}`)).catch(() => {})
   }
 
   // 2026-11-04：`AbortController` 与那个 5 分钟 kill 定时器一起删掉了。
@@ -1165,17 +1219,19 @@ async function wake(ctx, root, model, config, decision, dk, log, deps = {}) {
   // 挂早了会被那一轮的 turn/end 收走（issue #36 之前 watcher 只认会话不认回合，
   // 现在它至少要见到我们自己这一轮的 turn/start 才算数，双保险）。
   if (typeof deps.waitIdle === 'function') await deps.waitIdle(sessionId)
+  if (deps.isDisposed?.()) return
 
   // 这一轮她写的话不算他来过：唤醒时间窗开到 turn/end，不是开到入队（见 wakewin.js）。
   // turn/end 不来时跟处境一起由下面的兜底关；没送进去就在 catch 里关。
   // 处境代次（2026-11-04，用户 m01466）：见 maybeProactive 里的同一处注释。
   // 清的时候要带着自己挂上去时拿到的号，别把别人后来挂的处境一起抹了。
   let gen = 0
+  // 先挂监听再开窗：ctx 已停用时 ctx.on 会抛，开了窗就再也关不上
+  const watcher = watchTurnEnd(ctx, sessionId, () => { releaseWake(); void writeReport(); clearWakeSection(gen, sessionId) })
   const releaseWake = holdWake()
-  const watcher = watchTurnEnd(ctx, sessionId, () => { releaseWake(); void writeReport(); clearWakeSection(gen) })
 
   // 处境走 system prompt 段；对话里只留一个空投递（她看到的是「有人来了」，不是剧本）。
-  gen = setWakeSection(wakeText)
+  gen = setWakeSection(wakeText, sessionId)
   // 2026-11-04（用户 m01466）：投递前的最后一道护栏。
   //
   // 真机事故里出现过「消息投出去了、system prompt 里一个字处境都没有」的一轮：
@@ -1185,8 +1241,8 @@ async function wake(ctx, root, model, config, decision, dk, log, deps = {}) {
   //
   // 治本是上面的最小间隔（不该有两次挨这么近的唤醒）；这里只是兜底：
   // 万一处境真的空了，宁可不叫，也别投一条空壳让她自己找台阶下。
-  if (!getWakeSection().trim()) {
-    clearWakeSection(gen)
+  if (!getWakeSection(sessionId).trim()) {
+    clearWakeSection(gen, sessionId)
     releaseWake()
     try { watcher.off?.() } catch { /* ignore */ }
     log('wake skipped: 处境是空的')
@@ -1271,7 +1327,7 @@ async function wake(ctx, root, model, config, decision, dk, log, deps = {}) {
       // 上一个调度器留下的窗口没关，下一轮 turn/end 之后 inWake() 仍是 true。
       if (deps.isDisposed?.()) {
         try { watcher.off?.() } catch { /* ignore */ }
-        clearWakeSection(gen)
+        clearWakeSection(gen, sessionId)
         releaseWake()
         return
       }
@@ -1280,16 +1336,16 @@ async function wake(ctx, root, model, config, decision, dk, log, deps = {}) {
         return
       }
       try { watcher.off?.() } catch { /* ignore */ }
-      if (!watcher.fired) clearWakeSection(gen)
+      if (!watcher.fired) clearWakeSection(gen, sessionId)
       releaseWake()
     }
     setTimeout(fallback, REPORT_WAIT_MS).unref?.()
   } catch (err) {
     // 这一次没起来，处境要立刻清掉，唤醒时间窗也关上。
-    clearWakeSection(gen)
+    clearWakeSection(gen, sessionId)
     releaseWake()
     await appendEvent(
-      { type: 'meta', text: `wakefail:${dk} ${String(err?.message ?? err).slice(0, 120)}` },
+      { type: 'meta', text: `wakefail:${dk} ${deps.manual ? WAKE_FAIL_MANUAL : ''}${String(err?.message ?? err).slice(0, 120)}` },
       { day: model.day, stage: model.stage, source: 'timer' },
       root,
     ).catch(() => {})
@@ -1317,12 +1373,14 @@ async function askOfferInChat(ctx, root, { sessionId, offer, log = () => {} } = 
   try {
     const r = await askInChat(ctx, {
       sessionId,
+      root,
+      cardId: `grant:${offer.id}`,
       questions: [
         {
           id: 'grant',
           header: '大肥鱼想申请一件事',
           question: `她想试试「${offer.title}」。不是现在就要，是想问问你。`,
-          options: [{ label: '可以' }, { label: '这次不行' }],
+          options: [{ label: GRANT_YES }, { label: GRANT_NO }],
         },
       ],
     })
@@ -1331,7 +1389,7 @@ async function askOfferInChat(ctx, root, { sessionId, offer, log = () => {} } = 
       return
     }
     const said = picked(r.answers, 'grant')
-    const verdict = said === '可以' ? 'approve' : said === '这次不行' ? 'reject' : ''
+    const verdict = said === GRANT_YES ? 'approve' : said === GRANT_NO ? 'reject' : ''
     if (!verdict) return
     const w = await recordGrant(root, { offerId: offer.id, rule: offer.rule, verdict })
     if (!w.ok) log('offer grant failed', w.error)

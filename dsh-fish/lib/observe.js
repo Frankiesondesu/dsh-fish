@@ -1322,8 +1322,11 @@ export function registerObserve(ctx, deps = {}) {
         scanEveryMin: Number(c.scanEveryMin ?? 30),
         window: c.window ?? [],
         mine: herComments(events, dk),
-        waiting: replies.slice(0, 5).map((x) => ({ rpid: x.rpid, bvid: x.bvid, user: x.user, text: x.text })),
+        waiting: replies.slice(0, 5).map((x) => ({ rpid: x.rpid, bvid: x.bvid, user: x.user, text: x.text, fromOwner: x.fromOwner === true })),
         waitingCount: replies.length,
+        // 2026-11-07：他的话单算一格。状态行原来只有「有 N 条没回」，
+        // 主人自己回一句也被算成陌生人的存量（用户反馈）。
+        waitingOwnerCount: replies.filter((x) => x.fromOwner === true).length,
       })
     }],
 
@@ -1675,7 +1678,7 @@ export function registerObserve(ctx, deps = {}) {
         const said = b.yes === true
         const r = decideKeepsake(root, { id: String(b.id ?? ''), yes: said })
         logLine('info', ['纪念品：', said ? '准了' : '没带', r.item?.rel ?? '', r.item?.id ?? ''], root)
-        return send(res, r.ok ? 200 : 409, { ok: r.ok, item: r.item ?? null, note: r.note })
+        return send(res, r.ok ? 200 : 409, { ok: r.ok, item: r.item ?? null, note: r.note, ...(r.ok ? {} : { error: r.note }) })
       }
 
       // 复核上一次被拒收的那趟（0.6.32）：文件还原后重新比对，通过就当场收下。
@@ -1953,7 +1956,8 @@ export function registerObserve(ctx, deps = {}) {
         reason: b.reason,
         via: 'ui',
       })
-      if (!r.ok) return send(res, 409, { ok: false, why: r.why })
+      // jpost 只认 error：别的地方（IM、别的页面）先答过时，要让人看到原因，不是一个 HTTP 409
+      if (!r.ok) return send(res, 409, { ok: false, why: r.why, error: r.why })
       logLine('info', ['请求事件：回答', String(b.askId || ''), String(b.verdict || '')], root)
       return send(res, 200, { ok: true })
     }],
@@ -2195,7 +2199,7 @@ export function registerObserve(ctx, deps = {}) {
       // 空白会话在侧栏里是隐形的（宿主 sessionVisible：blank && id !== current → false）。
       // 插件用 API 建的会话不会被设成当前会话，所以要让她先动一轮，侧栏才看得见。
       const woke = fresh.ok
-        ? await wakeIfBlank(ctx, { sessionId: fresh.sessionId, root, log: (m) => console.log('[dsh-fish]', m), freshOnly: !fresh.reused })
+        ? await wakeIfBlank(ctx, { sessionId: fresh.sessionId, root, log: (m) => console.log('[dsh-fish]', m), freshOnly: !fresh.reused, verify: true })
         : { woke: false }
       send(res, 200, {
         ok: true,
@@ -2229,7 +2233,7 @@ export function registerObserve(ctx, deps = {}) {
         force: true,
       })
       const woke = fresh.ok
-        ? await wakeIfBlank(ctx, { sessionId: fresh.sessionId, root, log: (m) => console.log('[dsh-fish]', m), freshOnly: !fresh.reused })
+        ? await wakeIfBlank(ctx, { sessionId: fresh.sessionId, root, log: (m) => console.log('[dsh-fish]', m), freshOnly: !fresh.reused, verify: true })
         : { woke: false }
       send(res, fresh.ok ? 200 : 409, {
         ok: fresh.ok,

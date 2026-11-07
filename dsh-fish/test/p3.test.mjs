@@ -222,6 +222,38 @@ test('说一句话：落 seen 标记（唤醒窗外才算他来过），并带�
   } finally { await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) }
 })
 
+test('issue #51：她在会话里回了、但没写事件流，said 与 herReply 都要带回原话', async () => {
+  const root = await tmpRoot()
+  try {
+    await appendEvent({ type: 'seed', text: '起点。' }, { day: 1, stage: 1, source: 'system' }, root)
+    const ctx = fakeCtx()
+    const handlers = new Map()
+    // 假宿主的事件总线：只记 handler，测试里自己 emit（真宿主由 plugin 的 ctx.on 提供）。
+    ctx.on = (name, fn) => {
+      handlers.set(name, fn)
+      return () => handlers.delete(name)
+    }
+    const emit = (event) => handlers.get('session/event')?.({ header: { id: 's-house' } }, event)
+    ctx.sessionController.prompt = async () => {
+      // 同一条消息被重放两次（interrupted / 续写），只能算一份。
+      const message = { id: 'm-51', content: [{ type: 'text', text: '听得见，两条都收到了。' }] }
+      emit({ type: 'assistant/message', data: { message } })
+      emit({ type: 'assistant/message', data: { message } })
+      emit({ type: 'turn/end' })
+    }
+
+    const r = await sayToHer(ctx, '在吗', { root, waitMs: 5_000 })
+    assert.equal(r.ok, true)
+    // 她没调 growth_commit，事件流里没落盘；但这次回话要带回来，标 uncommitted。
+    assert.equal(r.said.length, 1, '同一条消息重放两次也只算一句')
+    assert.equal(r.said[0].text, '听得见，两条都收到了。')
+    assert.equal(r.said[0].type, 'utterance')
+    assert.equal(r.said[0].uncommitted, true, '没认领的话只活在这条返回值里，不落盘')
+    assert.equal(r.herReply, '听得见，两条都收到了。')
+    assert.match(r.note, /没写进事件流|growth_commit/)
+  } finally { await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) }
+})
+
 test('她正在醒着时你说话，仍然算你来了（say 不看唤醒窗）', async () => {
   // 与 capture.js 的分工：
   //   capture 里 `if (!inWake())` 是因为「她在窗口内写字」可能只是她自己想事情；
@@ -361,9 +393,15 @@ test('她只在会话里回话（没调 growth_commit）时，herReply 也要带
 
     const r = await sayToHer(ctx, '在吗', { root, waitMs: 5_000 })
     assert.equal(r.ok, true)
-    assert.deepEqual(r.said, [], '她没调 growth_commit，事件流里不该有她写的话')
+    // 上游 issue #51：说出口的正文并进 said、标 uncommitted——外客（QQ 桥）读 said 不再是空数组。
+    assert.equal(r.said.length, 1)
+    assert.equal(r.said[0].text, '在。')
+    assert.equal(r.said[0].uncommitted, true, 'uncommitted 标记要带上：它不是她自己认下的判断')
+    // 真正的底线不变：她没调 growth_commit，事件流文件里不该有她写的话。
+    const { events } = await readEvents(root)
+    assert.equal(events.some((e) => e.text === '在。'), false, '她没调 growth_commit，事件流里不该有她写的话')
     assert.equal(r.herReply, '在。', 'herReply 必须带回她会话里说出口的那句')
     assert.equal(r.spoken, '在。')
-    assert.equal(r.note, '', '她开口了，就不该说「她这次没说话」')
+    assert.equal(r.note, '她回了，但这句没写进事件流（没调 growth_commit）。', '上游 #51：回了话但没落盘要说清，不能报「她这次没说话」也不能装没事')
   } finally { await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) }
 })

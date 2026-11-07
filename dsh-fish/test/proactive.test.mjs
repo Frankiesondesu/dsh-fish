@@ -462,11 +462,14 @@ test('醒来后没开口的那几次：不占当天额度，但单独限次数�
 // deriveSelf 是 scheduler.js 静态 import 的，从外面数不了次数，耗时又不稳，不拿来断言。
 // 所以往事件流里放一条它读不了的行：revise 的 refs 不是数组时它会抛，
 // tick 接住后记一行 `proactive failed`。日志里有这一行，就是这一趟算过了。
-async function twoTicks(root, over) {
-  // 时段排到三小时之后：走不到日程后面那次 deriveSelf，日志里只剩 maybeProactive 这一处。
-  const h = new Date().getHours() + 3
-  const hh = (n) => `${String(n % 24).padStart(2, '0')}:00`
-  await writeConfig(normalizeConfig({ window: [hh(h), hh(h + 1)], ...over }), root)
+async function twoTicks(root, over, windowOverride) {
+  // 2026-11-06：主动性现在也要过「每天几点醒」这一关，所以默认给全天的窗口——
+  // tick 才会真的走到 maybeProactive，几点跑都一样。要测「窗口外不开口」
+  // 就显式传一个不覆盖此刻的窗口。
+  // （2026-11-07 PR #55 @BBleae：不要按此刻现算——0 点时 `hh(-1)` 算出 `-1:00`，
+  //  validWindow 不认，normalizeConfig 悄悄退回默认 20:00–23:00，那三条就红。）
+  const win = windowOverride ?? ['00:00', '23:59']
+  await writeConfig(normalizeConfig({ window: win, ...over }), root)
   line(root, { id: 'ev_unreadable', type: 'revise', ts: new Date().toISOString(), text: '合成', refs: 1 })
   const { events } = await readEvents(root)
   assert.throws(() => deriveSelf(events), TypeError, '这一行得让 deriveSelf 抛，否则下面的断言什么也没测')
@@ -538,5 +541,17 @@ test('主动模式没被 reply 带松：不给 refs 照样写不进去', async (
     const r = await writeSay(root, { text: '没人找我时想说一句' })
     assert.equal(r.ok, false)
     assert.match(r.note, /refs/)
+  })
+})
+
+test('tick：「每天几点醒」之外的时刻，主动性也不许开口', async () => {
+  await withRoot(async (root) => {
+    // 窗口排到 5 小时后：此刻一定不在里面。她要是在这种时刻还能主动找他，
+    // 「只在这个时段里自己醒」就成了摆设。
+    const t = new Date(Date.now() + 5 * 3600_000)
+    const hh2 = (d) => `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+    const logs = await twoTicks(root, { proactive: { enabled: true } },
+      [hh2(t), hh2(new Date(t.getTime() + 30 * 60_000))])
+    assert.equal(logs.filter((l) => l.startsWith('proactive')).length, 0, logs.join(' | '))
   })
 })
