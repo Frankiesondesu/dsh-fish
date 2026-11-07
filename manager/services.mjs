@@ -17,7 +17,7 @@
 import { execFile, spawn } from 'node:child_process'
 import { promisify } from 'node:util'
 import { connect } from 'node:net'
-import { readdirSync, readFileSync, statSync } from 'node:fs'
+import { appendFileSync, closeSync, mkdirSync, openSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { basename, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -52,6 +52,43 @@ const WATCH = Object.freeze({
 
 /** 只看这些后缀，别被日志/图片的 mtime 干扰 */
 const CODE_EXT = ['.js', '.mjs', '.py', '.json']
+
+// ---------------------------------------------------------------- 操作日志
+//
+// 一个文件、一条时间线：谁被启动/停止/重启了，以及那个脚本自己打出来的话。
+// 放在 ~/.dsh-fish/logs/ 里，跟 instance.json 一起（都是运行时状态）。
+
+const LOG_DIR = join(fishRoot(), 'logs')
+export const MANAGER_LOG = join(LOG_DIR, 'manager.log')
+
+function logStamp(tag) {
+  const d = new Date()
+  const p = (n) => String(n).padStart(2, '0')
+  return `\n── ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}  ${tag} ──\n`
+}
+
+/** 读最近 N 行。文件不存在不算错——第一次用本来就没有。 */
+export function readLogs(maxLines = 400) {
+  let text = ''
+  try {
+    text = readFileSync(MANAGER_LOG, 'utf8')
+  } catch {
+    return { ok: true, file: MANAGER_LOG, lines: ['（还没有日志。点一次启动就有了。）'], total: 0 }
+  }
+  const all = text.split('\n')
+  if (all.length && all[all.length - 1] === '') all.pop()
+  return { ok: true, file: MANAGER_LOG, lines: all.slice(-maxLines), total: all.length }
+}
+
+export function clearLogs() {
+  try {
+    mkdirSync(LOG_DIR, { recursive: true })
+    writeFileSync(MANAGER_LOG, '')
+    return true
+  } catch {
+    return false
+  }
+}
 
 /**
  * 这些 json 是运行时状态，不是代码 —— 桥每推一条就写一次 push-state.json，
@@ -305,10 +342,36 @@ export const STOP_NAME = {
   viewer: '查看器',
 }
 
-function spawnBg(exe, args, cwd) {
-  const p = spawn(exe, args, { detached: true, stdio: 'ignore', windowsHide: true, cwd })
+export function spawnLogged(exe, args, cwd, tag = '') {
+  // 2026-11-07（用户：「不然我光等着没意思」）：把脚本输出**留下来**。
+  // 原来 stdio 是 'ignore'，launch/shutdown 努力打的那一屏进度全丢了，
+  // 用户点完只能干等。现在重定向到日志文件，页面底部能实时看。
+  // detached 仍然保留：容器退出不该把服务带走。
+  let fd
+  try {
+    mkdirSync(LOG_DIR, { recursive: true })
+    appendFileSync(MANAGER_LOG, logStamp(tag))
+    fd = openSync(MANAGER_LOG, 'a')
+  } catch {
+    fd = undefined // 日志写不了也不能影响启动本身
+  }
+
+  const p = spawn(exe, args, {
+    detached: true,
+    stdio: fd === undefined ? 'ignore' : ['ignore', fd, fd],
+    windowsHide: true,
+    cwd,
+  })
   p.on('error', () => {})
   p.unref()
+  // 父进程这一侧的 fd 副本要关掉，不然每点一次就泄漏一个句柄
+  if (fd !== undefined) {
+    try {
+      closeSync(fd)
+    } catch {
+      /* 已经关了 */
+    }
+  }
   return p.pid
 }
 
@@ -317,7 +380,7 @@ export function startOne(key) {
   const s = serviceOf(key)
   if (!s) throw new Error(`没有叫「${key}」的服务`)
   if (s.managed === false) throw new Error(`${s.name} 不归这里管`)
-  return spawnBg(process.execPath, [join(ROOT, 'launch.mjs'), key], ROOT)
+  return spawnLogged(process.execPath, [join(ROOT, 'launch.mjs'), key], ROOT, `启动 ${s.name}`)
 }
 
 /** 关掉一项。用 shutdown.mjs 的单项目标，它内部会连进程树一起收。 */
@@ -330,7 +393,7 @@ export function stopOne(key) {
   // ⚠️ `--yes` 不能省：不带它时 shutdown.mjs 只把「会关什么」列一遍就退出，
   // 一个进程都不杀（第一次接这个 GUI 时就是这么踩的：接口回「正在关闭」，
   // 状态一直是 up）。--check 才是只列清单，--yes 是真关。
-  return spawnBg(process.execPath, [join(ROOT, 'shutdown.mjs'), name, '--yes'], ROOT)
+  return spawnLogged(process.execPath, [join(ROOT, 'shutdown.mjs'), name, '--yes'], ROOT, `关闭 ${s.name}`)
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))

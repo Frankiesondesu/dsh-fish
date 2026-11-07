@@ -16,7 +16,7 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { spawn } from 'node:child_process'
 
-import { HERE, ROOT, probeAll, startOne, stopOne, restartOne, serviceOf } from './services.mjs'
+import { HERE, ROOT, probeAll, startOne, stopOne, restartOne, serviceOf, readLogs, clearLogs, spawnLogged } from './services.mjs'
 
 const PORT = Number(process.env.FISH_MANAGER_PORT || 7789)
 const UI = join(HERE, 'ui.html')
@@ -48,11 +48,8 @@ function readBody(req, limit = 1 << 20) {
   })
 }
 
-function spawnBg(exe, args, cwd) {
-  const p = spawn(exe, args, { detached: true, stdio: 'ignore', windowsHide: true, cwd })
-  p.on('error', () => {})
-  p.unref()
-  return p.pid
+function spawnBg(exe, args, cwd, tag = '') {
+  return spawnLogged(exe, args, cwd, tag)
 }
 
 const ACTION_LABEL = { start: '启动', stop: '停止', restart: '重启' }
@@ -82,16 +79,16 @@ async function doOne(key, action) {
 /** 全部动作：直接转给现成的三个脚本，别在这儿再拼一遍顺序。 */
 function doAll(action) {
   if (action === 'start') {
-    spawnBg(process.execPath, [join(ROOT, 'launch.mjs')], ROOT)
+    spawnBg(process.execPath, [join(ROOT, 'launch.mjs')], ROOT, '全部 · 启动')
     return '正在启动全部…（DSH 和三路加载要一会儿）'
   }
   if (action === 'stop') {
-    spawnBg(process.execPath, [join(ROOT, 'shutdown.mjs')], ROOT)
+    spawnBg(process.execPath, [join(ROOT, 'shutdown.mjs')], ROOT, '全部 · 关闭')
     return '正在关闭全部…'
   }
   if (action === 'restart') {
     // restart.mjs 不带参数 = 全部重启；它会自己等端口、再验证
-    spawnBg(process.execPath, [join(ROOT, 'restart.mjs')], ROOT)
+    spawnBg(process.execPath, [join(ROOT, 'restart.mjs')], ROOT, '全部 · 重启')
     return '正在全部重启…（会等每个端口真的让出来，慢一点）'
   }
   throw new Error(`不认识的动作：${action}`)
@@ -105,6 +102,16 @@ createServer(async (req, res) => {
   const url = (req.url || '/').split('?')[0]
 
   try {
+    if (url === '/api/logs') {
+      const q = new URL(req.url, 'http://127.0.0.1').searchParams
+      const n = Math.min(2000, Math.max(50, Number(q.get('lines')) || 400))
+      return json(res, 200, readLogs(n))
+    }
+
+    if (url === '/api/logs/clear' && req.method === 'POST') {
+      return json(res, 200, { ok: clearLogs() })
+    }
+
     if (url === '/api/services') {
       const services = await probeAll()
       return json(res, 200, { at: Date.now(), busy, services })
