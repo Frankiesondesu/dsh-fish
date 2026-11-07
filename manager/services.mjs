@@ -399,14 +399,23 @@ export function stopOne(key) {
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
 /** 等端口真的让出来（最多 ms 毫秒）。进程型没有端口，直接等一小会儿。 */
-async function waitDown(s, ms = 12000) {
-  if (s.probe.type !== 'port') {
-    await sleep(2500)
-    return true
-  }
+/**
+ * 等它真的退干净。
+ *
+ * 2026-11-07（用户：「重启按钮只能关闭，不会重新拉起」）：原来对**进程型**
+ * 只是 `sleep(2500)` 就返回 true —— 纯猜。DSH 那种 Electron 程序退得比 2.5 秒慢，
+ * 于是 launch.mjs 去拉起时看到进程还在，判「已经在跑」直接跳过 → 只关不起。
+ * 改成真的轮询进程名，跟端口型一样等到真没了为止。
+ */
+async function waitDown(s, ms = 20000) {
   const t0 = Date.now()
   while (Date.now() - t0 < ms) {
-    if (!(await portOpen(s.probe.port))) return true
+    if (s.probe.type === 'port') {
+      if (!(await portOpen(s.probe.port))) return true
+    } else {
+      const procs = await processNames()
+      if (!procs.has(String(s.probe.image).toLowerCase())) return true
+    }
     await sleep(400)
   }
   return false
@@ -425,7 +434,7 @@ export async function restartOne(key) {
   if (s.managed === false) throw new Error(`${s.name} 不归这里管`)
   stopOne(key)
   const gone = await waitDown(s)
-  if (!gone) throw new Error(`${s.name} 没在 12 秒内退出，这次没有重启`)
+  if (!gone) throw new Error(`${s.name} 没在 20 秒内退出，这次没有重启（它可能卡住了）`)
   startOne(key)
   return true
 }
