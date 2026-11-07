@@ -101,13 +101,22 @@ const VIEWER_URL = 'http://127.0.0.1:7788'
 // 注意 venv/Scripts/python.exe 是 launcher：它还会拉起真正的 uv python 子进程，
 // 真正听端口、装模型的是那个子进程（关的时候要连树一起收，见 shutdown.mjs）。
 const PLUG = dirname(HERE)
-// 2026-11-07：试过换成 pythonw.exe，**不行，已回退**。
-// 原因：venv 的 pythonw.exe 也只是 launcher，它内部照样拉起 console 版的
-// python.exe（实测启动后进程列表里全是 python.exe，没有 pythonw）。
-// 而且 pythonw 下没有 stdout，出错就是静默死——那次 18766 直接起不来，
-// 连一句原因都看不到。所以老老实实用 python.exe。
-// 那个空窗口的成因见下面 VOICE 的注释：它是孙子进程开的，Node 管不到。
-const PY_TURN = join(PLUG, 'turn-taking', 'venv', 'Scripts', 'python.exe')
+// 2026-11-07（用户两次追问「这个黑框」）：用 **pythonw.exe**。
+//
+// pythonw 是 GUI 子系统程序，**根本不创建控制台**，所以那个空黑窗口从根上就没有了。
+// 第一次我试过又回退了，理由是「18766 起不来」——**那个判断是错的**：那次是我这边
+// 起的进程被沙箱回收，误当成了 pythonw 的问题。后来单独用 PowerShell 验证：
+//   server.py  → HTTP 200 {"ok":true,"model":"smart-turn-v3.2-cpu.onnx"}
+//   duplex.py  → HTTP 200 {"ok":true,"mode":"mock","state":"LISTENING"}
+// 两个在 pythonw 下都正常。
+//
+// 代价是 pythonw 下 sys.stdout 是 None，脚本里的 print 会抛 AttributeError ——
+// server.py 与 duplex.py 的那两处 print 已经包了 try（它们还会顺手把自己的
+// 控制台藏掉，万一哪天又用回 python.exe 也不会有窗口）。
+//
+// 没有 pythonw 的机器（极少数）回退到 python.exe，只是会重新出现那个窗口。
+const PY_TURN_DIR = join(PLUG, 'turn-taking', 'venv', 'Scripts')
+const PY_TURN = [join(PY_TURN_DIR, 'pythonw.exe'), join(PY_TURN_DIR, 'python.exe')].find(existsSync)
 // dialogue-tts 的 venv 2026-11-06 已删（12G）。这条留着是给「哪天手动重建了 TTS」
 // 的情况——路径不存在时 PY_STDLIB 的 find(existsSync) 会自动跳过它。
 const PY_TTS = join(PLUG, 'dialogue-tts', 'venv', 'Scripts', 'python.exe')
