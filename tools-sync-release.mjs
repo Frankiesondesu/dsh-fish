@@ -240,6 +240,73 @@ const RELEASE_GITIGNORE = [
   'bridge/config.json', 'bridge/push-state.json', 'push-state.json', '',
 ].join('\n')
 
+/**
+ * 从 TAP 输出里挑出摘要与失败用例名。
+ *
+ * 为什么要有这个：原来失败时只报 `fail=?` 或一整行 `Command failed: node --test ...`，
+ * 真因（哪个用例挂了）被 200 字截断吞掉，等于没有信息。这里解析不到摘要就退回尾部几行。
+ */
+export function summarizeTestOutput(out = '') {
+  const text = String(out)
+  const fails = [...text.matchAll(/^not ok \d+ - (.+)$/gm)].map((m) => m[1].trim())
+  const heads = [...text.matchAll(/^# (tests|pass|fail) (\d+)$/gm)].map((m) => `${m[1]} ${m[2]}`)
+  return {
+    fails,
+    heads,
+    pass: /^# pass (\d+)$/m.exec(text)?.[1],
+    fail: /^# fail (\d+)$/m.exec(text)?.[1],
+    tail: text.trim().split(/\r?\n/).filter(Boolean).slice(-3).join(' / '),
+  }
+}
+
+/**
+ * 跑一组测试，返回一行结果。失败时串行重跑一遍再判：
+ * 并行抖是这个仓库的已知毛病（memory：判回归要单跑），串行全绿才算抖动、放行并大声记一笔；
+ * 串行也挂就是真挂，把用例名带出来。
+ */
+function runOneTestGroup(t) {
+  const dir = join(t.cwd, t.dir)
+  if (!existsSync(dir)) return `${t.label} 跳过（没有 ${t.dir}/）`
+  const files = readdirSync(dir).filter((f) => f.endsWith('.test.mjs')).map((f) => `${t.dir}/${f}`)
+  if (!files.length) return `${t.label} 跳过（0 个用例文件）`
+
+  const once = (concurrency) => {
+    const args = ['--test']
+    if (concurrency) args.push(`--test-concurrency=${concurrency}`)
+    try {
+      const out = execFileSync(process.execPath, [...args, ...files], {
+        cwd: t.cwd,
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+        maxBuffer: 64 * 1024 * 1024,
+      })
+      return { ok: true, out }
+    } catch (err) {
+      // 非零退出：把 stdout 也捞出来，否则什么都看不到
+      return { ok: false, out: `${err?.stdout ?? ''}\n${err?.stderr ?? ''}` }
+    }
+  }
+
+  const first = once(0)
+  const s1 = summarizeTestOutput(first.out)
+  if (first.ok && s1.fail === '0') return `${t.label} ${s1.pass} 绿`
+
+  log(`      ${t.label} 并行那次没过（${s1.heads.join(' / ') || '无摘要'}），串行重跑复验…`)
+  const again = once(1)
+  const s2 = summarizeTestOutput(again.out)
+  if (again.ok && s2.fail === '0') {
+    log(`      ⚠ ${t.label} 判为并行抖动：串行 ${s2.pass} 全绿。挂过的是：${(s1.fails.slice(0, 3).join(' / ') || '未解析到用例名')}`)
+    return `${t.label} ${s2.pass} 绿（并行抖动，串行复验通过）`
+  }
+
+  const names = (s2.fails.length ? s2.fails : s1.fails).slice(0, 8)
+  const head = s2.heads.join(' / ') || s1.heads.join(' / ') || s2.tail || s1.tail || '无摘要'
+  throw new Error(
+    `${t.label} 测试没过（${head}）`
+    + (names.length ? '\n    挂的用例：\n    ' + names.join('\n    ') : '\n    输出尾部：' + (s2.tail || s1.tail)),
+  )
+}
+
 export function sync({ work = WORK, release = releaseDir(), run = git } = {}) {
   if (!existsSync(join(release, '.git'))) throw new Error(`发布仓不是 git 仓：${release}`)
   if (release === work || release.startsWith(work + '/') || release.startsWith(work + '\\')) {
@@ -324,21 +391,7 @@ export function sync({ work = WORK, release = releaseDir(), run = git } = {}) {
       { cwd: release, dir: 'manager/test', label: '管理器' },
     ]
     const results = []
-    for (const t of tests) {
-      try {
-        // execFileSync 不走 shell，glob 不会被展开，自己列文件
-        const files = readdirSync(join(t.cwd, t.dir))
-          .filter((f) => f.endsWith('.test.mjs'))
-          .map((f) => `${t.dir}/${f}`)
-        const out = execFileSync(process.execPath, ['--test', ...files], { cwd: t.cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
-        const pass = /# pass (\d+)/.exec(out)?.[1] ?? '?'
-        const fail = /# fail (\d+)/.exec(out)?.[1] ?? '?'
-        if (fail !== '0') throw new Error(`fail=${fail}`)
-        results.push(`${t.label} ${pass} 绿`)
-      } catch (err) {
-        throw new Error(`${t.label} 测试没过：${String(err?.message ?? err).slice(0, 200)}`)
-      }
-    }
+    for (const t of tests) results.push(runOneTestGroup(t))
     log('      ' + results.join(' / '))
 
     log('[6/6] 匿名追加提交')

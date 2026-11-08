@@ -11,7 +11,7 @@ import { homedir, tmpdir } from 'node:os'
 import {
   WORK, DEFAULT_RELEASE, CHECKLIST, releaseDir,
   skipDir, skipFile, isTextFile, buildRules, cleanText,
-  terminalPattern, scanDir,
+  terminalPattern, scanDir, summarizeTestOutput,
 } from './tools-sync-release.mjs'
 
 test('发布仓默认与工作仓同级，绝不在工作仓内部', () => {
@@ -136,6 +136,39 @@ test('章节级替换：AGENTS 会话库节删掉、README 快速开始换成占
   assert.ok(!readme.includes(WORK.replace(/\\/g, '/')))
   assert.match(readme, /<你选的目录>/)
   assert.ok(!readme.includes('一键启动.cmd'))
+})
+
+test('summarizeTestOutput：解析得到用例名与摘要，不再只报 fail=?', () => {
+  const tap = [
+    'ok 1 - 甲',
+    'not ok 2 - 乙：某个用例挂了',
+    '  ---',
+    '  error: boom',
+    '  ...',
+    '1..2',
+    '# tests 2',
+    '# pass 1',
+    '# fail 1',
+  ].join('\n')
+  const s = summarizeTestOutput(tap)
+  assert.equal(s.pass, '1')
+  assert.equal(s.fail, '1')
+  assert.deepEqual(s.fails, ['乙：某个用例挂了'])
+  assert.deepEqual(s.heads, ['tests 2', 'pass 1', 'fail 1'])
+})
+
+test('summarizeTestOutput：输出里没有摘要时退回尾部，不能返回空', () => {
+  const crashed = 'node:internal/modules/cjs/loader:1234\nError: Cannot find module "x"\n    at ...'
+  const s = summarizeTestOutput(crashed)
+  assert.equal(s.fail, undefined)
+  assert.deepEqual(s.fails, [])
+  assert.match(s.tail, /Cannot find module/)
+})
+
+test('summarizeTestOutput：空输出也不抛', () => {
+  const s = summarizeTestOutput('')
+  assert.equal(s.pass, undefined)
+  assert.equal(s.tail, '')
 })
 
 test('scanDir：有命中就报出来，干净目录零命中', () => {
