@@ -63,10 +63,21 @@ function readEvents() {
 }
 
 /** 会话日志是「多帧拼接」的 zstd，一次解不完，得按 magic 切段 */
+let sessionCache = { f: '', mtime: 0, size: 0, recs: [] }
 function readSessionLog(sessionId) {
   if (!sessionId) return []
   const f = join(DSH_SESSIONS, sessionId, 'session.v4.jsonl.zstd')
   if (!existsSync(f)) return []
+  // 2026-11-08：按 mtime+size 缓存解析结果——会话日志 2MB/4258 条，zstd 全解 127ms，
+  // 而 /api/data 每 15 秒被轮询一次，文件没变时这 127ms 是纯白花的。
+  let mtime = 0, size = 0
+  try {
+    const st = statSync(f)
+    mtime = st.mtimeMs; size = st.size
+  } catch {
+    return []
+  }
+  if (sessionCache.f === f && sessionCache.mtime === mtime && sessionCache.size === size) return sessionCache.recs
   let buf
   try {
     buf = readFileSync(f)
@@ -86,7 +97,7 @@ function readSessionLog(sessionId) {
       /* 不是真帧边界 */
     }
   }
-  return text
+  const recs = text
     .split('\n')
     .filter(Boolean)
     .map((l) => {
@@ -97,6 +108,8 @@ function readSessionLog(sessionId) {
       }
     })
     .filter(Boolean)
+  sessionCache = { f, mtime, size, recs }
+  return recs
 }
 
 function textOfMessage(m) {
@@ -181,7 +194,7 @@ async function buildData() {
     const { deriveSelf } = await import('file://' + join(FISH, 'lib', 'derive.js').replace(/\\/g, '/'))
     const { loadConfig } = await import('file://' + join(FISH, 'lib', 'settings.js').replace(/\\/g, '/'))
     const cfg = (await loadConfig(ROOT)).config
-    model = deriveSelf(events, { growthDays: cfg.growthDays })
+    model = deriveSelfCached(events, { growthDays: cfg.growthDays })
   } catch (err) {
     model = { __error: String(err?.message ?? err) }
   }
@@ -214,7 +227,9 @@ async function buildData() {
     config,
     sessions,
     model,
-    events,
+    // 2026-11-08：events 全量数组移出轮询载荷（账本 654KB→JSON 1.2MB，每 15s 推一次
+    // 浏览器也要跟着解析一次）。只留条数供指纹；事件流页自己拉 /api/events。
+    eventsCount: events.length,
     actions: actionsOf(recs),
     spoken: spokenOf(recs),
     // 她经 her_say 发到 QQ 的话（账本里带推送标记的那几条）——用户主要用 QQ，
@@ -237,7 +252,7 @@ const SERVICES = [
 
 async function probe(url) {
   try {
-    const r = await fetch(url, { signal: AbortSignal.timeout(1200) })
+    const r = await fetch(url, { signal: AbortSignal.timeout(400) })
     let detail = ''
     try { detail = (await r.text()).slice(0, 120).replace(/\s+/g, ' ').trim() } catch {}
     return { up: true, detail }
@@ -497,7 +512,7 @@ function render(){
       el.innerHTML =
         '<div class="hero"><div class="top">'+
           '<div><div class="day">第 '+m.day+' 天<span>成长中</span></div>'+
-          '<div class="sub">阶段 '+m.stage+' · '+esc(m.stageName||'')+' &nbsp;·&nbsp; '+D.events.length+' 条事件 &nbsp;·&nbsp; '+D.actions.length+' 次工具调用 &nbsp;·&nbsp; '+(D.home.turns??0)+' 轮会话</div></div>'+
+          '<div class="sub">阶段 '+m.stage+' · '+esc(m.stageName||'')+' &nbsp;·&nbsp; '+D.eventsCount+' 条事件 &nbsp;·&nbsp; '+D.actions.length+' 次工具调用 &nbsp;·&nbsp; '+(D.home.turns??0)+' 轮会话</div></div>'+
           gate+'</div>'+
           '<div class="stats">'+
             stat('判断', beliefs.length, '条')+
@@ -563,19 +578,33 @@ function render(){
     el.onclick = null;
   }
 
-  if(tab==='events'){
-    const a = (D.events||[]).slice().reverse();
-    el.innerHTML = sec('事件流 · '+a.length+' 条 · 只增不改') + (a.length
-      ? '<div class="timeline">'+a.map(e=>
-          '<div class="tl-item ev"><div class="tl-meta"><span class="pill">'+esc(e.type)+'</span>'+
-          esc(e.ts||'')+' · day '+esc(e.day)+' · '+esc(e.source)+'</div>'+
-          '<div class="bubble">'+nl(String(e.text||'').slice(0,400))+'</div></div>').join('')+'</div>'
-      : emptyBox('账本还是空的'));
-  }
+  if(tab==='events'){ renderEvents(el); return }
 
   document.getElementById('sub').textContent = pulledAt
     ? '更新于 '+new Date(pulledAt).toLocaleTimeString('zh-CN',{hour12:false})
     : '读取中';
+}
+
+// 事件流（2026-11-08）：从轮询载荷里拆出来的大件。本页激活时才拉一次，
+// 数据指纹变了（D.eventsCount 变）才重拉——1757 条的账本不该每 15 秒白过一遍。
+let EV = { count: -1, events: null };
+async function renderEvents(el){
+  if (!EV.events || EV.count !== D.eventsCount) {
+    el.innerHTML = sec('事件流') + '<div class="card"><span class="dim">读账本中…</span></div>';
+    try {
+      EV = await fetch('/api/events', { cache: 'no-store' }).then(r => r.json());
+    } catch (e) {
+      el.innerHTML = '<div class="card err">账本读不到：'+esc(e.message)+'</div>';
+      return;
+    }
+  }
+  const a = (EV.events||[]).slice().reverse();
+  el.innerHTML = sec('事件流 · '+a.length+' 条 · 只增不改') + (a.length
+    ? '<div class="timeline">'+a.map(e=>
+        '<div class="tl-item ev"><div class="tl-meta"><span class="pill">'+esc(e.type)+'</span>'+
+        esc(e.ts||'')+' · day '+esc(e.day)+' · '+esc(e.source)+'</div>'+
+        '<div class="bubble">'+nl(String(e.text||'').slice(0,400))+'</div></div>').join('')+'</div>'
+    : emptyBox('账本还是空的'));
 }
 
 // ---------------- 观测台 / 上网 / 记忆 / 数据（2026-11-07 迁移）----------------
@@ -1230,7 +1259,7 @@ document.getElementById('tabs').addEventListener('click', ev => {
 // 标签页在后台时不拉，省掉没人看的 200ms 服务端开销。
 let lastKey = '', pulledAt = 0
 function stampOf(d){
-  return [d.events?.length, d.actions?.length, d.home?.turns,
+  return [d.eventsCount, d.actions?.length, d.home?.turns,
     d.model?.beliefCount, d.model?.narrative?.at, d.model?.stage].join('|')
 }
 function pull(force){
@@ -1312,6 +1341,11 @@ createServer(async (req, res) => {
       return res.end(readFileSync(f))
     }
     // ---- 观测台/上网/记忆/数据（2026-11-07 迁移）：数据层在 observe.mjs ----
+    // 事件流全量（2026-11-08）：从 /api/data 轮询载荷里拆出来的大件，只在事件流页拉
+    if (req.url === '/api/events') {
+      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
+      return res.end(JSON.stringify({ events: readEvents() }))
+    }
     if (req.url === '/api/observe') {
       const d = await observeData()
       res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
