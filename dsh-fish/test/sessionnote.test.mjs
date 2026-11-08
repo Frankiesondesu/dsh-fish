@@ -129,13 +129,20 @@ test('registerIdentity：她家那条会话一起来，就把排队的话补进�
 
     const agent = fakeAgent({ id: 'session-home', cwd: herDir })
     handler({ agent })
-    // deliverQueued 是 void 的，等一拍让它跑完
-    await new Promise((r) => setTimeout(r, 30))
 
-    const texts = agent.written
+    // deliverQueued 是 void 的，它自己跑完才写 agent。
+    // ⚠️ 别用固定睡眠：原来这里是 `setTimeout(r, 30)`，并行跑测试把 CPU 打满时 30ms 不够，
+    //    这条用例就会随机挂（2026-11-08 发布同步实测：同代码一次 fail 1、一次 fail 0）。
+    //    改成轮询到条件成立，最长等 3 秒。
+    const texts = () => agent.written
       .filter((w) => w.type === 'user/message')
-      .map((w) => w.data.content[0].text)
-    assert.ok(texts.some((t) => /不认这几条/.test(t)), '排队的那句话要真的补进她的会话')
+      .map((w) => w.data?.content?.[0]?.text ?? '')
+    const deadline = Date.now() + 3000
+    while (!texts().some((t) => /不认这几条/.test(t)) && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 10))
+    }
+
+    assert.ok(texts().some((t) => /不认这几条/.test(t)), '排队的那句话要真的补进她的会话')
     assert.equal(existsSync(join(root, 'session-notes.json')) ? (await takeNotes(root)).length : 0, 0)
     if (typeof un === 'function') un()
   } finally {
