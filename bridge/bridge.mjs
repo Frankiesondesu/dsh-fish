@@ -35,6 +35,7 @@ import { createPusher } from './push.mjs'
 import { batchWait } from './batch-wait.mjs'
 import { classifySegments, displayName, ensureExt } from './attachment.mjs'
 import { readAsrConfig, ensureServer, transcribe } from './asr.mjs'
+import { shouldSteer, QQ_NOTE } from './steer.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 /** 本机听写配置（~/.dsh/asr.json）。没有就是 null——这台机器没装听写。 */
@@ -205,6 +206,35 @@ async function fishSay(text, image = '') {
     }
   }
   return { ok: false, note: '没送到' }
+}
+
+/**
+ * 插话（2026-11-08，用户选 A）：把第二条消息放进她**正在跑**的回合。
+ * 与 fishSay 不同，它不等 turn/end、应当立刻返回，所以超时只有 10 秒。
+ * 失败一律如实返回，由调用方退回排队——绝不假装插进去了（fork.13）。
+ */
+async function fishSteer(text) {
+  const key = fishKey()
+  const port = cachedPort || (await discoverPort())
+  if (!port) return { ok: false, note: '没找到 dsh-fish 的通路' }
+  cachedPort = port
+  const ac = new AbortController()
+  const timer = setTimeout(() => ac.abort(), 10_000)
+  try {
+    const r = await fetch(`http://127.0.0.1:${port}/dsh-fish/local/steer`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-fish-key': key },
+      body: JSON.stringify({ text }),
+      signal: ac.signal,
+    })
+    const j = await r.json().catch(() => ({}))
+    if (!r.ok) return { ok: false, note: j?.error ?? j?.note ?? `HTTP ${r.status}` }
+    return j
+  } catch (err) {
+    return { ok: false, note: String(err?.message ?? err) }
+  } finally {
+    clearTimeout(timer)
+  }
 }
 
 /**
@@ -880,6 +910,9 @@ async function reply(ev, text, { strict = false } = {}) {
   }
 }
 
+// 2026-11-08：/local/say 还在飞 = 她这一轮没跑完。这时后发的纯文字改走插话。
+let sayInFlight = 0
+
 // 一次只递一句：她那边是一轮一轮跑的，挤进去只会互相打断
 let queue = Promise.resolve()
 function enqueue(task) {
@@ -957,15 +990,39 @@ function schedule(ev, part) {
     imageHoldMs,
   })
 
+  // 到点再判一次：窗口里可能又来了带附件的消息，那就不能只带文字插话。
+  const deliver = () => {
+    if (shouldSteer(sayInFlight, p)) void flushSteer(p)
+    else void flush(p)
+  }
+
   if (wait <= 0) {
     pendingChats.delete(key)
-    void flush(p)
+    deliver()
     return
   }
   p.timer = setTimeout(() => {
     pendingChats.delete(key)
-    void flush(p)
+    deliver()
   }, wait)
+}
+
+/**
+ * 插话（2026-11-08）：不进串行队列，直接把这一批文字塞进她正在跑的回合。
+ * 插不进去（宿主没有 steer / 没找到会话 / 网络错）就如实退回原队列——
+ * 消息绝不因为「试过插话」而丢（fork.13）。
+ */
+async function flushSteer(p) {
+  const text = p.texts.join('\n').trim()
+  if (!text) return
+  log(`插话：她上一轮还没跑完，把 ${p.texts.length} 句放进同一回合`)
+  const r = await fishSteer(QQ_NOTE + text)
+  if (r?.ok) {
+    log(`插话成了（${text.length} 字，不另起一轮）`)
+    return
+  }
+  log(`插话没成（${r?.note ?? '未知'}），退回排队`)
+  void flush(p)
 }
 
 async function flush(p) {
@@ -1039,8 +1096,15 @@ async function flush(p) {
     // 「来自 QQ」的字样，她分不清这句话是他在手机上发的、还是他在 DSH 窗口里说的——
     // 而统一后「要不要发回 QQ」由她自己调 her_say 决定，不知道来源就没法决定。
     // 这行标注她的提示词里写着（PROACTIVE_BRIEF），两边是一对。
-    const qqNote = '（这条消息从 QQ 发来）\n\n'
-    const r = await fishSay(qqNote + fwdNote + fileNote + voiceNote + text)
+    const qqNote = QQ_NOTE
+    // 她在想的时候（HTTP 还挂着），后到的纯文字才有资格插话。
+    sayInFlight++
+    let r
+    try {
+      r = await fishSay(qqNote + fwdNote + fileNote + voiceNote + text)
+    } finally {
+      sayInFlight--
+    }
     const ms = Date.now() - t0
     if (!r?.ok) {
       log(`没送到（${ms}ms）：${r?.note ?? '未知'}`)

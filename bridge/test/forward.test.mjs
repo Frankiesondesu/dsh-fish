@@ -64,8 +64,12 @@ test('fetch 回来的东西要真的进到这一轮的话里', () => {
     '11-07 顺序：QQ 来源标注 → 转发 → 文件 → 语音 → 他说的话（图片已并入文件，不再单列）')
 })
 
-test('QQ 来源标注必须在（她自己决定发不发，得先知道这话从哪来）', () => {
-  assert.match(src, /const qqNote = '（这条消息从 QQ 发来）/, '投递正文前要标来源')
+test('QQ 来源标注必须在（她自己决定发不发，得先知道这话从哪来）', async () => {
+  // 11-08：标注抽成 bridge/steer.mjs 的 QQ_NOTE，/local/say 与插话共用同一份，
+  // 别养两份真相。
+  assert.match(src, /const qqNote = QQ_NOTE/, '投递正文前要标来源')
+  const steerSrc = await readFile(new URL('../steer.mjs', import.meta.url), 'utf8')
+  assert.match(steerSrc, /export const QQ_NOTE = '（这条消息从 QQ 发来）/, '标注本体不能丢')
 })
 
 test('不再替她转接正文（2026-11-07 统一：QQ 上她的话只走 her_say → push）', () => {
