@@ -395,6 +395,23 @@ export async function backupBundle(tier = 'full') {
 }
 
 /**
+ * 导入（2026-11-08）：把一键备份的包恢复进 ROOT。直接复用 backup.js 的
+ * restoreBackup——与 DSH 侧 /backup/restore 完全同一条代码（校验 → 整个封存 →
+ * 写回），不养第二套恢复逻辑。恢复是破坏性的：现状整体搬进
+ * dsh-fish-backups/pre-restore-<时间戳>/，错了还能整体换回。
+ * 防御：旧格式的备份可能带着 local.key（新版永不入包）——恢复前剥掉，
+ * 不给「旧钥匙覆盖新钥匙」留门。
+ */
+export async function restoreBundle(bundle) {
+  const backup = await lib('backup.js')
+  const b = bundle && Array.isArray(bundle.files)
+    ? { ...bundle, files: bundle.files.filter((f) => f.path !== 'local.key') }
+    : bundle
+  const r = await backup.restoreBackup(b, ROOT)
+  return r
+}
+
+/**
  * 叫醒：POST DSH 的 /local/wake（2026-11-07 新开的本地通路，local.key 鉴权）。
  * DSH 没开 / 端口探不到时如实说，不假装叫醒了。
  */

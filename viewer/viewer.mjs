@@ -21,7 +21,7 @@ import { zstdDecompressSync } from 'node:zlib'
 import { dshSessionsDir, fishRoot } from '../shared/root.mjs'
 import { intercomStatus, talk } from './intercom.mjs'
 import { readUsage } from './usage.mjs'
-import { observeData, settleAsk, decideOffer, markInboxRead, clearBiliRisk, backupBundle, wakeHer, reportFor } from './observe.mjs'
+import { observeData, settleAsk, decideOffer, markInboxRead, clearBiliRisk, backupBundle, restoreBundle, wakeHer, reportFor } from './observe.mjs'
 import { qqSaidOf, mergeSaid } from './said.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -862,11 +862,22 @@ function renderData(el){
         '<b>不进包</b>：表情库与收件箱的二进制（整目录拷贝即可迁移）、local.key（本机钥匙，首启自动再生成）、日志。<br>'+
         '恢复语义：先封存现状再放回（一个字节不删），文件在 <code>dsh-fish-backups/</code>。'+
       '</div>'+
-      '<pre id="bkmanifest" style="display:none;margin-top:10px"></pre></div>'+
+      '<pre id="bkmanifest" style="display:none;margin-top:10px"></pre>'+
+      '<div style="border-top:1px solid var(--line);margin-top:14px;padding-top:12px">'+
+        '<div class="dim" style="font-size:12.5px;line-height:1.8;margin-bottom:9px">'+
+          '<b>恢复备份</b>：把导出的 .json 备份包放回来。先把现状整体封存到 <code>dsh-fish-backups/pre-restore-*</code>（一个字节不删），再写回包里的文件；<b>恢复完要重启 DSH，她才是这份档的样子</b>。包里的 local.key 会被剥掉，不覆盖本机钥匙。'+
+        '</div>'+
+        '<input type="file" id="bkimp" accept=".json,application/json" style="font-size:12.5px;max-width:100%">'+
+        '<div id="bkimpprev" style="display:none;margin-top:10px;font-size:12.5px;line-height:1.8"></div>'+
+        '<div id="bkimpgo-wrap" style="display:none;align-items:center;gap:10px;flex-wrap:wrap;margin-top:10px">'+
+          '<label style="font-size:12.5px;color:var(--dim)"><input type="checkbox" id="bkimpc"> 我知道这会覆盖当前数据，旧档只进封存目录</label>'+
+          '<button class="st-btn" id="bkimpgo" disabled>执行恢复</button>'+
+        '</div>'+
+      '</div></div>'+
     sec('迁移 / 导入 / 重置 · 只看状态')+
     '<div class="card">'+
       '<div class="belief"><span class="idx">迁移</span><span class="txt">'+esc(JSON.stringify(Dp.moveStatus||{})).slice(0,200)+'</span></div>'+
-      '<div class="belief"><span class="idx">导入</span><span class="txt">'+esc((Dp.importStatus&&Dp.importStatus.reason)||'可以导入（她还没有起点）')+'</span></div>'+
+      '<div class="belief"><span class="idx">导入</span><span class="txt">'+esc((Dp.importStatus&&Dp.importStatus.reason)||'可以导入（她还没有起点）——这是「接手别人养的鱼」，与上面的恢复备份是两件事')+'</span></div>'+
       '<div class="belief"><span class="idx">重置</span><span class="txt">执行要 ctx 归档会话，留在 DSH 侧设置页底部。</span></div>'+
     '</div>';
   el.querySelectorAll('[data-rpt]').forEach(a=>{
@@ -879,6 +890,53 @@ function renderData(el){
   });
   const bkc = document.getElementById('bkcore');
   if (bkc) bkc.onclick = ()=>bkGo('core', bkc);
+  // 恢复备份（2026-11-08）：选文件 → 预览 → 勾确认 → POST /api/observe/restore
+  const impInput = document.getElementById('bkimp');
+  if (impInput) impInput.onchange = async () => {
+    const prev = document.getElementById('bkimpprev');
+    const wrap = document.getElementById('bkimpgo-wrap');
+    const go = document.getElementById('bkimpgo');
+    const c = document.getElementById('bkimpc');
+    const f = impInput.files && impInput.files[0];
+    if (!f) { prev.style.display = 'none'; wrap.style.display = 'none'; return }
+    let b;
+    try { b = JSON.parse(await f.text()); }
+    catch (e) { prev.style.display = 'block'; prev.innerHTML = '<span class="err">不是合法的 JSON：'+esc(e.message)+'</span>'; wrap.style.display = 'none'; return }
+    if (!b || b.format !== 'dsh-fish-backup/1' || !Array.isArray(b.files)) {
+      prev.style.display = 'block';
+      prev.innerHTML = '<span class="err">这不是 dsh-fish 的备份包（format 不认识）。恢复不接受「导出数据」之类的半成品。</span>';
+      wrap.style.display = 'none';
+      return;
+    }
+    const evf = b.files.find(x => x.path === 'events.jsonl');
+    const rows = evf && typeof evf.data === 'string' ? evf.data.split('\n').filter(Boolean).length : 0;
+    const older = D.eventsCount != null && rows < D.eventsCount;
+    prev.style.display = 'block';
+    prev.innerHTML =
+      '<div class="belief"><span class="idx">格式</span><span class="txt">'+esc(b.format)+'</span></div>'+
+      '<div class="belief"><span class="idx">时间</span><span class="txt">'+esc(b.createdAt||'?')+'</span></div>'+
+      '<div class="belief"><span class="idx">内容</span><span class="txt">'+b.files.length+' 个文件 · '+((b.bytes||0)/1048576).toFixed(2)+'MB · 账本 '+rows+' 行</span></div>'+
+      (older ? '<div class="err" style="font-size:12.5px;margin:6px 0">⚠️ 这份备份比现在<b>旧</b>（当前账本 '+D.eventsCount+' 行）。恢复会把她的时间线倒回那一刻——之后发生的事会封存进 pre-restore 目录，不会丢，但要记得她在「那个她」里。</div>' : '');
+    wrap.style.display = 'flex';
+    if (go) go.disabled = true;
+    if (c) c.onchange = () => { if (go) go.disabled = !c.checked; };
+    if (go) go.onclick = async () => {
+      go.disabled = true;
+      try {
+        const r = await fetch('/api/observe/restore', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(b) }).then(x => x.json());
+        if (!r.ok) throw new Error(r.why || r.error || 'HTTP 错');
+        prev.innerHTML = '<span style="color:var(--ok)">恢复了 ' + r.restored + ' 个文件。旧档封存在 <code>' + esc(r.quarantined || '（当前目录本来就是空的，无封存件）') + '</code>。</span>' +
+          '<div class="dim" style="margin-top:6px"><b>重启 DSH 之后她才是这份档的样子</b>（管理器 → DSH → 重启）；刷新页面看到的是新档。</div>';
+        toast('恢复完成：' + r.restored + ' 个文件');
+      } catch (e) {
+        // 不替服务端下结论：restoreBackup 可能已经把旧档封存、写了一半才失败，
+        // 那时「全没变」是假话。如实把服务端的原因摆出来，让人别重复点恢复。
+        prev.innerHTML = '<span class="err">恢复没成：' + esc(e.message) + '</span>' +
+          '<div class="dim" style="margin-top:6px">按报错里的说明处理；若提到封存目录，旧档就在那儿，别重复点恢复。</div>';
+        go.disabled = false;
+      }
+    };
+  };
   const bk = document.getElementById('bkfull');
   if(bk) bk.onclick = ()=>{ if(confirm('全量包含表情库与收件箱二进制，可能 60MB+，生成与下载都要一会儿。继续？')) bkGo('full', bk) };
 }
@@ -1409,6 +1467,27 @@ createServer(async (req, res) => {
       const b = await backupBundle(bkMatch[2] || 'full')
       res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
       return res.end(JSON.stringify(b))
+    }
+    // 恢复备份（2026-11-08）：与 /api/observe/backup 成对。全量包 58MB+，
+    // 且 base64 会再涨一截，body 上限按这个量级留足（普通动作路由只有 1MB）。
+    // 破坏性动作全在 restoreBackup 里：先整体封存现状再写回，失败如实说没动。
+    if (req.url === '/api/observe/restore' && req.method === 'POST') {
+      let body = ''
+      for await (const chunk of req) {
+        body += chunk
+        if (body.length > 120_000_000) { res.writeHead(413); return res.end('too large') }
+      }
+      let bundle
+      try { bundle = JSON.parse(body || '{}') } catch {
+        res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' })
+        return res.end(JSON.stringify({ ok: false, why: '不是合法的 JSON 备份文件' }))
+      }
+      let out
+      try { out = await restoreBundle(bundle) } catch (err) {
+        out = { ok: false, why: String(err?.message ?? err) }
+      }
+      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
+      return res.end(JSON.stringify(out))
     }
     if (req.url === '/api/observe/action' && req.method === 'POST') {
       let body = ''
