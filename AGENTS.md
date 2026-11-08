@@ -55,6 +55,9 @@
   refs 可选、无每日上限——合上游时相关提示词**保 fork**，别被上游写回去。
 - 模板字符串里的前端 JS（viewer/manager）必须抽出来编译+vm 执行着验，
   `node --check` 外层查不出内嵌错误（踩过两次）。
+- 带中文的 HTTP 烟测**别走命令行 `-d`**：Windows 会把命令行转成 GBK，服务端按
+  UTF-8 解出 U+FFFD 并可能写盘（11-08 真把 config.world.city 污染过）。
+  用 UTF-8 文件 body 或 node fetch；「同值写回」后要读回内容验一遍。
 - `.cmd` 文件一律 CRLF + 纯 ASCII；中文写在 node 侧输出。
 - 常驻服务别从 AI 会话里起（沙箱会回收），让用户双击脚本/管理器。
 
