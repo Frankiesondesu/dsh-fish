@@ -56,6 +56,7 @@ import { dreamView } from './dream.js'
 import { titleOfAgent, clipTitle } from './sessiontitle.js'
 import { isHerHome, cwdOf } from './restrict.js'
 import { applyHandover, IMPORT_TEMPLATE } from './import.js'
+import { answerCard } from './cardanswer.js'
 // 常见问题解答（2026-10-28 用户要求）：设置 → 反馈页的按钮点开，在新窗口里看全文。
 import { FAQ, FAQ_TITLE, renderFaqPage } from './faq.js'
 import { readHomeRecord, retireHomeSessions } from './retire.js'
@@ -2314,6 +2315,15 @@ export function registerObserve(ctx, deps = {}) {
       send(res, 200, { ok: true, version: deps.version ?? '', pid: process.pid })
     }],
     ['/local/say', handleSay],
+    // 2026-11-08：QQ 桥把他点选项的回答送回来（push 推卡 → 他回 QQ → 桥拦下 → 这里结算）。
+    // 走 answerCard 与 DSH 卡片完全同一条路——ask/grant/keepsake 三种卡都认，不另写第二套结算。
+    ['/local/answer', async (req, res) => {
+      if (req.method !== 'POST') return send(res, 405, { error: 'method not allowed' })
+      let body = {}
+      try { body = JSON.parse(await readBody(req) || '{}') } catch { return send(res, 400, { error: 'body 不是合法 JSON' }) }
+      const r = await answerCard(root, body)
+      return send(res, r.ok === false ? 409 : 200, r.ok === false ? { ...r, error: r.why || '没答成' } : r)
+    }],
     // 2026-11-07：7788 查看器的「叫醒」按钮走这条。与 /wake 共用 handleWake，
     // 同一把 local.key——能读它的人本来就能读这个数据目录，不扩大攻击面。
     ['/local/wake', handleWake],
