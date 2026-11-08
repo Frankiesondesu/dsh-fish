@@ -8,7 +8,7 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, rm, readFile } from 'node:fs/promises'
+import { mkdtemp, rm, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -102,6 +102,28 @@ test('formatMeasureReport：拿不到报告就返回空串（不能让回执变�
   assert.equal(formatMeasureReport(null), '')
   assert.equal(formatMeasureReport({}), '')
   assert.equal(formatMeasureReport({ items: [] }), '')
+})
+
+test('画失败时把真因带进回执（以前只回「这次没画成。」，她没法自己修）', async () => {
+  // 造一个必然失败的屋子：把文件当成目录用，mkdir 会 ENOTDIR。
+  // 不依赖具体错误文案——测的是「任何失败都要把原因带回给她」这件事本身。
+  const base = await mkdtemp(join(tmpdir(), 'fish-draw-bad-'))
+  try {
+    const blocker = join(base, 'not-a-dir')
+    await writeFile(blocker, 'x')
+    const registered = []
+    registerDraw({ tools: { register: (t) => registered.push(t) } }, { root: join(blocker, 'sub'), log: () => {} })
+    const out = await registered[0].execute(
+      { items: [{ type: 'text', x: 10, y: 10, text: 'hi' }] },
+      { session: {} },
+    )
+    assert.equal(out.ok, false)
+    assert.notEqual(out.note, '这次没画成。', '哑巴回执不能回来')
+    assert.match(out.note, /这次没画成：\S/, '原因要跟在冒号后面')
+    assert.ok(out.note.length > '这次没画成：'.length + 3, `原因太短，不像真因：${out.note}`)
+  } finally {
+    await rm(base, { recursive: true, force: true }).catch(() => {})
+  }
 })
 
 test('真渲染：一张带字、框、箭头、圆的画，产出合法 PNG', { timeout: 60_000 }, async () => {

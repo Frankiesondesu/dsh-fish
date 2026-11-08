@@ -46,7 +46,8 @@ const PALETTE = Object.freeze({
   黄: '#e3c23c', 紫: '#8a5fd1', 粉: '#e07a9a', 棕: '#8a6240',
 })
 
-function colorOf(raw, fallback) {
+/** 颜色名 → hex。也直接收 #RRGGBB。formula.js 复用同一张表（别养两份调色板）。 */
+export function colorOf(raw, fallback) {
   const s = String(raw ?? '').trim()
   if (!s) return fallback
   if (PALETTE[s]) return PALETTE[s]
@@ -457,8 +458,10 @@ export function registerDraw(ctx, deps = {}) {
           ].filter(Boolean).join('\n')
           return { ok: true, path: out, note }
         } catch (err) {
-          logLine('warn', ['her_draw：', String(err?.message ?? err)], root)
-          return { ok: false, path: '', note: '这次没画成。' }
+          // 不吞真因（fork.13）：只说「没画成」她既不知道为什么、也没法自己改参数重画
+          const why = String(err?.message ?? err).split('\n')[0].slice(0, 200)
+          logLine('warn', ['her_draw：', why], root)
+          return { ok: false, path: '', note: `这次没画成：${why}` }
         }
       },
     }),
