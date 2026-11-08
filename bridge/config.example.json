@@ -1,0 +1,19 @@
+{
+  "wsHost": "127.0.0.1",
+  "wsPort": 6199,
+  "wsPath": "/ws",
+  "accessToken": "",
+  "ownerIds": [],
+  "allowGroup": false,
+  "chunkChars": 1500,
+  "splitReplies": false,
+  "mergeMs": 1500,
+  "imageHoldMs": 10000,
+  "fileMaxBytes": 536870912,
+  "fishRoot": "",
+  "fishPort": 0,
+  "sayTimeoutMs": 300000,
+  "push": true,
+  "pushPollMs": 1500,
+  "pushMaxAgeMs": 1800000
+}
