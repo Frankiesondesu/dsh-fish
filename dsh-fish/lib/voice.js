@@ -25,6 +25,7 @@
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { mkdirSync, existsSync, unlinkSync, writeFileSync, statSync } from 'node:fs'
+import { homedir } from 'node:os'
 import { join } from 'node:path'
 
 import { toJsonSchema } from './toolschema.js'
@@ -138,10 +139,22 @@ async function concatMp3(dir, names, outName, bin) {
  * 找 python。她这台机器上装了 edge-tts 的是 WorkBuddy 自带的那个 3.13，
  * 不一定在 DSH 的 PATH 里，所以先用环境变量、再试常见路径、最后退回 'python'。
  */
+/** 扫 WorkBuddy 自带 python（版本降序）。装机位置随用户名变，代码里不写死。 */
+function workbuddyPythons() {
+  try {
+    const base = join(homedir(), '.workbuddy', 'binaries', 'python', 'versions')
+    return readdirSync(base).sort().reverse()
+      .map((v) => join(base, v, 'python.exe'))
+      .filter((p) => existsSync(p))
+  } catch {
+    return []
+  }
+}
+
 function pythonExe() {
   const cands = [
     process.env.FISH_PYTHON,
-    'C:/Users/<user>/.workbuddy/binaries/python/versions/3.13.12/python.exe',
+    ...workbuddyPythons(),
     'python',
   ].filter(Boolean)
   for (const p of cands) {
