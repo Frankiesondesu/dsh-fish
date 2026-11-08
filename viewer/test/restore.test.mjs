@@ -17,6 +17,7 @@ import { join, dirname } from 'node:path'
 
 test('恢复：文件放回 + 现状封存 + local.key 剥除', async () => {
   const root = await mkdtemp(join(tmpdir(), 'fish-rstr-'))
+  let quarantined = ''
   process.env.DSH_FISH_HOME = root
   try {
     // 现状：一个会被覆盖的文件 + 一把不该被备份带走的钥匙
@@ -33,6 +34,7 @@ test('恢复：文件放回 + 现状封存 + local.key 剥除', async () => {
       ],
     }
     const r = await ob.restoreBundle(bundle)
+    quarantined = r.quarantined || ''
     assert.equal(r.ok, true, `恢复要成功（${JSON.stringify({ why: r.why })}）`)
     assert.equal(r.restored, 1, '剥掉 local.key 后只恢复 1 个文件')
 
@@ -49,6 +51,10 @@ test('恢复：文件放回 + 现状封存 + local.key 剥除', async () => {
     assert.ok(qfiles.includes('old.txt'), '封存件里有旧档')
   } finally {
     delete process.env.DSH_FISH_HOME
+    // 封存目录在 root 的父目录（tmpdir()/dsh-fish-backups），不会跟着 rm(root) 走；
+    // 不清的话每跑一次测试就在系统临时目录里攒一份旧档。
+    if (quarantined) await rm(quarantined, { recursive: true, force: true }).catch(() => {})
+    await rm(root, { recursive: true, force: true }).catch(() => {})
   }
 })
 
