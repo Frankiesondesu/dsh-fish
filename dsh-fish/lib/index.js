@@ -33,6 +33,7 @@ import { registerHelp } from './help.js'
 import { registerVoice } from './voice.js'
 import { registerMeme } from './meme.js'
 import { registerWorld } from './world.js'
+import { registerDraw } from './draw.js'
 import { answerCard } from './cardanswer.js'
 import { registerDream } from './dream.js'
 import { registerProactive } from './proactive.js'
@@ -438,6 +439,9 @@ export function apply(ctx, baseConfig = {}) {
           () => registerMeme(ctx, { root, tenant: tenancy }),
           // 2026-11-06：**她自己要的**（11-05 ask_owner 问天气/日期，一天没人答）。
           () => registerWorld(ctx, { root }),
+          // 2026-11-08：**她自己要的**（11-08 ask_owner「能不能给我一样能把算式排成图片的东西」，
+          // 他在卡片上点了可以）。做的是白板画笔：构图由她定，渲染只是执行她的每一笔。
+          () => registerDraw(ctx, { root, tenant: tenancy }),
           // 0.8.1 起（2026-10-30 m02837）：梦 A 案——醒来记一句。0.9.0 起公开（不再挂 .dev）。
           () => registerDream(ctx, { root, tenant: tenancy }),
           // 0.8.1 起（2026-10-30 m04610）：主动说话。guardWrite 要的是 tenancy。

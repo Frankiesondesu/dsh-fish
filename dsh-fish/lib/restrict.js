@@ -63,6 +63,7 @@ export const FISH_TOOLS = Object.freeze([
   'her_voice', // 把一句话说成声音（fork.46，2026-11-04）
   'her_meme', // 发一张表情（fork.53，2026-11-05）
   'her_world', // 看看外面：天气 / 日期（2026-11-06，她自己要的）
+  'her_draw', // 白板画笔：线/矩形/圆/箭头/写字，构图由她定（2026-11-08，她的 ask_owner 申请）
   'her_dream', // 醒来记一句梦（本机实验 A 案，2026-10-30 m02837）
 ])
 
