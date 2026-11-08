@@ -15,6 +15,7 @@
  * 清风控、备份导出；叫醒走 DSH 的 /local/wake（local.key 鉴权，与对讲机同一条路）。
  */
 
+import { readdirSync, statSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { fishRoot } from '../shared/root.mjs'
@@ -349,11 +350,48 @@ export async function clearBiliRisk() {
   return { ok: true }
 }
 
-/** 备份导出：单文件 json 原样返回（前端下载），不落第二份盘 */
-export async function backupBundle() {
+/** 二进制目录的体积盘点（给备份清单用）：多少个文件、多大。 */
+function dirStats(root, rel) {
+  const dir = join(root, rel)
+  let count = 0, bytes = 0
+  try {
+    const walk = (d) => {
+      for (const e of readdirSync(d, { withFileTypes: true })) {
+        const full = join(d, e.name)
+        if (e.isDirectory()) walk(full)
+        else { count += 1; bytes += statSync(full).size }
+      }
+    }
+    walk(dir)
+  } catch { /* 目录不存在 = 0 */ }
+  return { count, mb: (bytes / 1024 / 1024).toFixed(1) }
+}
+
+/**
+ * 备份导出（2026-11-08 分层）：单文件 json 原样返回（前端下载），不落第二份盘。
+ *   core = 人格与记忆的数据面（账本/配置/日记/便条/信箱 md/身份文档/指纹/说明），
+ *          约 1MB——这就是「一键提取人格记忆等数据」；不打包 local.key（本机钥匙）。
+ *   full = 现状全量（含表情库/收件箱/媒体等二进制，可能 60MB+），换台机器整目录也能接上。
+ */
+export async function backupBundle(tier = 'full') {
   const backup = await lib('backup.js')
-  const b = await backup.collectBackup(ROOT)
-  return { ...b, fileName: backup.backupFileName() }
+  const core = tier === 'core'
+  const b = await backup.collectBackup(ROOT, { core })
+  const manifest = {
+    tier,
+    files: b.files.length,
+    bytes: b.bytes,
+    skipped: b.skipped,
+    excludes: core
+      ? [
+          `表情库 memes/（${dirStats(ROOT, 'memes').count} 个文件，${dirStats(ROOT, 'memes').mb}MB）——整目录拷贝即可迁移`,
+          `media/ 与收件箱二进制（${dirStats(ROOT, 'media').mb}MB）——同上`,
+          'local.key（本机通路钥匙）——首次启动自动再生成，永不入备份',
+          'logs/（现场日志，回放只会误导排障）',
+        ]
+      : ['local.key（本机通路钥匙）——永不入备份', 'logs/、backups/'],
+  }
+  return { ...b, manifest, fileName: backup.backupFileName() + (core ? '.core' : '') }
 }
 
 /**

@@ -585,6 +585,27 @@ function render(){
     : '读取中';
 }
 
+const bkGo = async (tier, btn) => {
+  const old = btn.textContent;
+  btn.disabled = true; btn.textContent = '打包中…（' + (tier === 'core' ? '核心' : '全量') + '）';
+  try{
+    const b = await fetch('/api/observe/backup?tier=' + tier, {cache:'no-store'}).then(r=>r.json());
+    const blob = new Blob([JSON.stringify(b, null, 2)], {type:'application/json'});
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = b.fileName || ('fish-backup-'+new Date().toISOString().slice(0,10)+'.json');
+    a.click();
+    setTimeout(()=>URL.revokeObjectURL(a.href), 3000);
+    const pre = document.getElementById('bkmanifest');
+    if (pre) {
+      pre.style.display = 'block';
+      pre.textContent = '包含 ' + b.manifest.files + ' 个文件，' + (b.manifest.bytes/1024/1024).toFixed(2) + 'MB\n\n不在包里：\n' + (b.manifest.excludes||[]).map(x=>'· '+x).join('\n') + '\n\n跳过明细：\n' + (b.skipped||[]).slice(0,20).join('\n');
+    }
+    toast('备份已导出（' + b.manifest.files + ' 个文件）');
+  }catch(e){ toast('导出失败：'+e.message) }
+  btn.disabled = false; btn.textContent = old;
+};
+
 // 事件流（2026-11-08）：从轮询载荷里拆出来的大件。本页激活时才拉一次，
 // 数据指纹变了（D.eventsCount 变）才重拉——1757 条的账本不该每 15 秒白过一遍。
 let EV = { count: -1, events: null };
@@ -707,9 +728,36 @@ function renderObserve(el){
           (r.unread?'<span class="tag" style="background:rgba(245,189,98,.12);border-color:rgba(245,189,98,.3);color:#f3cd91">未读</span>':'')+
           '</div>').join('')+
         '<div style="margin-top:12px"><button class="st-btn ghost" onclick=\'obAction("markread")\'>全部标为已读</button></div></div>'
-      : emptyBox('还没有留话——这是起点，不是故障'));
+      : emptyBox('还没有留话——这是起点，不是故障'))+
+    sec('备份她')+
+    '<div class="card"><div class="dim" style="font-size:12.5px;line-height:1.8">'+
+      '一键提取她的人格与记忆：账本、日记、便条、配置、身份文档打包成单个 JSON（约 1MB），'+
+      '存好就能在任何一台机器上把她接回来。<b>只存不发给他</b>——文件下载到你的下载目录。'+
+      '全量（含表情库/收件箱）在「数据」页。</div>'+
+      '<div style="margin-top:10px"><button class="st-btn" id="obbk">一键备份（人格与记忆）</button>'+
+      '<span class="dim" id="obbknote" style="margin-left:10px;font-size:12px"></span></div></div>';
   const w = document.getElementById('obwake');
   if(w) w.onclick = ()=>obAction('wake',{},'叫醒会开一轮真实回合（会断不了什么，但会花她的额度）。现在叫吗？');
+  const obk = document.getElementById('obbk');
+  if (obk) obk.onclick = async () => {
+    obk.disabled = true;
+    const note = document.getElementById('obbknote');
+    if (note) note.textContent = '打包中…';
+    try {
+      const b = await fetch('/api/observe/backup?tier=core', {cache:'no-store'}).then(r=>r.json());
+      const blob = new Blob([JSON.stringify(b, null, 2)], {type:'application/json'});
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = b.fileName || ('fish-backup-core-'+new Date().toISOString().slice(0,10)+'.json');
+      a.click();
+      setTimeout(()=>URL.revokeObjectURL(a.href), 3000);
+      if (note) note.textContent = b.manifest.files + ' 个文件 · ' + (b.manifest.bytes/1024/1024).toFixed(2) + 'MB · 不含表情库/钥匙/日志';
+      toast('备份已导出');
+    } catch (e) {
+      if (note) note.textContent = '没成：' + e.message;
+    }
+    obk.disabled = false;
+  };
 }
 
 function renderBili(el){
@@ -803,9 +851,18 @@ function renderData(el){
     sec('运行日志 · 最近 '+((Dp.logTail&&Dp.logTail.lines)||'').toString().length+' 行')+
     '<div class="card"><pre>'+esc((Dp.logTail&&Dp.logTail.text)||Dp.logTail&&Dp.logTail.tail||JSON.stringify(Dp.logTail||{})).slice(-4000)+'</pre>'+
       '<div class="dim" style="font-size:12px">完整导出（含自检与脱敏配置）在 DSH 侧的 /dsh-fish/log/export。</div></div>'+
-    sec('备份')+
+    sec('备份 · 一键提取她的数据')+
     '<div class="card"><div class="dim" style="font-size:12.5px;margin-bottom:10px">'+esc(Dp.backupNote||'')+'</div>'+
-      '<button class="st-btn" id="bkdl">导出备份（单文件 JSON）</button></div>'+
+      '<div style="display:flex;gap:10px;flex-wrap:wrap">'+
+        '<button class="st-btn" id="bkcore">一键备份（人格与记忆 · 约 1MB）</button>'+
+        '<button class="st-btn ghost" id="bkfull">全量备份（含表情库与收件箱 · 可能 60MB+）</button>'+
+      '</div>'+
+      '<div class="dim" style="font-size:12px;margin-top:10px;line-height:1.8">'+
+        '<b>核心包</b>：账本、配置、日记、便条、信箱、身份文档、账本指纹、旁听缓存——她的记忆与判断全在里面。<br>'+
+        '<b>不进包</b>：表情库与收件箱的二进制（整目录拷贝即可迁移）、local.key（本机钥匙，首启自动再生成）、日志。<br>'+
+        '恢复语义：先封存现状再放回（一个字节不删），文件在 <code>dsh-fish-backups/</code>。'+
+      '</div>'+
+      '<pre id="bkmanifest" style="display:none;margin-top:10px"></pre></div>'+
     sec('迁移 / 导入 / 重置 · 只看状态')+
     '<div class="card">'+
       '<div class="belief"><span class="idx">迁移</span><span class="txt">'+esc(JSON.stringify(Dp.moveStatus||{})).slice(0,200)+'</span></div>'+
@@ -820,21 +877,10 @@ function renderData(el){
       pre.textContent = r.md || ('读不到：'+(r.why||''));
     };
   });
-  const bk = document.getElementById('bkdl');
-  if(bk) bk.onclick = async ()=>{
-    bk.disabled = true; bk.textContent = '打包中…';
-    try{
-      const b = await fetch('/api/observe/backup',{cache:'no-store'}).then(r=>r.json());
-      const blob = new Blob([JSON.stringify(b, null, 2)], {type:'application/json'});
-      const a = document.createElement('a');
-      a.href = URL.createObjectURL(blob);
-      a.download = b.fileName || ('fish-backup-'+new Date().toISOString().slice(0,10)+'.json');
-      a.click();
-      setTimeout(()=>URL.revokeObjectURL(a.href), 3000);
-      toast('备份已导出');
-    }catch(e){ toast('导出失败：'+e.message) }
-    bk.disabled = false; bk.textContent = '导出备份（单文件 JSON）';
-  };
+  const bkc = document.getElementById('bkcore');
+  if (bkc) bkc.onclick = ()=>bkGo('core', bkc);
+  const bk = document.getElementById('bkfull');
+  if(bk) bk.onclick = ()=>{ if(confirm('全量包含表情库与收件箱二进制，可能 60MB+，生成与下载都要一会儿。继续？')) bkGo('full', bk) };
 }
 
 // ---------------- 设置页（2026-11-04，现代布局）----------------
@@ -1357,8 +1403,10 @@ createServer(async (req, res) => {
       res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
       return res.end(JSON.stringify(r))
     }
-    if (req.url === '/api/observe/backup') {
-      const b = await backupBundle()
+    // tier=core（人格与记忆，约 1MB）/ full（现状全量，可能 60MB+）
+    const bkMatch = /^\/api\/observe\/backup(\?tier=(core|full))?$/.exec(req.url || '')
+    if (bkMatch) {
+      const b = await backupBundle(bkMatch[2] || 'full')
       res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
       return res.end(JSON.stringify(b))
     }
