@@ -241,7 +241,7 @@ export function registerFormula(ctx, deps = {}) {
       description: [
         '把一段「文字 + $公式$」排成一页图：中文照排，公式用 LaTeX。讲题、写推导用它。',
         '画好了存成 PNG（只存，不会发给他）。示意图、圈重点那种别用它，用 her_draw。',
-        '约 3 秒一张，一次把整段写进来，别一行一行调。',
+        '几秒一张，一次把整段写进来，别一行一行调。',
       ].join(''),
       parameters: toJsonSchema({
         type: 'object',
