@@ -12,7 +12,7 @@ import { mkdtemp, rm, readFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { planDrawing, registerDraw } from '../lib/draw.js'
+import { planDrawing, registerDraw, formatMeasureReport } from '../lib/draw.js'
 import { FISH_TOOLS } from '../lib/restrict.js'
 
 test('planDrawing：空画布、不认识的笔、字数超限都拒绝', () => {
@@ -42,6 +42,66 @@ test('planDrawing：坐标夹进画布、中文名调色板映射、未知颜色
 
 test('her_draw 在 FISH_TOOLS 里（她在收窄后的工具面上看得见）', () => {
   assert.ok(FISH_TOOLS.includes('her_draw'))
+})
+
+test('frac：分子分母可以是文字、{text,size}，也可以再套分数线', () => {
+  const r = planDrawing({
+    items: [
+      { type: 'frac', x: 10, y: 20, num: 'ln a - ln a', den: '0', size: 18 },
+      { type: 'frac', x: 200, y: 20, num: { text: 'x', size: 22 }, den: 'a' },
+      { type: 'frac', x: 300, y: 20, num: { type: 'frac', num: '1', den: '2' }, den: { type: 'frac', num: '3', den: '4' } },
+    ],
+  })
+  assert.equal(r.ok, true, r.why)
+  assert.equal(r.job.items.length, 3)
+  assert.equal(r.job.items[0].t, 'frac')
+  assert.equal(r.job.items[0].num.t, 'text')
+  assert.equal(r.job.items[0].den.text, '0')
+  assert.equal(r.job.items[1].num.size, 22, '分子自己带 size 就用它')
+  assert.equal(r.job.items[2].num.t, 'frac', '分子里能再套一个分数')
+  assert.equal(r.job.items[2].den.num.text, '3', '嵌套结构完整传下去')
+})
+
+test('frac：空分子、超字数、套超过 3 层都拒绝（并说明为什么）', () => {
+  assert.match(planDrawing({ items: [{ type: 'frac', num: '', den: 'a' }] }).why, /空的/)
+  assert.match(planDrawing({ items: [{ type: 'frac', num: '字'.repeat(61), den: 'a' }] }).why, /分数里这一行/)
+  const deep = (n) => (n <= 0 ? 'a' : { type: 'frac', num: deep(n - 1), den: 'b' })
+  assert.equal(planDrawing({ items: [{ type: 'frac', num: deep(2), den: 'c' }] }).ok, true, '3 层是允许的')
+  assert.match(planDrawing({ items: [{ type: 'frac', num: deep(3), den: 'c' }] }).why, /最多套 3 层/)
+})
+
+test('frac 的字也计入总字数预算（别绕开 400 字上限）', () => {
+  // 六条 60 字 = 360，再用分数加 41 字 → 401，越过 400 的合计上限
+  const items = Array.from({ length: 6 }, (_, i) => ({ type: 'text', x: 10, y: 10 + i * 20, text: '字'.repeat(60), size: 12 }))
+  assert.equal(planDrawing({ items }).ok, true, '360 字还没超')
+  items.push({ type: 'frac', num: '字'.repeat(38), den: '字'.repeat(3) })
+  assert.match(planDrawing({ items }).why, /字太多了/)
+})
+
+test('formatMeasureReport：列字的宽高、整体外接框、出界提醒；无线框圆（她自己知道坐标）', () => {
+  const report = {
+    canvas: { w: 480, h: 360 },
+    items: [
+      { i: 1, t: 'text', x: 16, y: 16, w: 192.4, h: 22.1 },
+      { i: 2, t: 'rect', x: 10, y: 10, w: 100, h: 40 },
+      { i: 3, t: 'frac', x: 220, y: 10, w: 48, h: 56 },
+    ],
+    bbox: { x1: 10, y1: 10, x2: 268, y2: 66 },
+    clipped: [3],
+  }
+  const s = formatMeasureReport(report)
+  assert.match(s, /画布 480×360/)
+  assert.match(s, /1字@16,16 192×22/, '字要带左上与宽高（四舍五入）')
+  assert.match(s, /3分数@220,10 48×56/, '分数也要列')
+  assert.ok(!s.includes('2rect'), '线框圆不列：坐标是她自己给的')
+  assert.match(s, /10,10 → 268,66/)
+  assert.match(s, /第 3 笔超出画布/)
+})
+
+test('formatMeasureReport：拿不到报告就返回空串（不能让回执变成 null/undefined）', () => {
+  assert.equal(formatMeasureReport(null), '')
+  assert.equal(formatMeasureReport({}), '')
+  assert.equal(formatMeasureReport({ items: [] }), '')
 })
 
 test('真渲染：一张带字、框、箭头、圆的画，产出合法 PNG', { timeout: 60_000 }, async () => {
@@ -82,6 +142,38 @@ test('真渲染：一张带字、框、箭头、圆的画，产出合法 PNG', {
     assert.ok(png.length > 1500, `PNG 太小不像画（${png.length}B）`)
     // 只存不发的定案：回执必须如实说「没有发给他」
     assert.match(out.note, /没有发给他/)
+  } finally {
+    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
+  }
+})
+
+test('真渲染：分数线（含嵌套）画出来，回执带实测几何', { timeout: 90_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), 'fish-draw-'))
+  try {
+    const registered = []
+    registerDraw({ tools: { register: (t) => registered.push(t) } }, { root, log: () => {} })
+    const def = registered[0]
+    const out = await def.execute(
+      {
+        canvas: { w: 480, h: 260 },
+        items: [
+          { type: 'text', x: 16, y: 16, text: '① 代入 x = 0', size: 16 },
+          { type: 'frac', x: 160, y: 10, num: 'ln a - ln a', den: '0', size: 16 },
+          { type: 'frac', x: 160, y: 90, num: { type: 'frac', num: 'x', den: 'a' }, den: '2', size: 16 },
+        ],
+      },
+      { session: {} },
+    )
+    assert.equal(out.ok, true, `应画成（note：${out.note}）`)
+    // A 档：回执必须告诉她量出来多大，不然她还是只能画三回
+    assert.match(out.note, /实测（画布 480×260/)
+    assert.match(out.note, /2分数@/, '分数要列进实测')
+    assert.match(out.note, /整张画占/)
+    // 只存不发仍是定案
+    assert.match(out.note, /没有发给他/)
+    const png = await readFile(out.path)
+    assert.deepEqual([...png.subarray(0, 4)], [0x89, 0x50, 0x4e, 0x47])
+    assert.ok(png.length > 1500, `PNG 太小不像画（${png.length}B）`)
   } finally {
     await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
   }
