@@ -47,10 +47,17 @@ const MAX_READ = 4 * 1024 * 1024
  * 为什么非要 source=tool：growth_commit 也写 utterance（她记下的判断），
  * 那些是内心活动，不是话说出口——发到 QQ 就是替她开口（fork.7 的教训）。
  *
+ * 2026-11-08 新增两类（都要过 state——跨行的配对需要记住上一条 utterance）：
+ *   ask    她用 ask_owner 挂的申请卡 → 推到 QQ，他回数字就答（bridge 经
+ *          /local/answer 走 answerCard，与 DSH 卡片同一条结算代码）
+ *   letter her_leave 的信（utterance + 紧跟的 `letter:` 标记成对出现）→
+ *         信的正文在 utterance 里，标记只带 id，所以要靠 state 配对
+ *
  * @param {string} line
- * @returns {{id:string, kind:string, text:string, ts:string}|null}
+ * @param {{lastUtterance?:{id:string,text:string,ts:string}}} [state] 跨行配对用
+ * @returns {{id:string, kind:string, text:string, ts:string, askId?:string, options?:string[]}|null}
  */
-export function parsePushLine(line) {
+export function parsePushLine(line, state = {}) {
   let ev
   try {
     ev = JSON.parse(line)
@@ -60,8 +67,34 @@ export function parsePushLine(line) {
   if (!ev) return null
   // 语音（2026-11-04）：她调 her_voice 时落一条 meta `voice:<音频路径>|<她说的那句>`
   // 用 meta 不用 utterance —— utterance 会进 beliefs，而"她说出声"不是"她判断了什么"。
+  // 她的申请卡（2026-11-08）：ask_owner 挂的 ask 直接成卡推 QQ。
+  // 选项编号在文案里带出来；他的回复由 bridge 拦下（只认数字），经
+  // /local/answer → answerCard 结算——与 DSH 卡片同一条代码，不养第二套。
+  if (ev.type === 'ask') {
+    const q = String(ev.text ?? '').trim()
+    if (!q) return null
+    const opts = (Array.isArray(ev.ask?.options) ? ev.ask.options : []).map((o) => String(o).trim()).filter(Boolean)
+    const lines = [`（她想问你）${q}`]
+    if (opts.length) {
+      opts.forEach((o, i) => lines.push(`${i + 1}. ${o}`))
+      lines.push('（回数字就答了，比如「1」；想说别的就直接说，她能收到）')
+    } else {
+      lines.push('（这题没有预设选项——去 7788 查看器「观测台」答她）')
+    }
+    return { id: String(ev.id ?? ''), kind: 'ask', askId: String(ev.id ?? ''), options: opts, text: lines.join('\n'), ts: String(ev.ts ?? '') }
+  }
   if (ev.type === 'meta') {
     const raw = String(ev.text ?? '')
+    // 信（2026-11-08）：her_leave 落 utterance + 紧跟的 `letter:<日期>:<id>` 标记。
+    // 正文在标记的前一条 utterance 里（state 配对），标记本身只有 id。
+    if (raw.startsWith('letter:')) {
+      const ref = raw.slice('letter:'.length).split(':').pop()
+      const u = state?.lastUtterance
+      if (!u || u.id !== ref) return null
+      const body = String(u.text ?? '').trim()
+      if (!body) return null
+      return { id: String(ev.id ?? ''), kind: 'letter', text: `（她留了封信）${body}`, ts: u.ts }
+    }
     // 语音 / 表情（2026-11-05）：同一种形状——meta + 文件路径，桥只按 kind 发不同的段。
     const kind = raw.startsWith('voice:') ? 'voice' : raw.startsWith('meme:') ? 'meme' : ''
     if (!kind) return null
@@ -73,6 +106,9 @@ export function parsePushLine(line) {
   }
   if (ev.type !== 'utterance' || ev.source !== 'tool') return null
   const raw = String(ev.text ?? '')
+  // her_leave 的信是「utterance 在前、标记在后」：每条 tool utterance 都记下来，
+  // 下一条 letter 标记来配对（见上面 meta 分支）。
+  state.lastUtterance = { id: String(ev.id ?? ''), text: raw, ts: String(ev.ts ?? '') }
   for (const m of PUSH_MARKERS) {
     if (!raw.startsWith(m.tag)) continue
     const body = raw.slice(m.tag.length).trim()
@@ -109,6 +145,12 @@ export function createPusher({
   let ready = false
   let timer = null
   let busy = false
+  // 跨行配对用：letter 标记要找它前面那条 utterance（见 parsePushLine）
+  const scan = { lastUtterance: null }
+  // 已推到 QQ、还没答的申请卡：askId → { options, at }。
+  // 他回数字时 bridge 拿它映射成选项，经 /local/answer 结算后调 resolveAsk 删掉。
+  // 进程重启就丢——丢了只是不拦截，他的回复照常递给她，不会错答。
+  const pending = new Map()
 
   const sizeOf = () => {
     try {
@@ -213,7 +255,7 @@ export function createPusher({
           offset = lineEnd
           continue
         }
-        const item = parsePushLine(line)
+        const item = parsePushLine(line, scan)
         if (!item) {
           offset = lineEnd
           continue
@@ -223,7 +265,13 @@ export function createPusher({
           stopped = true
           break
         }
-        if (res === 'sent') pushed += 1
+        if (res === 'sent') {
+          pushed += 1
+          // 卡推出去才登记待答：推失败的下轮重推，不提前占位
+          if (item.kind === 'ask' && item.askId && (item.options ?? []).length) {
+            pending.set(item.askId, { options: item.options, at: Date.parse(item.ts) || now() })
+          }
+        }
         offset = lineEnd
         saveOffset() // 每处理完一条就落盘：崩了最多重复一条，不会丢一串
       }
@@ -263,5 +311,26 @@ export function createPusher({
     timer = null
   }
 
-  return { start, stop, tick, get offset() { return offset }, get ready() { return ready } }
+  /**
+   * 他的一条 QQ 回复是不是在答某张卡。**只认 1–2 位数字**——「可以」这类词
+   * 日常对话太常见，文本匹配会错答；数字是卡片上明确教他的答法。
+   * 多张卡同时挂着时取最早推的那张（她一天最多问一次，撞上算极小概率）。
+   */
+  function pendingAskMatch(text) {
+    const t = String(text ?? '').trim()
+    if (!/^\d{1,2}$/.test(t)) return null
+    const n = Number(t)
+    for (const [askId, p] of pending) {
+      if (now() - p.at > 24 * 3600_000) { pending.delete(askId); continue } // 账本侧 TTL 同步
+      if (n >= 1 && n <= p.options.length) return { askId, selected: p.options[n - 1] }
+    }
+    return null
+  }
+
+  /** 结算成功后由 bridge 调：这张卡不用再拦了。 */
+  function resolveAsk(askId) {
+    pending.delete(String(askId ?? ''))
+  }
+
+  return { start, stop, tick, pendingAskMatch, resolveAsk, get offset() { return offset }, get ready() { return ready }, get pendingCount() { return pending.size } }
 }

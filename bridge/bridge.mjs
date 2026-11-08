@@ -31,7 +31,7 @@ import { tmpdir } from 'node:os'
 import { fishRoot as resolveFishRoot } from '../shared/root.mjs'
 import { dirname, join, isAbsolute } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { createPusher } from './push.mjs'
+import { createPusher, pendingAskMatch, resolveAsk } from './push.mjs'
 import { batchWait } from './batch-wait.mjs'
 import { classifySegments, displayName, ensureExt } from './attachment.mjs'
 import { readAsrConfig, ensureServer, transcribe } from './asr.mjs'
@@ -206,6 +206,36 @@ async function fishSay(text, image = '') {
   }
   return { ok: false, note: '没送到' }
 }
+
+/**
+ * 把「他回的选项数字」送到插件的 /local/answer 结算（2026-11-08）。
+ * 走 answerCard——与 DSH 卡片完全同一条代码；插件负责校验（已答过/没有这张卡
+ * 都会如实说）。端口发现与 fishSay 共用，端口变了同样清缓存重试一次。
+ */
+async function localAnswer(hit) {
+  const key = fishKey()
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const port = cachedPort || (await discoverPort())
+    if (!port) return { ok: false, why: '没找到 dsh-fish 的通路' }
+    cachedPort = port
+    try {
+      const r = await fetch(`http://127.0.0.1:${port}/dsh-fish/local/answer`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-fish-key': key },
+        // answerCard 的卡回答形状：selected 是数组（DSH 卡片原样提交的就是它）
+        body: JSON.stringify({ id: `ask:${hit.askId}`, selected: [hit.selected] }),
+        signal: AbortSignal.timeout(8000),
+      })
+      const j = await r.json().catch(() => ({}))
+      if (!r.ok) return { ok: false, why: j?.error ?? `HTTP ${r.status}` }
+      return j
+    } catch (err) {
+      cachedPort = 0
+      if (attempt === 1) return { ok: false, why: String(err?.message ?? err) }
+    }
+  }
+}
+
 
 // ---------------------------------------------------------------- OneBot 侧
 
@@ -1031,7 +1061,7 @@ async function flush(p) {
 }
 
 /** 收到一条 QQ 消息：先过滤，再丢进合批窗口 */
-function onMessage(ev) {
+async function onMessage(ev) {
   // 2026-11-02：进门先记一行。以前被过滤掉的分支（群消息、空内容）**一声不响**，
   // 出问题时只能看到"桥没反应"，分不清是消息没到、还是到了被规则挡了。
   const who = ev.message_type === 'group' ? `群 ${ev.group_id} / ${ev.user_id}` : `私聊 ${ev.user_id}`
@@ -1044,6 +1074,23 @@ function onMessage(ev) {
     return
   }
   const { text, atMe, images, files, forwards = [], audios = [] } = brief
+  // 2026-11-08：她在账本里挂了卡（ask_owner / 规则申请）且已推到 QQ 时，
+  // 他回一个选项数字（如「1」）就等于作答——经 /local/answer 走与 DSH 卡片
+  // 同一条结算（answerCard），不再让她问一天没人答。只认 1–2 位数字的精确
+  // 命中；说别的照常递给她——**宁可漏答，不可错答**。
+  if (text && text.length <= 2) {
+    const hit = pendingAskMatch(text)
+    if (hit) {
+      const r = await localAnswer(hit)
+      if (r?.ok) {
+        resolveAsk(hit.askId)
+        log(`卡已代答：${hit.askId} → 「${hit.selected}」`)
+        await reply(ev, `已答「${hit.selected}」，她知道了。`, { strict: true })
+        return
+      }
+      log(`代答没成（${r?.why ?? '未知'}），这条照常递给她`)
+    }
+  }
   if (ev.message_type === 'group' && !(cfg.allowGroup && atMe)) {
     log('群消息，但没 @ 她 / 没开 allowGroup，跳过')
     return
@@ -1220,7 +1267,8 @@ wss.on('connection', (ws, req) => {
     }
     if (ev?.post_type === 'message') {
       try {
-        onMessage(ev)
+        // onMessage 现在是 async（代答要 await /local/answer）：拒绝不能逃出这个 try
+        Promise.resolve(onMessage(ev)).catch((err) => log('处理消息出错：', String(err?.message ?? err)))
       } catch (err) {
         log('处理消息出错：', String(err?.message ?? err))
       }

@@ -214,3 +214,89 @@ test('中文与 emoji 不切坏（按字节走，不解码再回算）', () =>
     await pusher.tick()
     assert.deepEqual(sent.map((s) => s.text), ['风好大🫘，你那边呢？'])
   }))
+
+// ---------------------------------------------------------------- 申请卡与信推 QQ（2026-11-08）
+
+test('ask 事件成卡：文案带编号选项，解析出 askId/options', () => {
+  const line = JSON.stringify({
+    id: 'ev_ask1',
+    type: 'ask',
+    ts: new Date(T0).toISOString(),
+    text: '能不能给我一样能把算式排成图片的东西？',
+    ask: { kind: 'need-tool', subject: '算式排图', options: ['可以', '这次不行'] },
+  })
+  const r = parsePushLine(line, {})
+  assert.equal(r.kind, 'ask')
+  assert.equal(r.askId, 'ev_ask1')
+  assert.deepEqual(r.options, ['可以', '这次不行'])
+  assert.match(r.text, /（她想问你）能不能给我一样能把算式排成图片的东西？/)
+  assert.match(r.text, /1\. 可以/)
+  assert.match(r.text, /回数字就答了/)
+})
+
+test('ask 没有选项时不给答题指引（答不了就别教他答）', () => {
+  const line = JSON.stringify({
+    id: 'ev_ask2', type: 'ask', ts: new Date(T0).toISOString(),
+    text: '问一句。', ask: { kind: 'other' },
+  })
+  const r = parsePushLine(line, {})
+  assert.equal(r.kind, 'ask')
+  assert.doesNotMatch(r.text, /回数字就答了/)
+  assert.match(r.text, /观测台/)
+})
+
+test('letter：utterance + 紧跟的 letter: 标记配对，正文剥出来', () => {
+  const state = {}
+  const u = JSON.stringify({ id: 'ev_l', type: 'utterance', source: 'tool', ts: new Date(T0).toISOString(), text: '昨晚的雪托住了脚印。' })
+  const mark = JSON.stringify({ id: 'ev_m', type: 'meta', ts: new Date(T0).toISOString(), text: 'letter:2026-11-08:ev_l' })
+  assert.equal(parsePushLine(u, state), null, '信的正文本身不带标记，不单独推')
+  const r = parsePushLine(mark, state)
+  assert.equal(r.kind, 'letter')
+  assert.equal(r.text, '（她留了封信）昨晚的雪托住了脚印。')
+  assert.equal(r.ts, new Date(T0).toISOString(), '信的时间用正文那条的——推送超龄判定按它算')
+})
+
+test('letter：中间隔了别的 utterance 就配不上（宁漏不串）', () => {
+  const state = {}
+  parsePushLine(JSON.stringify({ id: 'ev_a', type: 'utterance', source: 'tool', ts: new Date(T0).toISOString(), text: '第一句' }), state)
+  parsePushLine(JSON.stringify({ id: 'ev_b', type: 'utterance', source: 'tool', ts: new Date(T0).toISOString(), text: '第二句' }), state)
+  const mark = JSON.stringify({ id: 'ev_m', type: 'meta', ts: new Date(T0).toISOString(), text: 'letter:2026-11-08:ev_a' })
+  assert.equal(parsePushLine(mark, state), null, '标记指向 ev_a，手里是 ev_b——不硬配')
+})
+
+test('推出去的 ask 进待答表：数字映射选项，resolve 后不再拦', () =>
+  withPusher(async ({ pusher, write, event }) => {
+    write(event()) // 文件得先存在——首 tick 只记末尾，ready 才立起来
+    await pusher.tick()
+    write(JSON.stringify({ id: 'ev_ask', type: 'ask', ts: new Date(T0).toISOString(), text: '想要个算式排图的工具', ask: { kind: 'need-tool', options: ['可以', '这次不行'] } }) + '\n')
+    await pusher.tick()
+    assert.equal(pusher.pendingCount, 1)
+    assert.deepEqual(pusher.pendingAskMatch('1'), { askId: 'ev_ask', selected: '可以' })
+    assert.deepEqual(pusher.pendingAskMatch('2'), { askId: 'ev_ask', selected: '这次不行' })
+    // 数字之外一律不拦——「可以」是日常词，宁可漏答不错答
+    assert.equal(pusher.pendingAskMatch('可以'), null)
+    assert.equal(pusher.pendingAskMatch('1 吧'), null)
+    pusher.resolveAsk('ev_ask')
+    assert.equal(pusher.pendingAskMatch('1'), null, '答完就不再拦')
+  }))
+
+test('ask 推失败不进待答表（重推成功才登记，防拦到没推出去的卡）', () =>
+  withPusher(async ({ pusher, fail, write }) => {
+    await pusher.tick() // 基线
+    fail(1)
+    write(JSON.stringify({ id: 'ev_ask', type: 'ask', ts: new Date(T0).toISOString(), text: '想要个工具', ask: { options: ['可以'] } }) + '\n')
+    await pusher.tick()
+    assert.equal(pusher.pendingCount, 0)
+    write(JSON.stringify({ id: 'ev_ask', type: 'ask', ts: new Date(T0).toISOString(), text: '想要个工具', ask: { options: ['可以'] } }) + '\n')
+    await pusher.tick()
+    assert.equal(pusher.pendingCount, 1)
+  }))
+
+test('桥侧接线守卫：数字拦截 + /local/answer 调用都在', async () => {
+  const { readFile } = await import('node:fs/promises')
+  const src = await readFile(new URL('../bridge.mjs', import.meta.url), 'utf8')
+  assert.match(src, /pendingAskMatch, resolveAsk/, '从 push.mjs 引入匹配与结算')
+  assert.match(src, /\/dsh-fish\/local\/answer/, '要走插件 answerCard 的同一条路')
+  assert.match(src, /text\.length <= 2/, '拦截必须限短消息')
+  assert.match(src, /宁可漏答，不可错答/, '口径注释要在——下一个改这段的人得看到')
+})
