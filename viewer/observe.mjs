@@ -65,6 +65,21 @@ export async function observeData() {
   return { at: Date.now(), root: ROOT, state, away, asks, inbox, bili, memory, data }
 }
 
+/**
+ * stability 的缓存（2026-11-08）：#57 抽样池一次 1.9s（k 次留一重算 deriveSelf），
+ * 而它是纯函数——账本不变结果不变。账本是追加式的，条数+末条 id 就是可靠签名；
+ * stability 还吃 docBudget/beliefsShown/growthDays 三个配置，一并进键。
+ * 不缓存的话：每次 /api/observe 冷算 2.4s，其中 81% 是它。
+ */
+let stabilityCache = { key: '', value: null }
+function stabilityKey(events, config, m) {
+  const lastId = String(events[events.length - 1]?.id ?? '')
+  return [events.length, lastId, config?.memory?.docBudget, config?.memory?.beliefsShown, config?.growthDays, m?.persona?.imported === true].join('|')
+}
+
+/** 记忆体检同款缓存（99ms，纯事件计算）。 */
+let healthCache = { key: '', value: null }
+
 /** /state 的文件可算部分（tenancy/compat/host/upgrade 是进程信息，不搬） */
 async function buildState(events, config, m) {
   const meta = await lib('meta.js')
@@ -75,11 +90,14 @@ async function buildState(events, config, m) {
   const home = await lib('home.js')
   const derive = await lib('derive.js')
 
-  const st = quality.stability(events, { growthDays: config.growthDays }, {
-    shown: config?.memory?.beliefsShown,
-    budget: config?.memory?.docBudget,
-    withBans: m?.persona?.imported !== true,
-  })
+  const sk = stabilityKey(events, config, m)
+  const st = stabilityCache.key === sk
+    ? stabilityCache.value
+    : (stabilityCache = { key: sk, value: quality.stability(events, { growthDays: config.growthDays }, {
+        shown: config?.memory?.beliefsShown,
+        budget: config?.memory?.docBudget,
+        withBans: m?.persona?.imported !== true,
+      }) }).value
   const p = unlock.pendingOffer(events, Date.now())
   const pending = p
     ? (() => {
@@ -227,6 +245,8 @@ async function buildMemory(events, config, m) {
   const folded = Math.max(0, m.beliefs.length - shown)
   const lastSleep = [...events].reverse()
     .find((e) => e?.type === 'meta' && String(e.text ?? '').startsWith('sleep:'))
+    const hk = stabilityKey(events, config, m) + ':health'
+    const healthV = healthCache.key === hk ? healthCache.value : (healthCache = { key: hk, value: health.examine(events, { growthDays: config?.growthDays }) }).value
   return {
     selfDoc: { chars: pb.used, budget, usedRatio: pb.usedRatio, dropped: pb.dropped, mtime: doc.mtime },
     sections: {
@@ -241,7 +261,7 @@ async function buildMemory(events, config, m) {
     },
     diaryCount: diary.length,
     lastSleep: lastSleep?.ts ?? '',
-    health: health.examine(events, { growthDays: settings.normalizeConfig ? config?.growthDays : config?.growthDays }),
+    health: healthV,
   }
 }
 
