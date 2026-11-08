@@ -78,6 +78,8 @@ import { fileURLToPath } from 'node:url'
 import { randomBytes, timingSafeEqual } from 'node:crypto'
 import { ensureDataReadme } from './readme.js'
 import { rulesByLayer } from './rules.js'
+// 插话（2026-11-08）：与叫醒共用 fishMessage，但来源另起一个 kind。
+import { fishMessage, FISH_STEER_KIND } from './deliver.js'
 import { ruleStatus, offerHistory, pendingOffer, activeGrants } from './unlock.js'
 import { devMode } from './devmode.js'
 import { ruleById } from './rules.js'
@@ -295,6 +297,24 @@ export function registerObserve(ctx, deps = {}) {
     // 一律 200：请求本身是合法的，被拦下是**规则的结果**，不是接口出错。
     // 用 503 会让观测台的 jpost 抛异常，把「这句我没递给她」变成一句技术错误。
     send(res, 200, r)
+  }
+
+  /**
+   * 插话（2026-11-08，用户选 A）：她这一轮还没跑完时，把他又发的一条塞进同一回合。
+   * 与 /local/say 共用同一把 local.key；正文原样递，不改写、不加旁白。
+   */
+  async function handleSteer(req, res) {
+    if (req.method !== 'POST') return send(res, 405, { error: 'method not allowed' })
+    let body = {}
+    try { body = JSON.parse(await readBody(req) || '{}') } catch { return send(res, 400, { error: 'body 不是合法 JSON' }) }
+    const text = String(body.text ?? '').trim()
+    if (!text) return send(res, 400, { error: 'text 不能为空' })
+    const r = await steerToHer(ctx, text, {
+      root,
+      log: (...a) => console.log('[dsh-fish]', ...a),
+    })
+    // 409 不是「接口坏了」，是「这台宿主插不进去」——桥要据此如实退回排队。
+    return send(res, r.ok ? 200 : 409, r.ok ? r : { ...r, error: r.note || '没插进去' })
   }
 
   /**
@@ -2315,6 +2335,8 @@ export function registerObserve(ctx, deps = {}) {
       send(res, 200, { ok: true, version: deps.version ?? '', pid: process.pid })
     }],
     ['/local/say', handleSay],
+    // 2026-11-08（用户选 A）：她这一轮还没跑完时，桥把第二条插进同一个回合。
+    ['/local/steer', handleSteer],
     // 2026-11-08：QQ 桥把他点选项的回答送回来（push 推卡 → 他回 QQ → 桥拦下 → 这里结算）。
     // 走 answerCard 与 DSH 卡片完全同一条路——ask/grant/keepsake 三种卡都认，不另写第二套结算。
     ['/local/answer', async (req, res) => {
@@ -2367,6 +2389,67 @@ export async function resolveSessionAgent(sc, sessionId) {
   if (got?.error) throw got.error
   if (!got?.agent) throw new Error('宿主说恢复好了，但没把那条会话的 agent 交出来')
   return got.agent
+}
+
+/**
+ * 2026-11-08（用户选 A）：把一条新消息插进她**正在跑**的回合。
+ *
+ * 与 sayToHer 的区别，都是刻意的：
+ *   · 不等 turn/end、不写 seen/talk 记账——① 已经记过「他来过」，② 不该重复记一轮；
+ *   · 不替她决定要不要把两条一起答，也不加「他又发了一条」的系统旁白
+ *     （deliver.js 记着教训：旁白会被她读成「有人对我说了这句话」）；
+ *   · 消息本身到达就是通知。正文只带 ② 的原话（含桥加的 QQ 来源标注）。
+ *
+ * 宿主没有 steer 就如实失败，让桥退回排队——绝不假装插进去了（fork.13）。
+ */
+export async function steerToHer(ctx, text, deps = {}) {
+  const root = deps.root ?? rootDir()
+  const log = deps.log ?? (() => {})
+  const sc = ctx?.sessionController
+
+  let sid = ''
+  try {
+    sid = String(await talkSessionId(ctx, { root, log }) ?? '').trim()
+  } catch (err) {
+    return { ok: false, note: `没找到她现在的会话：${String(err?.message ?? err)}` }
+  }
+  if (!sid) return { ok: false, note: '没找到她现在的会话。' }
+
+  // 当前回合正在跑时，resolveAgent 可能被宿主的 writer 占用（session/writer-held）。
+  // 先走注册表拿活 agent——`ctx.get('agents').get(sid)` 是本项目已在用的入口
+  // （出门/请走的结算就用它）；只有冷会话才退回 resolveAgent。
+  let agent = null
+  try {
+    const reg = ctx?.get?.('agents') ?? ctx?.agents
+    if (reg?.get) agent = reg.get(sid) ?? null
+  } catch { /* 注册表不给就走下面的恢复 */ }
+  if (!agent) {
+    if (!sc) return { ok: false, note: '宿主没有会话服务，也拿不到活 agent，插不进去。' }
+    try {
+      agent = await resolveSessionAgent(sc, sid)
+    } catch (err) {
+      return { ok: false, note: `接不回她这一轮：${String(err?.message ?? err)}` }
+    }
+  }
+  const r = steerMessage(agent, text)
+  if (r.ok) log(`插话：把一条新消息放进她正在跑的回合（会话 ${sid}）`)
+  return r
+}
+
+/**
+ * 抽出这一层是为了能单测：不碰 home.json、不碰宿主 agent 的恢复。
+ * 宿主没有 steer 就如实失败，让桥退回排队；正文原样递，不改写不加旁白。
+ */
+export function steerMessage(agent, text, { rpcId = `steer-${Date.now()}` } = {}) {
+  if (typeof agent?.steer !== 'function') {
+    return { ok: false, note: '这个宿主没有 steer，打断不了当前回合。' }
+  }
+  try {
+    agent.steer(fishMessage(String(text), { kind: FISH_STEER_KIND, rpcId }))
+    return { ok: true, steered: true, note: '' }
+  } catch (err) {
+    return { ok: false, note: `插话没成：${String(err?.message ?? err)}` }
+  }
 }
 
 /** 比对路径用：Windows 大小写不敏感。只比对，不做文件访问。 */

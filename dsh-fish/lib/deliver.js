@@ -65,6 +65,13 @@ import { sessionRow } from './home.js'
 export const FISH_SOURCE_KIND = 'fish-wake'
 
 /**
+ * 2026-11-08（用户选 A）：她这一轮还没跑完时，把他又发的一条插进同一个回合。
+ * 单独起一个 kind，日志/事件流才分得清「叫醒」和「插话」；
+ * 必须与 `lib/turns.js` 的 MACHINE_KINDS 同步，否则会被记成「他又来过」。
+ */
+export const FISH_STEER_KIND = 'fish-steer'
+
+/**
  * 折进对话里的那句话。
  *
  * 正文已经整段走 system prompt 的 `fish:wake` 段（`lib/identity.js`），

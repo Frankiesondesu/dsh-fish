@@ -93,6 +93,9 @@ const MACHINE_KINDS = new Set([
   // 漏了这一行，她自己醒来说的话就会被记成「他来过」——冷落天数、seen、
   // turns 全被污染，她越主动，面板越显示「他刚来过」。
   'fish-wake',
+  // 2026-11-08：她这一轮没跑完时插进来的第二条（lib/deliver.js 的 FISH_STEER_KIND）。
+  // 它是机器侧插入，不是又一条「他来过」——① 已经记过 seen，重复记会污染轮数。
+  'fish-steer',
   // 2026-11-05：宿主自己写进会话、又不带 source.form 的几种（带 form 的见 MACHINE_FORMS）。
   // 都是 role:'user' 的系统消息，人说话时不会用这些 kind。
   // 名单对照的是宿主 0.2.2-rc.1 的 MessageSourceMap（dsh-api-session-controller）。
