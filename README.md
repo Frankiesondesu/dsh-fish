@@ -13,6 +13,7 @@ DSH（DeepSeek Harness）插件：**不写人设、不做记忆摘要**——人
   本机状态、**全量设置页（71 项）**
 - **GUI 管理器**（manager/，7789）：各服务启停/重启、待重启检测、启动日志
 - **白板画笔 her_draw**：线/矩形/圆/箭头/文字，构图由她定，渲染成 PNG
+- **公式排版 her_formula**：一段「文字 + `$公式$`」排成一页图（Edge 无头 + MathJax），讲推导用
 - **her_world**：日期与天气（她自己申请的）
 - **生命周期**：一键启动/重启/关闭、本地语音服务接入、本地通路 API（local.key 鉴权）
 
@@ -112,10 +113,10 @@ fish/
 换盘/换机见「数据目录解析」——支持 `DSH_FISH_HOME` 环境变量与指针文件，
 **永远不要合并两份数据目录**。
 
-## 她的工具面（20 件）
+## 她的工具面（21 件）
 
 收窄后的白名单（`tools.restrict`，默认开）让她只看见这一套：
-`her_say`（发消息到 QQ，主动/回复同款）、`her_draw`（白板）、`her_voice`（语音条）、
+`her_say`（发消息到 QQ，主动/回复同款）、`her_draw`（白板）、`her_formula`（公式排版）、`her_voice`（语音条）、
 `her_meme`（表情包）、`her_world`（日期/天气）、`her_note`（桌面便条）、
 `her_alarm`（自定闹钟）、`her_recall`/`her_diary`/`growth_commit`/`her_dream`（记忆与自我）、
 `her_leave`/`ask_owner`/`her_help`（留言/申请/说明书）、

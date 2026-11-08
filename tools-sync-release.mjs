@@ -50,6 +50,22 @@ export function isTextFile(name) {
   return dot >= 0 && TEXT_EXT.has(name.slice(dot).toLowerCase())
 }
 
+/**
+ * 不参与清洗的路径前缀：**第三方资产按字节原样走**。
+ *
+ * 理由不是「怕改坏」，是**说真话**：`dsh-fish/THIRD-PARTY-NOTICES.md` 里写着
+ * `lib/assets/mathjax/tex-svg.js` 的 SHA-256。清洗只要动一个字符，发布仓里那个文件的
+ * 哈希就和声明对不上——等于随包发了一份假声明。这些文件里也不可能有本机隐私
+ * （压缩过的 MathJax 构建，不含中文、不含本机路径），清洗对它们没有意义。
+ *
+ * 终检（`scanDir`）照旧扫它们，别把这里当成免检。
+ */
+export const SKIP_CLEAN_PREFIXES = Object.freeze(['dsh-fish/lib/assets/'])
+
+export function inSkipClean(rel) {
+  return SKIP_CLEAN_PREFIXES.some((pre) => rel.startsWith(pre))
+}
+
 export function skipDir(name) {
   return SKIP_DIR_NAMES.has(name)
 }
@@ -342,19 +358,21 @@ export function sync({ work = WORK, release = releaseDir(), run = git } = {}) {
 
     log('[2/6] 模式化清洗')
     for (const ent of readdirSync(stage, { withFileTypes: true })) {
-      // 递归走一遍，纯文本才改
-      const walk = (p) => {
+      // 递归走一遍，纯文本才改；第三方资产整棵跳过（见 SKIP_CLEAN_PREFIXES 的注释）
+      const walk = (p, relPrefix) => {
         for (const e of readdirSync(p, { withFileTypes: true })) {
           const abs = join(p, e.name)
-          if (e.isDirectory()) { walk(abs); continue }
+          const rel = relPrefix ? `${relPrefix}/${e.name}` : e.name
+          if (e.isDirectory()) { if (!inSkipClean(`${rel}/`)) walk(abs, rel); continue }
           if (!e.isFile() || !isTextFile(e.name)) continue
+          if (inSkipClean(rel)) continue
           const before = readFileSync(abs, 'utf8')
           const after = cleanText(before, rules)
           if (after !== before) writeFileSync(abs, after, 'utf8')
         }
       }
       const p = join(stage, ent.name)
-      if (ent.isDirectory()) walk(p)
+      if (ent.isDirectory()) walk(p, ent.name)
       else if (isTextFile(ent.name)) {
         const before = readFileSync(p, 'utf8')
         const after = cleanText(before, rules)

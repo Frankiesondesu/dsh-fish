@@ -12,7 +12,31 @@ import {
   WORK, DEFAULT_RELEASE, CHECKLIST, releaseDir,
   skipDir, skipFile, isTextFile, buildRules, cleanText,
   terminalPattern, scanDir, summarizeTestOutput,
+  SKIP_CLEAN_PREFIXES, inSkipClean,
 } from './tools-sync-release.mjs'
+
+test('第三方资产按字节原样走，不进清洗（NOTICES 里写了哈希，改一个字符就是假声明）', () => {
+  // 目录与文件都命中前缀
+  assert.ok(inSkipClean('dsh-fish/lib/assets/mathjax/'), '目录要整棵跳过')
+  assert.ok(inSkipClean('dsh-fish/lib/assets/mathjax/tex-svg.js'))
+  // 她自己的代码照旧洗
+  assert.ok(!inSkipClean('dsh-fish/lib/formula.js'), '自己的源码必须继续洗')
+  assert.ok(!inSkipClean('dsh-fish/test/formula.test.mjs'))
+  assert.ok(!inSkipClean('README.md'))
+  assert.ok(!inSkipClean('dsh-fish/lib/assetsx/a.js'), '前缀不能靠字符串巧合命中')
+  assert.deepEqual([...SKIP_CLEAN_PREFIXES], ['dsh-fish/lib/assets/'])
+})
+
+test('哈希真对得上：NOTICES 声明的 sha256 就是磁盘上那个文件', async () => {
+  const { createHash } = await import('node:crypto')
+  const { readFileSync: rf } = await import('node:fs')
+  const asset = join(WORK, 'dsh-fish/lib/assets/mathjax/tex-svg.js')
+  const notices = rf(join(WORK, 'dsh-fish/THIRD-PARTY-NOTICES.md'), 'utf8')
+  const declared = /SHA-256[^|]*\|\s*`([0-9a-f]{64})`/.exec(notices)
+  assert.ok(declared, 'NOTICES 里要写着 SHA-256')
+  const real = createHash('sha256').update(rf(asset)).digest('hex')
+  assert.equal(real, declared[1], '磁盘文件与声明的哈希不一致：要么文件换了，要么声明过期')
+})
 
 test('发布仓默认与工作仓同级，绝不在工作仓内部', () => {
   assert.equal(dirname(DEFAULT_RELEASE), dirname(WORK), '同级')
