@@ -9,8 +9,9 @@
  * 那等于系统替她决定"这句话该配什么脸"。她要的表情得是她自己挑的——
  * 所以这是个工具，不是管道。跟 her_voice 同一条原则。
  *
- * 表情从哪来：`~/.dsh-fish/memes/`，用户自己往里放图，**文件名就是它的意思**
- * （`开心.png` / `无语-1.gif` / `生气.jpg`）。没有这个目录 = 她还没有表情包。
+ * 表情从哪来：`~/.dsh-fish/memes/`，用户往里放图，或者她自己用 savePath 收进来，
+ * **文件名就是它的意思**（`开心.png` / `无语-1.gif` / `生气.jpg`）。
+ * 没有这个目录 = 她还没有表情包。
  *
  * 挑图：文件名里含 mood 的优先；没有就随机。故意不做的：按情绪打分、
  * 按概率附送、按对话选图——那些都是替她判断。
@@ -114,7 +115,7 @@ export function sanitizeMemeName(name) {
     .slice(0, 40)
 }
 
-/** 路径必须落在她的这两个目录里（收件箱 = 他递来的，media/ = 他发过的图）；别的目录不算。 */
+/** 路径必须落在她的这两个目录里——按路径判定，不按来源：收件箱与 media/（含 media/draw/）。 */
 export function insideHerDirs(p, root) {
   const norm = normalize(String(p ?? '')).toLowerCase()
   if (!isAbsolute(norm)) return false
@@ -157,7 +158,7 @@ export function registerMeme(ctx, deps = {}) {
         },
         savePath: {
           type: 'string',
-          description: '想收下一张图就给它完整路径（只认他递来的：收件箱里的和你收过的 media/）。给了这个就是收藏，不发送。',
+          description: '想收下一张图就给它完整路径（只认收件箱和 media/ 这两个目录，你自己画在 media/draw/ 的也算；相对路径不行）。给了这个就是收藏，不发送，要发再调一次。',
         },
         saveName: {
           type: 'string',
@@ -197,7 +198,7 @@ export function registerMeme(ctx, deps = {}) {
         if (savePath) {
           const root = deps.root ?? rootDir()
           if (!insideHerDirs(savePath, root)) {
-            return { ok: false, picked: '', why: '', saved: false, note: '只收他递来的图（收件箱里的和你收过的 media/），别的路径不碰。' }
+            return { ok: false, picked: '', why: '', saved: false, note: '只收收件箱和 media/ 这两个目录里的完整路径（相对路径不行），别的路径不碰。' }
           }
           const ext = MEME_EXT.find((e) => savePath.toLowerCase().endsWith(e))
           if (!ext) {

@@ -61,6 +61,13 @@ test('工具注册了，而且写的是 meta 不是 utterance', async () => {
   assert.match(src, /MEME_MAX_BYTES/, '要有大小上限，否则 QQ 发不出去')
 })
 
+test('收藏口径按路径说真：她自己画在 media/draw/ 的图也算（11-08 她被旧话术劝退过）', async () => {
+  const src = await fs.readFile(new URL('../lib/meme.js', import.meta.url), 'utf8')
+  assert.ok(!src.includes('只收他递来的图'), '旧回执把她的画挡在门外')
+  assert.match(src, /完整路径/)
+  assert.match(src, /media\/draw\//)
+})
+
 test('listMood：按情绪筛出这一类的全部', () => {
   const names = ['生气-刀1.gif', '生气-抓狂.png', '开心-微笑.png', '说明.txt']
   assert.deepEqual(listMood(names, '生气').sort(), ['生气-刀1.gif', '生气-抓狂.png'])

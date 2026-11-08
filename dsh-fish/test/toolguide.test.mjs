@@ -9,6 +9,7 @@
  */
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { readFile } from 'node:fs/promises'
 import { TOOL_GUIDE, guideIndex, guideOf } from '../lib/toolguide.js'
 import { FISH_TOOLS } from '../lib/restrict.js'
 
@@ -48,4 +49,37 @@ test('说明书不写"你应该"——那是替她做判断', () => {
     .flatMap(([n, g]) => [n, g.brief, ...g.can, ...g.cant])
     .join('\n')
   assert.ok(!/你应该|你必须|记得要/.test(all), '说明书只写事实，不写指令')
+})
+
+/**
+ * fork.13 守卫（2026-11-08）：她画好白板后查了两次 her_help，
+ * 读到「收藏只认他递来的图」就断定自己画的发不出去——其实桥早有发图通路。
+ * 说明书互相打架 = 工具对她说了不真的话。这条把三处口径钉在一起。
+ */
+test('发图的路说真：her_say 有写法、her_draw 指向它、her_meme 不再拿来源挡她', () => {
+  const say = [...TOOL_GUIDE.her_say.can, ...TOOL_GUIDE.her_say.cant].join('\n')
+  assert.match(say, /!\[/, 'her_say 要写出图片 markdown 的写法')
+  assert.match(say, /media\//, '要写明只认 media/ 下的图')
+  assert.match(say, /跳过不发/, '桥静默跳过这件事也要如实告诉她')
+
+  const draw = [...TOOL_GUIDE.her_draw.can, ...TOOL_GUIDE.her_draw.cant].join('\n')
+  assert.match(draw, /her_say/, 'her_draw 指向现成的发图通路，不再只说表情库')
+  assert.match(draw, /只存不发/, '用户定案不能被动摇')
+
+  const meme = [...TOOL_GUIDE.her_meme.can, ...TOOL_GUIDE.her_meme.cant].join('\n')
+  assert.ok(!meme.includes('只认他递来的图'), '这句不真：代码按路径判定，她画的也在 media/ 下')
+  assert.match(meme, /完整路径/, '按路径说真')
+  assert.match(meme, /收藏本身不发送/, '收藏不等于发送')
+})
+
+test('工具回执与参数说明同步说真（只改 toolguide 不算修完）', async () => {
+  const meme = await readFile(new URL('../lib/meme.js', import.meta.url), 'utf8')
+  const draw = await readFile(new URL('../lib/draw.js', import.meta.url), 'utf8')
+  assert.ok(!meme.includes('只收他递来的图'), '旧回执把她的画挡在门外')
+  assert.ok(!meme.includes('只认他递来的'), '旧参数说明也要清干净')
+  assert.match(meme, /完整路径/)
+  assert.match(meme, /media\/draw\//)
+  assert.match(draw, /slashed\(out\)/, '回执要给可抄的正斜杠完整路径')
+  assert.match(draw, /没有发给他/, '只存不发仍要说清')
+  assert.match(draw, /her_say/, '回执要把发图通路指给她')
 })

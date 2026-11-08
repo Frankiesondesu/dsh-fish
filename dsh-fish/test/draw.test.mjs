@@ -70,6 +70,12 @@ test('真渲染：一张带字、框、箭头、圆的画，产出合法 PNG', {
     )
     assert.equal(out.ok, true, `应画成（note：${out.note}）`)
     assert.match(out.path, /media[\\/]draw[\\/]draw-\d{4}-\d{2}-\d{2}-\d{2}\.png$/)
+    // 11-08 fork.13：只写「存在 media/draw/」她拿不到可抄的路径，就会以为只能绕表情库。
+    const shown = out.path.replace(/\\/g, '/')
+    assert.match(out.note, /没有发给他/, '只存不发仍是定案')
+    assert.ok(out.note.includes(shown), '回执要给正斜杠的完整路径')
+    assert.match(out.note, /!\[白板\]\(/, '回执要给发图写法')
+    assert.match(out.note, /her_say/, '回执指向现成通路')
     const png = await readFile(out.path)
     // PNG 魔数：89 50 4E 47
     assert.deepEqual([...png.subarray(0, 4)], [0x89, 0x50, 0x4e, 0x47])

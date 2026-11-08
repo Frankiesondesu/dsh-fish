@@ -10,8 +10,9 @@
  *   ① PS 5.1 读无 BOM 的 UTF-8 脚本当 GBK——脚本必须带 BOM；
  *   ② 中文绝不走命令行——渲染参数走 UTF-8 job 文件（node 写、PS 读），命令行只有 ASCII 路径。
  *
- * 出口（用户定案）：**只存不发**。PNG 落 media/draw/，回执如实告诉她「没有发给他」；
- * 想给他看是她的事（收进表情库用 her_meme 发，或别的办法）。不写推送标记。
+ * 出口（用户定案）：**只存不发**。PNG 落 media/draw/，回执如实告诉她「没有发给他」，
+ * 并把完整路径与现成的发图写法给她（her_say 里写 ![说明](路径)，桥会单独发一张图）。
+ * 发不发她自己定；不写推送标记。
  */
 
 import { execFile } from 'node:child_process'
@@ -24,6 +25,7 @@ import { defineTool } from './tool.js'
 import { guardWrite } from './tenant.js'
 import { rootDir } from './store.js'
 import { logLine } from './log.js'
+import { slashed } from './posix.js'
 
 const runFile = promisify(execFile)
 
@@ -169,8 +171,8 @@ async function renderJob(job, outPath, log) {
 
 /** 输出文件名：draw-<日期>-<当天序号>.png，落在 media/draw/ 下。 */
 function outPathFor(root) {
-  // 落在 media/ 下是有意的：her_meme 收藏只认收件箱和 media/（meme.js 的路径规则）——
-  // 她想发给他时，把画收进表情库就能发（「只存不发」的前提下留给她的发送通道）。
+  // 落在 media/ 下是有意的：桥的 readLocalImage 只放行 media/（含子目录），
+  // her_meme 的收藏也认这个目录。所以「只存不发」之后，她想发是有现成路的。
   const dir = join(root, 'media', 'draw')
   mkdirSync(dir, { recursive: true })
   const dk = new Date().toISOString().slice(0, 10)
@@ -237,8 +239,14 @@ export function registerDraw(ctx, deps = {}) {
           const { out } = outPathFor(root)
           await renderJob(plan.job, out, log)
           logLine('info', [`her_draw：画了一张 ${plan.job.w}×${plan.job.h}，${plan.job.items.length} 笔 → ${basename(out)}`], root)
-          // 只存不发（用户定案）：回执里把这句话说清，别让她以为他已经看到了。
-          return { ok: true, path: out, note: '画好了，存在你的屋里（media/draw/）。没有发给他。' }
+          // 只存不发（用户定案）：回执如实说没发，并把完整路径给她——
+          // 只写「media/draw/」她拿不到可抄的路径，就会以为只能绕表情库（11-08 她真卡在这）。
+          const shown = slashed(out)
+          return {
+            ok: true,
+            path: out,
+            note: `画好了，存在 ${shown}。没有发给他。想发就把它写成 ![白板](${shown}) 放进 her_say，桥会把 media/ 下的图单独发成一条 QQ 图片消息。`,
+          }
         } catch (err) {
           logLine('warn', ['her_draw：', String(err?.message ?? err)], root)
           return { ok: false, path: '', note: '这次没画成。' }
