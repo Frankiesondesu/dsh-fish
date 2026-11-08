@@ -22,3 +22,6 @@ bridge/push-state.json
 # 系统垃圾
 Thumbs.db
 desktop.ini
+
+# 发布审计清单（含敏感值明文，永不入库）
+runtime/publish-readiness.md

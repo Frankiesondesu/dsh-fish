@@ -26,7 +26,7 @@ import { qqSaidOf, mergeSaid } from './said.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const FISH = join(HERE, '..', 'dsh-fish')
-// 2026-11-06：不再写死 C:/Users/<用户名>。换机/换盘/换用户名都靠这一步，
+// 2026-11-06：不再写死 <用户主目录>。换机/换盘/换用户名都靠这一步，
 // 优先级（DSH_FISH_HOME → 指针文件 → ~/.dsh-fish）见 shared/root.mjs。
 const ROOT = fishRoot()
 const DSH_SESSIONS = dshSessionsDir(ROOT)

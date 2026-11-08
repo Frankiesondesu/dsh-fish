@@ -26,12 +26,12 @@ import { execFileSync } from 'node:child_process'
 import { readFileSync, writeFileSync, unlinkSync, existsSync, appendFileSync, mkdirSync,
   copyFileSync, statSync, openSync, readSync, closeSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-// 2026-11-06：fishRoot 的默认值不再写死成 C:/Users/<用户名>。优先级见 shared/root.mjs
+// 2026-11-06：fishRoot 的默认值不再写死成 <用户主目录>。优先级见 shared/root.mjs
 // （DSH_FISH_HOME → ~/.dsh-fish-location.json → ~/.dsh-fish）。
 import { fishRoot as resolveFishRoot } from '../shared/root.mjs'
 import { dirname, join, isAbsolute } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { createPusher, pendingAskMatch, resolveAsk } from './push.mjs'
+import { createPusher } from './push.mjs'
 import { batchWait } from './batch-wait.mjs'
 import { classifySegments, displayName, ensureExt } from './attachment.mjs'
 import { readAsrConfig, ensureServer, transcribe } from './asr.mjs'
@@ -65,7 +65,7 @@ const DEFAULTS = {
   // 11-06：视频动辄几百 MB，原来 32MB 会把绝大多数视频挡在门外。
   // 单位字节，默认 512MB；超大文件若 OneBot 给的是本机路径，直接复制不进内存。
   fileMaxBytes: 512 * 1024 * 1024,
-  // 2026-11-06：默认值不再写死 C:/Users/<用户名>。config.json 里的 fishRoot
+  // 2026-11-06：默认值不再写死 <用户主目录>。config.json 里的 fishRoot
   // 仍然优先；只有在没配的时候才走 shared/root.mjs 那套（环境变量 → 指针 → ~/.dsh-fish）。
   fishRoot: resolveFishRoot(),
   fishPort: 0, // 0 = 自动发现
@@ -289,7 +289,8 @@ const MULTI_IMAGE_MAX = 6
 
 /** 她读图一次只能看一帧；动图（表情包）就把几帧拼成一张给她看 */
 const FFMPEG = String(process.env.DSH_FISH_FFMPEG ?? '').trim()
-  || 'C:\\Users\\<用户名>\\AppData\\Local\\Microsoft\\WinGet\\Links\\ffmpeg.exe'
+  || (process.env.LOCALAPPDATA ? join(process.env.LOCALAPPDATA, 'Microsoft', 'WinGet', 'Links', 'ffmpeg.exe') : '')
+  || 'ffmpeg'
 
 function isGif(buf) {
   return buf?.length > 6 && buf.subarray(0, 3).toString('latin1') === 'GIF'
@@ -1079,11 +1080,11 @@ async function onMessage(ev) {
   // 同一条结算（answerCard），不再让她问一天没人答。只认 1–2 位数字的精确
   // 命中；说别的照常递给她——**宁可漏答，不可错答**。
   if (text && text.length <= 2) {
-    const hit = pendingAskMatch(text)
+    const hit = pusher.pendingAskMatch(text)
     if (hit) {
       const r = await localAnswer(hit)
       if (r?.ok) {
-        resolveAsk(hit.askId)
+        pusher.resolveAsk(hit.askId)
         log(`卡已代答：${hit.askId} → 「${hit.selected}」`)
         await reply(ev, `已答「${hit.selected}」，她知道了。`, { strict: true })
         return

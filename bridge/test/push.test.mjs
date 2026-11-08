@@ -295,7 +295,11 @@ test('ask 推失败不进待答表（重推成功才登记，防拦到没推出�
 test('桥侧接线守卫：数字拦截 + /local/answer 调用都在', async () => {
   const { readFile } = await import('node:fs/promises')
   const src = await readFile(new URL('../bridge.mjs', import.meta.url), 'utf8')
-  assert.match(src, /pendingAskMatch, resolveAsk/, '从 push.mjs 引入匹配与结算')
+  // pendingAskMatch/resolveAsk 是 createPusher 实例的闭包方法——**不能**按模块导入
+  // （链接期直接崩，node --check 查不出；11-08 踩过，桥重启即挂）
+  assert.doesNotMatch(src, /import \{[^}]*pendingAskMatch/, '不许从 push.mjs 模块级导入实例方法')
+  assert.match(src, /pusher\.pendingAskMatch\(text\)/, '拦截要走 pusher 实例')
+  assert.match(src, /pusher\.resolveAsk\(hit\.askId\)/, '结算后要走实例方法清掉')
   assert.match(src, /\/dsh-fish\/local\/answer/, '要走插件 answerCard 的同一条路')
   assert.match(src, /text\.length <= 2/, '拦截必须限短消息')
   assert.match(src, /宁可漏答，不可错答/, '口径注释要在——下一个改这段的人得看到')

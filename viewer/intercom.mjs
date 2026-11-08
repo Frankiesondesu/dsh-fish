@@ -30,7 +30,7 @@ import { fishRoot, workbuddyPythons } from '../shared/root.mjs'
 
 const run = promisify(execFile)
 
-// 2026-11-06：不再写死 C:/Users/<用户名>。优先级见 shared/root.mjs。
+// 2026-11-06：不再写死 <用户主目录>。优先级见 shared/root.mjs。
 const ROOT = fishRoot()
 const KEY_FILE = join(ROOT, 'local.key')
 const AUDIO_DIR = join(ROOT, 'voice', 'intercom')
