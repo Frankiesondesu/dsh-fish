@@ -29,6 +29,11 @@ export const BACKUP_FORMAT = 'dsh-fish-backup/1'
 /** 不搬的目录（相对状态库根）。 */
 const SKIP_DIRS = new Set(['logs', 'backups', 'dsh-fish-backups', 'node_modules'])
 
+/** 不搬的单个文件（相对状态库根）。local.key 是本机通路的鉴权密钥（回环 + local.key）：
+ *  首次启动自动再生成，换机后各端重连即可。备份文件是最容易被传网盘/发微信的东西，
+ *  钥匙跟着走等于把「谁能冒充本机」一起打包——所以永远不搬，跳过原因在 skipped 里写明。 */
+const SKIP_FILES = new Set(['local.key'])
+
 /** 单个文件上限：8MB（头像 2MB 够用，日记再长也不该破这个数）。 */
 const MAX_FILE_BYTES = 8 * 1024 * 1024
 /** 备份总量上限：64MB。超了就别往一个 json 里塞了。 */
@@ -54,7 +59,20 @@ function stamp(now) {
  * 把状态库装进内存对象。
  * @returns {Promise<object>} `{ format, schema, createdAt, files, skipped, bytes }`
  */
-export async function collectBackup(root = rootDir(), { now = new Date() } = {}) {
+/**
+ * 核心包清单（2026-11-08，查看器「一键备份」用）：人格与记忆的数据面——
+ * 账本、配置、日记、便条、信箱 markdown、旁听缓存、账本指纹、身份文档、说明。
+ * 不含：收件箱/表情库/媒体等二进制（换个目录拷即可），不含 logs（同全量包口径）。
+ */
+const CORE_FILES = new Set([
+  'events.jsonl', 'config.json', 'home.json', 'notes.json', 'inbox.md',
+  'inbox-state.json', 'talk-recent.json', 'ledger-sha256.json', '说明.md',
+])
+const CORE_DIRS = new Set(['diary'])
+const isCorePath = (rel) =>
+  CORE_FILES.has(rel) || CORE_DIRS.has(rel.split('/')[0]) || rel === 'home/她的身份.md'
+
+export async function collectBackup(root = rootDir(), { now = new Date(), core = false } = {}) {
   const files = []
   const skipped = []
   let total = 0
@@ -79,6 +97,14 @@ export async function collectBackup(root = rootDir(), { now = new Date() } = {})
       }
       if (!e.isFile()) {
         skipped.push(`${rel}（不是普通文件）`)
+        continue
+      }
+      if (SKIP_FILES.has(rel)) {
+        skipped.push(`${rel}（不搬：本机钥匙，首次启动自动再生成）`)
+        continue
+      }
+      if (core && !isCorePath(rel)) {
+        skipped.push(`${rel}（核心包不收：非人格记忆数据，整目录拷贝即可）`)
         continue
       }
       let st

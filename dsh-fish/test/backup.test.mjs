@@ -220,3 +220,43 @@ test('界面与路由都接上了（别只写了个模块）', async () => {
   // 恢复必须走「先封存」那条路，不许直接覆盖
   assert.match(o, /restoreBackup\(b, root\)/)
 })
+
+// ---------------------------------------------------------------- 钥匙不进包 + 核心包（2026-11-08）
+
+test('备份永不携带 local.key（本机钥匙跟着备份走 = 谁拿到谁能冒充本机）', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'fish-bk-'))
+  try {
+    await writeFile(join(root, 'local.key'), 'a'.repeat(48), 'utf8')
+    await writeFile(join(root, 'events.jsonl'), JSON.stringify({ id: 'ev_1', type: 'seed', text: '起', ts: new Date().toISOString() }) + '\n', 'utf8')
+    const b = await collectBackup(root)
+    assert.equal(b.files.some((f) => f.path === 'local.key'), false, '钥匙不许进包')
+    assert.ok(b.skipped.some((s) => s.startsWith('local.key') && s.includes('本机钥匙')), '跳过原因要写明（人要看）')
+  } finally {
+    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
+  }
+})
+
+test('core 档：人格与记忆的数据面收进来，二进制与钥匙不收', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'fish-bk-core-'))
+  try {
+    await writeFile(join(root, 'events.jsonl'), JSON.stringify({ id: 'ev_1', type: 'seed', text: '起', ts: new Date().toISOString() }) + '\n', 'utf8')
+    await writeFile(join(root, 'config.json'), '{}', 'utf8')
+    await writeFile(join(root, 'notes.json'), '[]', 'utf8')
+    await mkdir(join(root, 'diary'), { recursive: true })
+    await writeFile(join(root, 'diary', '2026-11-08.md'), '# 日记', 'utf8')
+    await mkdir(join(root, 'memes'), { recursive: true })
+    await writeFile(join(root, 'memes', 'm1.png'), Buffer.from([0x89, 0x50, 0x4e, 0x47]))
+    await writeFile(join(root, 'local.key'), 'k'.repeat(48), 'utf8')
+
+    const b = await collectBackup(root, { core: true })
+    const paths = b.files.map((f) => f.path)
+    assert.ok(paths.includes('events.jsonl') && paths.includes('config.json') && paths.includes('notes.json'))
+    assert.ok(paths.some((p) => p.startsWith('diary/')), '日记要进核心包')
+    assert.equal(paths.some((p) => p.startsWith('memes/')), false, '表情库不进核心包（整目录拷贝即可）')
+    assert.equal(paths.includes('local.key'), false)
+    // 恢复路径不区分档：核心包也必须能被 restore 读（format/schema 一致，天然兼容）
+    assert.equal(b.format, 'dsh-fish-backup/1')
+  } finally {
+    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
+  }
+})
