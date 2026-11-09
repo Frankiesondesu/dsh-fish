@@ -95,6 +95,18 @@ test('私人层不在索引里（HANDOFF / journal / ref 都在仓外）', () =>
   )
 })
 
+test('上游公开示例放行，形近值与真值判据仍拦', () => {
+  // 白名单成员（运行时拼出来——本文件也在扫描范围内，不许写字面量）
+  assert.equal(scanText(['C:', 'Users', 'me'].join('/'), []).length, 0)
+  assert.equal(scanText('138' + '12345678', []).length, 0)
+  // 形近的非白名单值照样拦：白名单是精确整串匹配
+  assert.equal(scanText(['C:', 'Users', 'mee'].join('/'), []).length, 1)
+  assert.equal(scanText('138' + '12345679', []).length, 1)
+  // 真值判据永不放行：模式哪怕指到白名单字符串也要命中
+  const injected = [{ src: '记号', re: /13812345678/i }]
+  assert.equal(scanText('138' + '12345678', injected).length, 1)
+})
+
 test('全仓扫一遍：零命中（防空跑）', () => {
   const { hits, scanned, skipped } = scanTree()
   const tracked = trackedOnDisk().length

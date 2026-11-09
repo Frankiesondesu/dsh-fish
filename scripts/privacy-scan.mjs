@@ -53,6 +53,24 @@ const ALLOW_PHONES = new Set([
 ])
 
 /**
+ * 上游公开示例白名单（精确匹配整串）：上游 dsh-fish 源码里的占位示例
+ * （`C:\Users\me` / `a.b@c.com` / 教科书假号这类），形态判据按形状会误伤它们。
+ * 只对**形态**判据生效——真值判据（PATTERNS）永不放行，撞上白名单也拦。
+ * 字符串在运行时拼出来：本文件自己也在扫描范围内，写死字面量等于自触发。
+ */
+const BS = String.fromCharCode(92) // 反斜杠
+const ALLOW_UPSTREAM_EXAMPLES = new Set([
+  ['C:', 'Users', 'me'].join('/'),
+  ['C:', 'Users', 'me'].join(BS),
+  ['C:', 'Users', 'me'].join(BS + BS), // JSON 转义形态（测试夹具里出现）
+  ['C:', 'Users', '你'].join('/'),
+  ['C:', 'Users', '你'].join(BS),
+  ['C:', 'Users', '…'].join('/'),
+  ['a.b', 'c.com'].join('@'),
+  '138' + '12345678',
+])
+
+/**
  * 路径里这么一段，算「占位符」而不是真人名：
  * `<用户名>` `%USERPROFILE%` `$HOME` `USERNAME` `YOUR_NAME` `你的名字`。
  * 都是人写文档时的习惯写法——真名不会写成全大写，也不会带尖括号。
@@ -180,7 +198,10 @@ export function scanText(text, patterns = []) {
   const hits = []
   const lineOf = lineLocator(text)
   for (const g of GENERIC) {
-    for (const h of g.find(text)) hits.push({ kind: g.kind, match: h.match, line: lineOf(h.index) })
+    for (const h of g.find(text)) {
+      if (ALLOW_UPSTREAM_EXAMPLES.has(h.match)) continue // 上游公开示例，精确整串才放行
+      hits.push({ kind: g.kind, match: h.match, line: lineOf(h.index) })
+    }
   }
   for (const p of patterns) {
     // p.re 是 /i 的；matchAll 要求 /g，这里克隆一份，别改调用方传进来的对象
