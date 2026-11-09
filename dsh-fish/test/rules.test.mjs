@@ -285,18 +285,18 @@ test('fork.38 的反面：省主语只认转折词后，第三人称照样挡', 
   assert.equal(m.facts.wont, 0, '扩表不能把这三类放进来')
 })
 
-test('fork.38：parseRefusal 能从她自己的说法里拆出动作', () => {
+test('fork.38：parseRefusal 能从一句拒绝里拆出动作', () => {
   assert.equal(parseRefusal('我不打算拿它当正事办').act, '拿')
   assert.equal(parseRefusal('不接受「说到就到」').act, '接受')
   assert.equal(parseRefusal('我不想变成见谁都说好话的人').act, '变成')
 })
 
-test('fork.39：她真用过的改口说法也要认（账本原句）', () => {
-  // 这两句都是她自己承认判断有误，一句都没算进 corrected——
+test('fork.39：非标准句式的改口也要认', () => {
+  // 这两句都是自己承认判断有误，一句都没算进 corrected——
   // 因为判据只认「我错了 / 更正 / 其实不是」这类标准认错句式。
   const m = modelOf([
-    ev('utterance', 1, { text: '得改口一点：原先觉得这个说法凉，后来发现凉的是别处。' }),
-    ev('utterance', 2, { text: '想了想，是我砍过头了：嫌长就一路往短里砍。' }),
+    ev('utterance', 1, { text: '那我得改口一点：原先觉得这个说法凉，后来发现凉的是别处。' }),
+    ev('utterance', 2, { text: '我想了想，是我砍过头了：嫌长就一路往短里砍。' }),
   ])
   assert.equal(m.corrected, 2, '改口 / 砍过头 各算一次')
 })
@@ -305,7 +305,7 @@ test('fork.39 的反面：描述别人的改动、或者只是要改别的东西
   const m = modelOf([
     ev('utterance', 1, { text: '他改了一处文案，把「记不清」换成了「没摆在这儿」。' }),
     ev('utterance', 2, { text: '这个设置得改到晚上再生效。' }),
-    // 真机原句：她在这里说的是"这套机制怎么改口"，不是她改了口。
+    // 真机原句：说的是"这套机制怎么改口"，不是自己改了口。
     // 第一版把「改口」单放，这句被误算成一次 corrected。
     ev('utterance', 3, { text: '旧的不能删，改口就是再记一条。' }),
   ])

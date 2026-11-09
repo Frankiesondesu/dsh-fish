@@ -39,7 +39,7 @@ test('字面兜底：整词对不上时，看字面重合', () => {
   assert.equal(rows.length, 1, '重合够多就该翻到')
   assert.equal(rows[0].id, 'ev_2')
   // 虚字不算：全是"的了是我你"这种，不该被当成相关
-  assert.equal(looseScore('拿掉屏风不是更好', '的了是我你'), 0)
+  assert.equal(looseScore('拿掉挡板不是更好', '的了是我你'), 0)
 })
 
 test('经历也能翻到：saw: / watched: 进回忆，seen: 不进', () => {
