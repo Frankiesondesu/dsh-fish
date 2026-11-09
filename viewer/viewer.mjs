@@ -191,7 +191,7 @@ async function buildData() {
 
   let model = null
   try {
-    const { deriveSelf } = await import('file://' + join(FISH, 'lib', 'derive.js').replace(/\\/g, '/'))
+    const { deriveSelfCached } = await import('file://' + join(FISH, 'lib', 'derive.js').replace(/\\/g, '/'))
     const { loadConfig } = await import('file://' + join(FISH, 'lib', 'settings.js').replace(/\\/g, '/'))
     const cfg = (await loadConfig(ROOT)).config
     model = deriveSelfCached(events, { growthDays: cfg.growthDays })
