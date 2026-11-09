@@ -318,7 +318,7 @@ window.__ModuleLoader__.load({
       const [rules, setRules] = useState(null)
       const [st, setSt] = useState(null)
       const [rotateAfter, setRotateAfter] = useState(40)
-      const [rotateWhenKB, setRotateWhenKB] = useState(800)
+      const [rotateWhenKB, setRotateWhenKB] = useState(1024)
       const [docBudget, setDocBudget] = useState(2400)
       const [beliefsShown, setBeliefsShown] = useState(3)
       // 旁听（A2，2026-10-30）：每几轮记一句你说过的话（0 = 不记）
@@ -718,7 +718,7 @@ window.__ModuleLoader__.load({
           setCommentReplyTo(cfg.comment?.replyToReplies !== false)
           setCommentScanMin(Number(cfg.comment?.scanEveryMin ?? 30))
           setRotateAfter(Number(cfg.chat?.rotateAfter ?? 40))
-          setRotateWhenKB(Number(cfg.chat?.rotateWhenKB ?? 800))
+          setRotateWhenKB(Number(cfg.chat?.rotateWhenKB ?? 1024))
           setReplyChars(Number(cfg.chat?.replyChars ?? 0))
           setUiHintDismissed(cfg.ui?.ownerHintDismissed === true)
           setToolsAllowText((cfg.tools?.allow ?? []).join(', '))
@@ -2812,7 +2812,7 @@ window.__ModuleLoader__.load({
             Num({ label: '聊满多少轮换新会话', value: rotateAfter, onChange: setRotateAfter, min: 0, max: 500, unit: '轮',
               hint: '请在不断的循环中，找到能引发本质变化的唯一解。0 = 永不换——那条会话会一直聊到宿主上下文撑不住为止，之后这一轮会直接失败（不会自动换）。换的时候会把当前已形成的核心认知和初始信息，作为提示词带到新会话。' }),
             Num({ label: '会话内容多大换新', value: rotateWhenKB, onChange: setRotateWhenKB, min: 0, max: 5000, step: 100, unit: 'KB',
-              hint: '0 = 不看大小，只按轮数换。轮数和上下文大小不严格挂钩——一轮里调很多次工具也会把上下文顶爆。量的是会话日志里会进上下文的内容总量（估），和上面的轮数谁先到谁生效。默认 800KB 是 2026-11-09 那次「一天 8700 万 tokens」事故反推的保守值。' }),
+              hint: '0 = 不看大小，只按轮数换。轮数和上下文大小不严格挂钩——一轮里调很多次工具也会把上下文顶爆。量的是会话日志里会进上下文的内容总量（估），和上面的轮数谁先到谁生效。默认 1MB（2026-11-10 计量修准后从 800KB 调上来，800 是旧口径虚高时的保守值）。' }),
             Num({ label: '单次上下文限制（身份文档多少字）', value: docBudget, onChange: setDocBudget, min: 600, max: 4000, step: 100, unit: '字',
               hint: '超了按照规则遗忘部分认知/经历；「初始人格」和四条禁令不会遗忘。根据经历不同，部分认知可能会变成永久记忆不再遗忘。' }))),
 
