@@ -11,7 +11,7 @@ test('qqSaidOf：剥「（她说）」前缀；旧前缀「（她主动说）」
   const ev = (id, source, text) => ({ id, type: 'utterance', source, text, ts: '2026-11-07T03:24:08.825Z' })
   const got = qqSaidOf([
     ev('ev_1', 'tool', '（她说）好。那就这么定了。'),
-    ev('ev_2', 'tool', '（她主动说）七点三十八。今天周五。'),
+    ev('ev_2', 'tool', '（她主动说）窗开着。今天风大。'),
     // 内心判断：growth_commit 也落 utterance+tool，但没有推送前缀——不是说给他听的
     ev('ev_3', 'tool', '我今天有点累。'),
     // 系统补写的 utterance（主动回合没开口那种）不该混进来
@@ -20,7 +20,7 @@ test('qqSaidOf：剥「（她说）」前缀；旧前缀「（她主动说）」
   ])
   assert.deepEqual(got.map((g) => g.id), ['ev_1', 'ev_2'], 'ev_4 是 system，ev_3 没前缀，ev_5 不是 utterance')
   assert.equal(got[0].text, '好。那就这么定了。')
-  assert.equal(got[1].text, '七点三十八。今天周五。')
+  assert.equal(got[1].text, '窗开着。今天风大。')
   assert.equal(got[0].at, Date.parse('2026-11-07T03:24:08.825Z'))
 })
 
