@@ -36,6 +36,7 @@ import { commentCountToday, replyCountToday, herComments, scanReplies } from './
 import { describeState, resetAll } from './reset.js'
 // 迁移工作区（2026-10-28，用户 m06510）：把整个数据目录搬到别的盘。
 import { moveRoot, moveStatus } from './move.js'
+import { sessionSurfaceBytes } from './rotate.js'
 import { identityText, detachOutside, liveAgentOf, attachIdentity, attachAwayGuard, mountedCount } from './identity.js'
 import { awayNow, awayLine, startOuting, endOuting, bindOutingSession, abortOuting, readOutings, readPossessions, activePossessionOf, pendingPossessionOf, settlePendingPossession, snapshotEvents, verifyEvents, eventsSince, lastOutingForCwd, rejectNoteText, outingClosedText, tripDays, tripNoOf, pendingOf, settlePending } from './outing.js'
 // 出门口袋（0.6.16 从本文件搬出去，为了能用假 registry 直接测「登记失败仍能出门」）。
@@ -1280,7 +1281,19 @@ export function registerObserve(ctx, deps = {}) {
         events: countEvents(events).real,
         eventsAll: countEvents(events).all,
         diaries: diary.length,
-        session: { turns: h.turns, rotateAfter: Number(config?.chat?.rotateAfter ?? 0), rotatedAt: h.rotatedAt },
+        // 会话轮换状态（2026-11-09 加大小触发器）：两个阈值 + 当前内容大小一起给出去，
+        // 面板才能显示「离换会话还有多远」。量大小走 rotate.js 的 mtime+size 缓存，轮询不贵。
+        session: (() => {
+          const rotateWhenKB = Number(config?.chat?.rotateWhenKB ?? 0)
+          const surfaceBytes = rotateWhenKB > 0 ? sessionSurfaceBytes(root, h.sessionId) : null
+          return {
+            turns: h.turns,
+            rotateAfter: Number(config?.chat?.rotateAfter ?? 0),
+            rotateWhenKB,
+            surfaceKB: surfaceBytes == null ? null : Math.round(surfaceBytes / 1024),
+            rotatedAt: h.rotatedAt,
+          }
+        })(),
         sleep: {
           everyDays: Number(config?.memory?.sleepEveryDays ?? 0),
           last: lastSleep ? String(lastSleep.text).slice(6, 16) : '',

@@ -821,8 +821,8 @@ test('设置页切页不能把判据 showTab 当成开关用（issue #12）', as
 
 test('时段控件下面补一行 24 小时制：00:00 不会被读成中午十二点', async () => {
   // 「每天几点醒」在「生长」页（lib/client.js 里 growPage 那张卡），默认停在「状态」页，
-  // 得把 tab 拨过去。tab 是本组件第 44 个 useState（lib/client.js:361，0 基下标 43）。
-  const react = fakeReact({ 43: 'grow' })
+  // 得把 tab 拨过去。tab 是本组件第 45 个 useState（2026-11-09 加 rotateWhenKB 后从 44 挪到 45，0 基下标 44）。
+  const react = fakeReact({ 44: 'grow' })
   const { exports } = await loadClient({ react })
   react.resetCursor()
   const txt = textOf(exports.FishSection()).join(' ')

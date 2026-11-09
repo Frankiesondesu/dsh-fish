@@ -318,6 +318,7 @@ window.__ModuleLoader__.load({
       const [rules, setRules] = useState(null)
       const [st, setSt] = useState(null)
       const [rotateAfter, setRotateAfter] = useState(40)
+      const [rotateWhenKB, setRotateWhenKB] = useState(800)
       const [docBudget, setDocBudget] = useState(2400)
       const [beliefsShown, setBeliefsShown] = useState(3)
       // 旁听（A2，2026-10-30）：每几轮记一句你说过的话（0 = 不记）
@@ -717,6 +718,7 @@ window.__ModuleLoader__.load({
           setCommentReplyTo(cfg.comment?.replyToReplies !== false)
           setCommentScanMin(Number(cfg.comment?.scanEveryMin ?? 30))
           setRotateAfter(Number(cfg.chat?.rotateAfter ?? 40))
+          setRotateWhenKB(Number(cfg.chat?.rotateWhenKB ?? 800))
           setReplyChars(Number(cfg.chat?.replyChars ?? 0))
           setUiHintDismissed(cfg.ui?.ownerHintDismissed === true)
           setToolsAllowText((cfg.tools?.allow ?? []).join(', '))
@@ -852,7 +854,7 @@ window.__ModuleLoader__.load({
         video: { enabled: videoOn, perDay: Number(videoPerDay), offPeakPerDay: Number(videoOffPeak) },
         bili: { minIntervalMs: Number(biliMinGap), jitterMs: Number(biliJitter) },
         notify: { enabled: notifyOn },
-        chat: { rotateAfter: Number(rotateAfter), replyChars: Number(replyChars) },
+        chat: { rotateAfter: Number(rotateAfter), rotateWhenKB: Number(rotateWhenKB), replyChars: Number(replyChars) },
         tools: { restrict: Boolean(toolsRestrict), allow: toolsAllowSaved },
         memory: { docBudget: Number(docBudget), sleepEveryDays: Number(sleepEvery), sleepKeep: Number(sleepKeep), beliefsShown: Number(beliefsShown), hearEvery: Number(hearEvery) },
         comment: {
@@ -885,6 +887,7 @@ window.__ModuleLoader__.load({
         ['高峰时段每天看几条', videoPerDay, 0, 6],
         ['空闲时段每天看几条', videoOffPeak, 0, 12],
         ['多少轮换会话', rotateAfter, 0, 500],
+        ['会话多大换新（KB）', rotateWhenKB, 0, 5000],
         ['每轮最多写多少字', replyChars, 0, 2000],
         ['上下文上限', docBudget, 600, 4000],
         ['一次看见几条', beliefsShown, 1, 8],
@@ -2808,6 +2811,8 @@ window.__ModuleLoader__.load({
           h('div', { className: 'grid2' },
             Num({ label: '聊满多少轮换新会话', value: rotateAfter, onChange: setRotateAfter, min: 0, max: 500, unit: '轮',
               hint: '请在不断的循环中，找到能引发本质变化的唯一解。0 = 永不换——那条会话会一直聊到宿主上下文撑不住为止，之后这一轮会直接失败（不会自动换）。换的时候会把当前已形成的核心认知和初始信息，作为提示词带到新会话。' }),
+            Num({ label: '会话内容多大换新', value: rotateWhenKB, onChange: setRotateWhenKB, min: 0, max: 5000, step: 100, unit: 'KB',
+              hint: '0 = 不看大小，只按轮数换。轮数和上下文大小不严格挂钩——一轮里调很多次工具也会把上下文顶爆。量的是会话日志里会进上下文的内容总量（估），和上面的轮数谁先到谁生效。默认 800KB 是 2026-11-09 那次「一天 8700 万 tokens」事故反推的保守值。' }),
             Num({ label: '单次上下文限制（身份文档多少字）', value: docBudget, onChange: setDocBudget, min: 600, max: 4000, step: 100, unit: '字',
               hint: '超了按照规则遗忘部分认知/经历；「初始人格」和四条禁令不会遗忘。根据经历不同，部分认知可能会变成永久记忆不再遗忘。' }))),
 
@@ -2857,8 +2862,14 @@ window.__ModuleLoader__.load({
                   // issue #32：口径同面板标题那行——含她读到的别人说法与开局起点，不只她写的。
                   h('div', { title: '她自己写的判断、留话、日记，加上她读到并记下的别人说法和开局那份起点；不含系统后台记账。' },
                     `· 记下的事：${mem.events ?? 0} 条 · 日记 ${mem.diaries ?? 0} 篇`),
-                  h('div', null, `· 这条会话：${mem.session?.rotateAfter > 0
-                    ? `${mem.session?.turns ?? 0} / ${mem.session.rotateAfter} 轮，满了自动换新会话`
+                  h('div', null, `· 这条会话：${
+                    (mem.session?.rotateAfter > 0 || mem.session?.rotateWhenKB > 0)
+                    ? [
+                        mem.session?.rotateAfter > 0 ? `${mem.session?.turns ?? 0} / ${mem.session.rotateAfter} 轮` : '不限轮数',
+                        mem.session?.rotateWhenKB > 0
+                          ? `内容约 ${mem.session?.surfaceKB ?? '?'} KB / ${mem.session.rotateWhenKB} KB`
+                          : null,
+                      ].filter(Boolean).join('，') + '，满了自动换新会话'
                     : '不自动换'}`),
                   h('div', null, `· 回头想：${(mem.sleep?.everyDays ?? 0) > 0
                     ? `每 ${mem.sleep.everyDays} 天一次${mem.sleep.last ? `，上次 ${mem.sleep.last}` : ''}`

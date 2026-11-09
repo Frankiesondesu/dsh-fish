@@ -32,6 +32,7 @@ import { deriveSelfCached } from './derive.js'
 import { writeInboxFile, newHerEventsSince } from './inbox.js'
 import { assistantText } from './turns.js'
 import { bumpTurns, rotateTalkSession, talkSessionId, homeStatus } from './home.js'
+import { shouldRotate, sessionSurfaceBytes } from './rotate.js'
 import { addExchange } from './talkmem.js'
 import { hearTurn } from './hear.js'
 import { logExchange } from './talklog.js'
@@ -595,16 +596,25 @@ export async function sayToHer(ctx, text, deps = {}) {
         {},
       ).catch(() => null)
     }
-    const rotateAfter = Number(config?.chat?.rotateAfter ?? 0)
-    if (!foreign && rotateAfter > 0 && turns >= rotateAfter) {
+    // 换会话两个触发器（2026-11-09）：轮数 + 会话内容大小，谁先到谁生效（见 rotate.js）。
+    const rotateWhenKB = Number(config?.chat?.rotateWhenKB ?? 0)
+    const surfaceBytes = rotateWhenKB > 0 ? sessionSurfaceBytes(root, sessionId) : null
+    const dec = shouldRotate({
+      turns,
+      rotateAfter: Number(config?.chat?.rotateAfter ?? 0),
+      surfaceBytes,
+      rotateWhenKB,
+    })
+    if (!foreign && dec.rotate) {
       // from：这句话落在哪条会话里。另一条入口（turns 结账）抢先换过的话，
       // Home 会拿这个 id 和 home.json 比对，直接跳过，不再多建一条（0.8.8）。
+      const reached = dec.why === 'turns' ? `聊满 ${turns} 轮` : `会话内容到了 ${dec.kb} KB`
       const rot = await rotateTalkSession(ctx, { root, wsId: deps.wsId, log, from: sessionId })
       if (rot.ok && !rot.skipped) {
         rotated = rot.old
         // 标题以实际改出来的为准：TITLE_SESSION 在 0.7.x 从「跟她说话」改成了
         // 「跟大肥鱼说话」，这里还写死着旧名字，用户会照着去找一条不存在的会话。
-        note = `${note}${note ? ' ' : ''}（聊满 ${turns} 轮，换了个新会话；上一段还在侧栏里，叫「跟大肥鱼说话·${dateKey()} 之前」）`
+        note = `${note}${note ? ' ' : ''}（${reached}，换了个新会话；上一段还在侧栏里，叫「跟大肥鱼说话·${dateKey()} 之前」）`
         // 新会话要把「上次说到这」带上——身份文档变了才会被宿主重读
         await refreshSelfDoc(root, { log }).catch(() => {})
       } else if (rot.ok && rot.skipped) {

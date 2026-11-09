@@ -48,6 +48,7 @@ import { loadConfig, dateKey } from './settings.js'
 import { parseWatchIntent, handText, extractBvids } from './intent.js'
 import { recordHandFromLink } from './hand.js'
 import { homeStatus, bumpTurns, rotateTalkSession, adoptTalkSession } from './home.js'
+import { shouldRotate, sessionSurfaceBytes } from './rotate.js'
 import { addExchange } from './talkmem.js'
 import { logExchange } from './talklog.js'
 import { newHerEventsSince } from './inbox.js'
@@ -523,32 +524,45 @@ export function registerTurns(ctx, deps = {}) {
         config,
         log,
       })
-      const rotateAfter = Number(config?.chat?.rotateAfter ?? 0)
-      if (!(rotateAfter > 0) || turns < rotateAfter) return
+      // 换会话两个触发器（2026-11-09 加第二个）：轮数（chat.rotateAfter）和
+      // 会话内容大小（chat.rotateWhenKB）——轮数和大小不严格挂钩（一轮能调很多次
+      // 工具），大小那个是 11-09 token 事故（449 轮没换、一天 8700 万 tokens）的补丁。
+      // 量大小要解会话日志（有 mtime+size 缓存），阈值关着就不花这个钱。
+      const rotateWhenKB = Number(config?.chat?.rotateWhenKB ?? 0)
+      const surfaceBytes = rotateWhenKB > 0 ? sessionSurfaceBytes(root, p.sessionId) : null
+      const dec = shouldRotate({
+        turns,
+        rotateAfter: Number(config?.chat?.rotateAfter ?? 0),
+        surfaceBytes,
+        rotateWhenKB,
+      })
+      if (!dec.rotate) return
 
       // 该换会话了。换失败不算错：她还在旧会话里，下次再换。
       // from：这一轮是从哪条会话里结出来的。`/say` 那边可能刚刚换过，
       // Home 比对 home.json 之后会返回 skipped，这里就别再建第二条（0.8.8）。
       const st = await homeStatus(root)
       const rot = await rotateTalkSession(ctx, { root, wsId: st.wsId, log, from: p.sessionId })
+      const reached = dec.why === 'turns' ? `聊满 ${turns} 轮` : `会话内容到了 ${dec.kb} KB`
       if (!rot.ok) {
-        log(`turns · 聊满 ${turns} 轮，该换会话但没换成：${rot.why}`)
+        log(`turns · ${reached}，该换会话但没换成：${rot.why}`)
         return
       }
       if (rot.skipped) {
-        log(`turns · 聊满 ${turns} 轮，但屋子已经先换过了（${rot.sessionId}），这条不再换`)
+        log(`turns · ${reached}，但屋子已经先换过了（${rot.sessionId}），这条不再换`)
         return
       }
       // 留一条 meta：换会话这件事要能在事件流里查到（观测台/排查用）。
       // source 必须是 system——'tool' 会被 schema 拒掉。
+      // 轮数触发记轮数（旧格式不动），大小触发记 KB。
       await appendEvent(
-        { type: 'meta', text: `rotate:${turns}:${rot.sessionId}` },
+        { type: 'meta', text: dec.why === 'turns' ? `rotate:${turns}:${rot.sessionId}` : `rotate:kb${dec.kb}:${rot.sessionId}` },
         { day: 0, stage: 1, source: 'system' },
         root,
       ).catch(() => {})
       // 新会话要读到新的身份文档（「上次说到这」在里面）
       await refreshSelfDoc(root, { log }).catch(() => {})
-      log(`turns · 聊满 ${turns} 轮，换了个新会话（旧 ${rot.old || '?'} → 新 ${rot.sessionId}）`)
+      log(`turns · ${reached}，换了个新会话（旧 ${rot.old || '?'} → 新 ${rot.sessionId}）`)
     } catch (err) {
       log('turns · 结账失败', err?.message ?? err)
     } finally {

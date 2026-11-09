@@ -531,6 +531,10 @@ export async function writeSay(root, { text = '', refs = [], sessionId = '', why
   const body = String(text ?? '').trim()
   if (!body) return { ok: false, note: '把想说的话写出来再记。' }
   if (body.length > PROACTIVE_MAX) return { ok: false, note: `一句最多 ${PROACTIVE_MAX} 字，说短一点。` }
+  // 2026-11-09（用户）：写几行就按行拆成几条发——换行就是分条，空行不算。
+  // 11-07 那次定的是「桥不按空行替她拆」（桥侧不动，这条仍真）；现在拆条的活
+  // 挪进工具自己：一行一条 utterance，推送按事件逐条发，QQ 上就是一条一条的。
+  const lines = body.split(/\r?\n/).map((s) => s.trim()).filter(Boolean)
   const list = (Array.isArray(refs) ? refs : []).map((x) => String(x ?? '').trim()).filter(Boolean)
   if (list.length > PROACTIVE_REFS_MAX) return { ok: false, note: `一条最多引 ${PROACTIVE_REFS_MAX} 件事。` }
 
@@ -548,6 +552,8 @@ export async function writeSay(root, { text = '', refs = [], sessionId = '', why
   // 2026-11-07（用户）：maxPerDay 不再拦截——her_say 现在是他 QQ 上能看到她说话的
   // 唯一通路，回复也走这里，2 次/天的闸会把回复挡死。拦截拆掉；`proactive-say:`
   // 记账行照旧落（不再是配额计数器，但仍是「她今天开口几次」的凭据，统计认它）。
+  // 拆条后一轮（一次调用）仍只落一条 proactive-say——「开口几次」数的是说话这件事，
+  // 不是消息条数。
   // 开关（enabled）本来就只管「要不要自己开一轮」，不管这个工具。
   // day/stage 必须是真实的成长坐标（2026-11-06，issue #41）：原来写死 {day:1, stage:1}，
   // 而 writeDream 用的是 deriveSelf 的 model.day/model.stage。写死的那条会被
@@ -556,18 +562,30 @@ export async function writeSay(root, { text = '', refs = [], sessionId = '', why
   const stamp = { day: model.day, stage: model.stage, source: 'tool' }
   // appendEvent 返回的就是写进去的那条事件（不是 {ok, event}，0.7.4 那次参数错位就是栽在这），
   // 所以判空只能判返回值本身。
-  const stored = await appendEvent(
-    { type: 'utterance', text: `（她说）${body}`, refs: list, ...(sessionId ? { sessionId } : {}) },
-    stamp,
-    root,
-  ).catch(() => null)
-  if (!stored?.id) return { ok: false, note: '这条没记下。' }
+  const stored = []
+  for (const line of lines) {
+    const one = await appendEvent(
+      { type: 'utterance', text: `（她说）${line}`, refs: list, ...(sessionId ? { sessionId } : {}) },
+      stamp,
+      root,
+    ).catch(() => null)
+    // 第一条就失败 = 整次没记下；中间某条失败 = 发出去的部分照实报（partial）
+    if (!one?.id) break
+    stored.push(one)
+  }
+  if (!stored.length) return { ok: false, note: '这条没记下。' }
   await appendEvent(
     { type: 'meta', text: `proactive-say:${dk}:${why || 'free'}` },
     { day: model.day, stage: model.stage, source: 'system' },
     root,
   ).catch(() => {})
-  return { ok: true, id: stored.id, note: '发出去了。' }
+  return {
+    ok: true,
+    id: stored[0].id,
+    count: stored.length,
+    ...(stored.length < lines.length ? { partial: true } : {}),
+    note: stored.length > 1 ? `${stored.length} 条发出去了。` : '发出去了。',
+  }
 }
 
 /**
@@ -581,7 +599,7 @@ export function registerProactive(ctx, deps = {}) {
     defineTool({
       name: 'her_say',
       description: [
-        '把一句话发到他的 QQ 上：一次调用就是一条消息，想分几条说就调几次。',
+        '把话发到他的 QQ 上：写几行就按行拆成几条发，一行一条（空行不算）；想一次只发一条就写成一行。',
         '主动开口（没人找你，你自己想说）和回复他，都用这个——桥不再替你转接，窗口里的正文他看不到。',
         '可以给 refs 指认这条话锚在哪几件真实的事上（1–6 条事件 id，用 her_recall 翻得到）；给了就校验，瞎指会被拒。',
         '桥没开的时候写下了也送不出去——不会报错，但那条到不了他那儿。',
@@ -589,7 +607,7 @@ export function registerProactive(ctx, deps = {}) {
       parameters: toJsonSchema({
         type: 'object',
         properties: {
-          text: { type: 'string', minLength: 1, maxLength: PROACTIVE_MAX, description: '你要说的那句话。' },
+          text: { type: 'string', minLength: 1, maxLength: PROACTIVE_MAX, description: '你要说的话。写几行就按行拆成几条发，一行一条，空行不算。' },
           refs: {
             type: 'array',
             maxItems: PROACTIVE_REFS_MAX,
@@ -606,6 +624,7 @@ export function registerProactive(ctx, deps = {}) {
           properties: {
             ok: { type: 'boolean' },
             id: { type: 'string' },
+            count: { type: 'number', description: '这次拆出去几条（按行拆，空行不算）。' },
             note: { type: 'string' },
           },
           required: ['ok', 'note'],
@@ -620,7 +639,7 @@ export function registerProactive(ctx, deps = {}) {
         // 回执只说它真做到的那件事。
         // 2026-11-06（PR #44）：配了 sendTools 的部署里她必须靠工具发话，所以记下的这句确实
         // 没有发给任何人，回执要说清，否则她会以为用户已经看到了。
-        render: (_args, out) => [{ type: 'text', text: out.ok ? (out.recordOnly === true ? '[记下了，没有发给任何人]' : '[发出去了]') : `[没发出去：${out.note}]` }],
+        render: (_args, out) => [{ type: 'text', text: out.ok ? (out.recordOnly === true ? (out.count > 1 ? `[记下了 ${out.count} 条，没有发给任何人]` : '[记下了，没有发给任何人]') : out.count > 1 ? `[发出去了，共 ${out.count} 条]` : '[发出去了]') : `[没发出去：${out.note}]` }],
       },
       async execute(args = {}, exec) {
         const who = guardWrite(deps.tenant, exec, 'her_say')

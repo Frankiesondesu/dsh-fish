@@ -327,6 +327,31 @@ test('写下的一句会落成 utterance（带「（她说）」前缀）并留�
   assert.match(meta.text, /care/)
 }))
 
+test('her_say 写几行就按行拆成几条（2026-11-09 用户）：一行一条、空行不算、refs 每条都带', () => withRoot(async (root) => {
+  const now = Date.now()
+  line(root, ev({ id: 'ev_say2', type: 'utterance', text: '锚', ts: new Date(now - 3_600_000).toISOString() }))
+
+  const r = await writeSay(root, { text: '第一句。\n第二句。\n\n\n第三句。', refs: ['ev_say2'], now })
+  assert.equal(r.ok, true, r.note)
+  assert.equal(r.count, 3, '三行拆三条，连续空行不算一条')
+
+  const { events } = await readEvents(root)
+  const said = events.filter((e) => e.type === 'utterance' && String(e.text ?? '').startsWith('（她说）'))
+  assert.deepEqual(said.map((e) => String(e.text)), ['（她说）第一句。', '（她说）第二句。', '（她说）第三句。'])
+  assert.ok(said.every((e) => Array.isArray(e.refs) && e.refs[0] === 'ev_say2'), 'refs 每条都带')
+  const metas = events.filter((e) => e.type === 'meta' && String(e.text ?? '').startsWith('proactive-say:'))
+  assert.equal(metas.length, 1, '一轮只落一条记账——「开口几次」数的是说话这件事，不是消息条数')
+  assert.match(r.note, /3 条/)
+}))
+
+test('her_say 单行调用行为不变（count=1，note 不变，旧调用方无感）', () => withRoot(async (root) => {
+  const r = await writeSay(root, { text: '就一句。' })
+  assert.equal(r.ok, true)
+  assert.equal(r.count, 1)
+  assert.equal(r.note, '发出去了。')
+  assert.equal(r.partial, undefined)
+}))
+
 test('her_say 不再有每日上限，proactive-say 记账照落（2026-11-07 统一）', () => withRoot(async (root) => {
   const now = Date.now()
   const dk = dateKey(new Date(now))
