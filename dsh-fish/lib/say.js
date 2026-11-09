@@ -612,6 +612,13 @@ export async function sayToHer(ctx, text, deps = {}) {
       const rot = await rotateTalkSession(ctx, { root, wsId: deps.wsId, log, from: sessionId })
       if (rot.ok && !rot.skipped) {
         rotated = rot.old
+        // 留一条 meta：换会话这件事要能在事件流里查到（与 turns 结账同款，2026-11-10 补——
+        // /say 这条路一直没记，账本里搜 rotate 是空的，排查只能去翻 home.json）。
+        await appendEvent(
+          { type: 'meta', text: dec.why === 'turns' ? `rotate:${turns}:${rot.sessionId}` : `rotate:kb${dec.kb}:${rot.sessionId}` },
+          { day: 0, stage: 1, source: 'system' },
+          root,
+        ).catch(() => {})
         // 标题以实际改出来的为准：TITLE_SESSION 在 0.7.x 从「跟她说话」改成了
         // 「跟大肥鱼说话」，这里还写死着旧名字，用户会照着去找一条不存在的会话。
         note = `${note}${note ? ' ' : ''}（${reached}，换了个新会话；上一段还在侧栏里，叫「跟大肥鱼说话·${dateKey()} 之前」）`

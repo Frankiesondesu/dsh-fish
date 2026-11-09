@@ -9,9 +9,14 @@
  * 和轮数那个谁先到谁生效。
  *
  * 「大小」怎么量：宿主的会话日志 session.v4.jsonl.zstd（多帧拼接 zstd），
- * 解开后把会进上下文的事件字节加起来（user/assistant/tool/spliced/system——
- * 与 2026-11-09 用量审计用同一口径）。带 mtime+size 缓存：文件没变不重解，
- * 每次结账只 stat 一次。
+ * 解开后只数「会随下一次请求回传」的部分。口径在 2026-11-10 用会话日志里
+ * 每条 assistant/message 自带的 usage 对齐校准过（89 次请求全程贴合，
+ * 1.55–2.09 字节/token、无漂移）。第一版把三样不该算的算了进去，虚高 ~4.8 倍，
+ * 导致 800KB 阈值在真实上下文 ~180KB 时就误触发：
+ *   - system 提示词每轮日志记一份，但请求只带最新一份 → 只数最新一条；
+ *   - assistant 事件里嵌的 .stream 是传输流水，从不回传 → 不数；
+ *   - assistant 的 reasoning 块按 API 规则不回传 → 不数。
+ * 带 mtime+size 缓存：文件没变不重解，每次结账只 stat 一次。
  */
 
 import { statSync, readFileSync, readdirSync, existsSync } from 'node:fs'
@@ -21,7 +26,7 @@ import { zstdDecompressSync } from 'node:zlib'
 
 const MAGIC = Buffer.from([0x28, 0xb5, 0x2f, 0xfd])
 
-/** 会进模型上下文的事件类型（审计口径，2026-11-09 定）。 */
+/** 会进模型上下文的事件类型。字节数按 replayBytes 的「回传部分」算，不是整个事件。 */
 const SURFACE_TYPES = new Set([
   'user/message',
   'assistant/message',
@@ -36,7 +41,33 @@ const SURFACE_TYPES = new Set([
 const cache = new Map()
 
 /**
- * 解一个会话日志，返回「会进上下文的事件」总字节数（JSON 序列化后的 UTF-8 字节数）。
+ * 一个事件里「会随下一次请求回传」的那部分字节。不认识的形状保守地整段算
+ * （宁可比真实略高，也不静默漏算）。
+ */
+function replayBytes(e) {
+  const d = e.data ?? {}
+  if (e.type === 'assistant/message') {
+    const m = d.message
+    if (!m) return JSON.stringify(d)
+    // reasoning 按 API 规则不回传；.stream 本来就不在这层（在事件顶层）
+    const c = Array.isArray(m.content) ? m.content.filter((b) => b?.type !== 'reasoning') : m.content
+    return JSON.stringify({ ...m, content: c })
+  }
+  if (e.type === 'user/message') return JSON.stringify(d.content ?? d)
+  if (
+    e.type === 'system/message' ||
+    e.type === 'tool/call' ||
+    e.type === 'tool/result' ||
+    e.type === 'developer/message'
+  ) {
+    return JSON.stringify(d.message ?? d)
+  }
+  if (e.type === 'agent/inbox/spliced') return JSON.stringify(d.inserted ?? d)
+  return JSON.stringify(e)
+}
+
+/**
+ * 解一个会话日志，返回「下一次请求会带多大」的近似字节数（UTF-8）。
  * 文件不存在/解不动返回 null（调用方当「不知道大小」处理，不拦轮换）。
  */
 export function surfaceBytesFromFile(path) {
@@ -63,6 +94,7 @@ export function surfaceBytesFromFile(path) {
     a = b
   }
   let bytes = 0
+  let sysBytes = 0
   for (const fr of frames) {
     let text = ''
     try {
@@ -78,11 +110,14 @@ export function surfaceBytesFromFile(path) {
       } catch {
         continue
       }
-      if (e && SURFACE_TYPES.has(e.type)) bytes += Buffer.byteLength(JSON.stringify(e), 'utf8')
+      if (!e || !SURFACE_TYPES.has(e.type)) continue
+      // system 每轮日志记一份但请求只带最新一份——覆盖不累加
+      if (e.type === 'system/message') sysBytes = Buffer.byteLength(replayBytes(e), 'utf8')
+      else bytes += Buffer.byteLength(replayBytes(e), 'utf8')
     }
   }
-  cache.set(path, { mtimeMs: st.mtimeMs, size: st.size, bytes })
-  return bytes
+  cache.set(path, { mtimeMs: st.mtimeMs, size: st.size, bytes: bytes + sysBytes })
+  return bytes + sysBytes
 }
 
 /** 丢弃某条会话的缓存（换会话/测试用；不丢也不会错——路径变了键就变了）。 */

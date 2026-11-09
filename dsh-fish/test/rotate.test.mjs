@@ -41,36 +41,65 @@ test('shouldRotate：两个都到线时轮数优先报告', () => {
   assert.equal(d.why, 'turns', '换的动作一样，只是 meta 里写的原因不同')
 })
 
-test('surfaceBytesFromFile：多帧 zstd 解开、只数会进上下文的事件、mtime+size 缓存', () => {
+test('surfaceBytesFromFile：只数「会回传」的部分、多帧 zstd、mtime+size 缓存', () => {
   const dir = mkdtempSync(join(tmpdir(), 'fish-rotate-'))
   try {
-    const surface = (type, n) => JSON.stringify({ type, seq: n, data: { x: '内容'.repeat(10) } })
+    // 真实形状：assistant 事件里嵌着 .stream（传输流水）和 reasoning 块（API 不回传）
+    const sysMsg = (t) => ({ role: 'system', content: [{ type: 'text', text: t }] })
+    const asstMsg = { role: 'assistant', content: [{ type: 'reasoning', text: '想了很久的一段' }, { type: 'text', text: '嗯。' }] }
+    const toolMsg = { role: 'tool', content: [{ type: 'text', text: '工具结果' }] }
+    const mkAsst = () => JSON.stringify({ type: 'assistant/message', seq: 1, data: { message: asstMsg, stream: [{ chunk: 'chunkdata' }] } })
+    const mkUser = () => JSON.stringify({ type: 'user/message', seq: 2, data: { content: '你好', source: 'qq', role: 'user' } })
+    const mkTool = () => JSON.stringify({ type: 'tool/result', seq: 3, data: { turn: 1, step: 1, message: toolMsg } })
+    const mkSys = (t) => JSON.stringify({ type: 'system/message', seq: 4, data: { turn: 1, message: sysMsg(t) } })
     const other = JSON.stringify({ type: 'session/title', seq: 0, data: { title: '不进上下文' } })
+
     // 两帧拼接：每帧各自是完整 zstd（compressSync 的输出自带 magic 头）
-    const f1 = zstdCompressSync(Buffer.from(`${surface('user/message', 1)}\n${other}\n`, 'utf8'))
-    const f2 = zstdCompressSync(Buffer.from(`${surface('assistant/message', 2)}\n${surface('tool/result', 3)}\n`, 'utf8'))
+    const sys1Text = '系统提示词 v1，'.repeat(50)
+    const f1 = zstdCompressSync(Buffer.from(`${mkUser()}\n${mkAsst()}\n${other}\n`, 'utf8'))
+    const f2 = zstdCompressSync(Buffer.from(`${mkSys(sys1Text)}\n${mkTool()}\n`, 'utf8'))
     const p = join(dir, 'session.v4.jsonl.zstd')
     writeFileSync(p, Buffer.concat([f1, f2]))
 
+    // 只数：user 的 content + assistant 剔掉 reasoning 的 message + tool 的 message + system 最新一份
     const want =
-      Buffer.byteLength(surface('user/message', 1)) +
-      Buffer.byteLength(surface('assistant/message', 2)) +
-      Buffer.byteLength(surface('tool/result', 3))
+      Buffer.byteLength(JSON.stringify('你好')) +
+      Buffer.byteLength(JSON.stringify({ role: 'assistant', content: [{ type: 'text', text: '嗯。' }] })) +
+      Buffer.byteLength(JSON.stringify(toolMsg)) +
+      Buffer.byteLength(JSON.stringify(sysMsg(sys1Text)))
     const got = surfaceBytesFromFile(p)
-    assert.equal(got, want, 'meta/标题类不进上下文，不计入')
+    assert.equal(got, want, '.stream / reasoning / 事件包装 / session 标题都不算')
 
-    // 缓存：文件没变（mtime+size 一样）直接命中缓存——改回写一次同内容也返回同值
+    // 缓存：文件没变（mtime+size 一样）直接命中
     assert.equal(surfaceBytesFromFile(p), want, '第二次调用走缓存，结果一致')
 
-    // 文件变了（mtime 变化）重解：追加一帧
-    const f3 = zstdCompressSync(Buffer.from(`${surface('system/message', 4)}\n`, 'utf8'))
+    // system 再记一份（新一轮的请求回声）：只算最新那份，不是累加
+    const sys2Text = '系统提示词 v2，'.repeat(80)
+    const f3 = zstdCompressSync(Buffer.from(`${mkSys(sys2Text)}
+`, "utf8"))
     writeFileSync(p, Buffer.concat([f1, f2, f3]))
     utimesSync(p, new Date(2000, 0, 1), new Date())
-    const want2 = want + Buffer.byteLength(surface('system/message', 4))
-    assert.equal(surfaceBytesFromFile(p), want2, 'mtime 变了重解，新帧计入')
+    const want2 =
+      want - Buffer.byteLength(JSON.stringify(sysMsg(sys1Text))) + Buffer.byteLength(JSON.stringify(sysMsg(sys2Text)))
+    assert.equal(surfaceBytesFromFile(p), want2, 'mtime 变了重解，system 只留最新一份')
 
     // 不存在的文件 → null（调用方当「量不到」处理）
     assert.equal(surfaceBytesFromFile(join(dir, 'nope.zstd')), null)
+  } finally {
+    dropSurfaceCache(join(dir, 'session.v4.jsonl.zstd'))
+    rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
+  }
+})
+
+test('surfaceBytesFromFile：认不出的形状整段算（宁多勿漏），不能静默变 0', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'fish-rotate2-'))
+  try {
+    // 没有 data.message 的 assistant 事件（结构变了/旧格式）：保守地整段算
+    const weird = JSON.stringify({ type: 'assistant/message', seq: 1, data: { foo: 'bar'.repeat(10) } })
+    const p = join(dir, 'session.v4.jsonl.zstd')
+    writeFileSync(p, zstdCompressSync(Buffer.from(`${weird}\n`, 'utf8')))
+    const want = Buffer.byteLength(JSON.stringify({ foo: 'bar'.repeat(10) }))
+    assert.equal(surfaceBytesFromFile(p), want, '回退到 data 整段，不能因为不认识就漏算')
   } finally {
     dropSurfaceCache(join(dir, 'session.v4.jsonl.zstd'))
     rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
