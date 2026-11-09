@@ -98,7 +98,7 @@ QQ 桥是独立 Node 进程，连 LLOneBot（OneBot）收发 QQ 消息。从
 
 ```
 fish/
-├── dsh-fish/          # 插件本体（独立 git 仓，上游同步在此进行）
+├── dsh-fish/          # 插件本体（上游同步在此进行）
 │   ├── lib/           #   账本人格 / 调度器 / 20 件工具 / 观测接口
 │   └── test/          #   1800+ 项测试
 ├── bridge/            # QQ 桥（独立 Node 进程，配置见上）
@@ -136,18 +136,18 @@ fish/
 
 ## 上游同步（进阶）
 
-`dsh-fish/` 是独立 git 仓，fork 根提交与上游历史无共同祖先，需要一次性嫁接后才能
-`git merge upstream/main`：
+`dsh-fish/` 的历史曾以 merge 方式接入上游；后来做过一次发布前的历史清洗
+（真值脱敏 + 目录归位到 `dsh-fish/`），提交哈希整体改写，与上游仓库不再共享哈希。
+所以同步上游要先补一次祖先关系，之后都是常规三方合并：
 
 ```bash
-cd dsh-fish
 git remote add upstream <上游仓库路径或 URL>
 git fetch upstream
-git replace --graft <fork根提交> <上游0.8.5提交>
-git merge upstream/main        # 冲突逐个解，跑全量测试，账本指纹校验
+git merge -s ours --allow-unrelated-histories upstream/main -m "血缘接线：补祖先关系，不取内容"
+git merge upstream/main -X subtree=dsh-fish   # 之后每次同步：-X subtree 把上游路径对齐到 dsh-fish/
 ```
 
-合完后跑 `node --test test/*.test.mjs`（全绿再提交），并核对账本指纹
+合完后跑 `dsh-fish/` 里 `node --test test/*.test.mjs`（全绿再提交），并核对账本指纹
 （`node tools-ledger.mjs`，--sync 补记）。本 fork 有一条合并定案：
 **her_say 相关提示词与口径以 fork 为准**（QQ 通路架构与上游不同），别被上游冲掉。
 
