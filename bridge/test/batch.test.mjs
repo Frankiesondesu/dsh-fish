@@ -60,7 +60,14 @@ test('桥真的用上了这个纯函数，而且起点是第一个附件', async
   assert.match(src, /imageHoldMs: 10000/, '默认值就是 10 秒')
 })
 
-test('配置文件也改成 10 秒（不然代码默认值白改）', async () => {
-  const raw = JSON.parse(await readFile(new URL('../config.json', import.meta.url), 'utf8'))
+test('配置文件也改成 10 秒（不然代码默认值白改）', async (t) => {
+  // config.json 含真 QQ 号，设计上不入库——公开 clone 上没有它，跳过而不是红
+  let raw
+  try {
+    raw = JSON.parse(await readFile(new URL('../config.json', import.meta.url), 'utf8'))
+  } catch (e) {
+    if (e.code === 'ENOENT') return t.skip('本机没有 bridge/config.json（公开 clone 上正常）')
+    throw e
+  }
   assert.equal(raw.imageHoldMs, 10_000)
 })
