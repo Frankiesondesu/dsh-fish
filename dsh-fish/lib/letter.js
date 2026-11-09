@@ -180,8 +180,8 @@ export async function leaveLetter(root, text, { log, sessionId = '' } = {}) {
         },
         // render 必须返回 ContentBlock 数组（签名 (args, value)）。
         // 只回"[已留]"——不说留了几条、还剩几条（那会变成配额感），
-        // 也不写成完整句子（2026-10-24：用户看到「留好了。就一句。没说别的。」，
-        // 头三个字就是旧回执，模型会把工具返回的话当自己的话接着说）。
+        // 也不写成完整句子（2026-10-24：用户看到她把旧回执那几个字原样重复了一遍，
+        // 模型会把工具返回的话当自己的话接着说）。
         render: (_args, out) => [{ type: 'text', text: out.ok ? '[已留]' : `[没留：${out.note}]` }],
       },
       async execute(args, exec) {

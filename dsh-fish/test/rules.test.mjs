@@ -287,8 +287,8 @@ test('fork.38 的反面：省主语只认转折词后，第三人称照样挡', 
 
 test('fork.38：parseRefusal 能从她自己的说法里拆出动作', () => {
   assert.equal(parseRefusal('我不打算拿它当正事办').act, '拿')
-  assert.equal(parseRefusal('不接受「随时能翻」').act, '接受')
-  assert.equal(parseRefusal('我不想变成那种递好话的东西').act, '变成')
+  assert.equal(parseRefusal('不接受「说到就到」').act, '接受')
+  assert.equal(parseRefusal('我不想变成见谁都说好话的人').act, '变成')
 })
 
 test('fork.39：她真用过的改口说法也要认（账本原句）', () => {
