@@ -1,0 +1,11 @@
+#!/bin/sh
+# 提交前隐私巡检。生效方式（每台机器执行一次）：
+#
+#   git config core.hooksPath scripts/hooks
+#
+# 为什么这么薄：判据只有一份（scripts/privacy-scan.mjs），测试跑的是同一份
+# ——不能出现「测试过了但 hook 是另一套」。
+#
+# 这个仓是公开的。它挡的是「把真名/真邮箱/QQ 号/她说过的话带进来」，
+# 不是防你——别用 --no-verify 绕过，那道闸是给以后的自己留的。
+exec node "$(git rev-parse --show-toplevel)/scripts/privacy-scan.mjs" --staged

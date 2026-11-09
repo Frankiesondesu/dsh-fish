@@ -1,0 +1,4 @@
+#!/bin/sh
+# 提交信息里也不许有真值：2026-11-08 查历史时就发现，有条提交信息直接写着主人 QQ 号。
+# 提交信息进的是 git 历史，比文件内容更难改——所以在这里拦，比事后 filter-repo 便宜。
+exec node "$(git rev-parse --show-toplevel)/scripts/privacy-scan.mjs" --message "$1"

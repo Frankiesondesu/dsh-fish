@@ -841,7 +841,7 @@ function renderData(el){
     sec('数据在哪')+
     '<div class="card">'+Object.entries(paths).map(([k,v])=>
       '<div class="belief"><span class="idx">'+esc(k)+'</span><span class="txt" style="font-family:ui-monospace,monospace;font-size:12px;word-break:break-all">'+esc(String(v))+'</span></div>').join('')+
-      '<div class="dim" style="font-size:12px;margin-top:8px">换机/换盘走指针文件（~/.dsh-fish-location.json）或 DSH_FISH_HOME，见 ref/cross-machine 文档。</div></div>'+
+      '<div class="dim" style="font-size:12px;margin-top:8px">换机/换盘走指针文件（~/.dsh-fish-location.json）或 DSH_FISH_HOME，不用改代码。</div></div>'+
     sec('每日报告 · '+((Dp.reportDates||[]).length)+' 天')+
     ((Dp.reportDates||[]).length
       ? '<div class="card" id="rptbox">'+Dp.reportDates.map(d=>

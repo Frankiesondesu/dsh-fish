@@ -2,3 +2,7 @@
 # 目录切不过去，然后在 System32 里找 node 脚本——11-04 晚上就是这么炸的。
 *.cmd text eol=crlf
 *.bat text eol=crlf
+
+# sh 钩子反过来，必须是 LF：CRLF 时 git 的 sh 会先执行 `#!/bin/sh\r` 找不到解释器，
+# 再报一串 `\r: command not found`——隐私守卫就成了「装上了但跑不起来」。
+scripts/hooks/* text eol=lf

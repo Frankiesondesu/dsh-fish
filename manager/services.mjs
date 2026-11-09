@@ -28,7 +28,7 @@ const run = promisify(execFile)
 export const HERE = dirname(fileURLToPath(import.meta.url))
 /** 仓库根目录（manager/ 的上一级）。launch.mjs 那几个脚本都在这儿。 */
 export const ROOT = dirname(HERE)
-/** D:/Code/<同级目录> —— turn-taking 与 full-duplex 在仓库外面。 */
+/** 本仓的同级目录 —— turn-taking 与 full-duplex 在仓库外面。 */
 const PLUG = dirname(ROOT)
 
 /**

@@ -10,7 +10,7 @@ import { qqSaidOf, mergeSaid } from '../said.mjs'
 test('qqSaidOf：剥「（她说）」前缀；旧前缀「（她主动说）」一并收', () => {
   const ev = (id, source, text) => ({ id, type: 'utterance', source, text, ts: '2026-11-07T03:24:08.825Z' })
   const got = qqSaidOf([
-    ev('ev_1', 'tool', '（她说）行。跟同学一起吃。'),
+    ev('ev_1', 'tool', '（她说）好。那就这么定了。'),
     ev('ev_2', 'tool', '（她主动说）七点三十八。今天周五。'),
     // 内心判断：growth_commit 也落 utterance+tool，但没有推送前缀——不是说给他听的
     ev('ev_3', 'tool', '我今天有点累。'),
@@ -19,7 +19,7 @@ test('qqSaidOf：剥「（她说）」前缀；旧前缀「（她主动说）」
     { id: 'ev_5', type: 'meta', source: 'tool', text: '（她说）meta 不是 utterance' },
   ])
   assert.deepEqual(got.map((g) => g.id), ['ev_1', 'ev_2'], 'ev_4 是 system，ev_3 没前缀，ev_5 不是 utterance')
-  assert.equal(got[0].text, '行。跟同学一起吃。')
+  assert.equal(got[0].text, '好。那就这么定了。')
   assert.equal(got[1].text, '七点三十八。今天周五。')
   assert.equal(got[0].at, Date.parse('2026-11-07T03:24:08.825Z'))
 })

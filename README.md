@@ -39,10 +39,11 @@ DSH（DeepSeek Harness）插件：**不写人设、不做记忆摘要**——人
 ## 快速开始
 
 ```bat
-git clone <本仓库> D:\Code\<同级目录>\fish
-cd D:\Code\<同级目录>\fish
+:: 放在哪都行，下面的例子用 %USERPROFILE%\fish（路径别带空格）
+git clone <本仓库> %USERPROFILE%\fish
+cd %USERPROFILE%\fish
 :: dsh-fish/ 是插件本体——按 DSH 的插件方式挂载（推荐目录联接）
-mklink /D "DSH 插件目录\dsh-fish" "D:\Code\<同级目录>\fish\dsh-fish"
+mklink /D "DSH 插件目录\dsh-fish" "%USERPROFILE%\fish\dsh-fish"
 
 :: 1) 配置桥（见下文「桥的配置」）
 copy bridge\config.example.json bridge\config.json
@@ -130,6 +131,8 @@ fish/
 - 她的一切数据（账本、日记、画、收件箱）只在本机
 - 外联仅三处：QQ（经你自己的 LLOneBot）、Open-Meteo（天气查询）、B 站（她上网时）
 - 无任何遥测、无云依赖、无 API 密钥
+- 本仓不含私人交接文档（它们在仓外同级目录）；提交时有隐私守卫拦真名 / 真邮箱 / QQ 号，
+  见 `AGENTS.md`「隐私守卫」
 
 ## 上游同步（进阶）
 

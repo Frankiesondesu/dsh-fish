@@ -96,7 +96,8 @@ const BRIDGE = join(HERE, 'bridge', 'bridge.mjs')
 const VIEWER = join(HERE, 'viewer', 'viewer.mjs')
 const VIEWER_URL = 'http://127.0.0.1:7788'
 
-// 语音三路（2026-11-06）：都在 fish 的同级目录 D:\Code\<同级目录> 下。
+// 语音三路（2026-11-06）：都在本仓的同级目录（跟 `fish/` 平级的地方）下。
+// 位置不写死：`PLUG` 由 `dirname(HERE)` 算，谁 clone 到哪都一样。
 // 启动命令是「venv 里的 python + 相对路径的脚本」，所以 detach 必须给 cwd。
 // 注意 venv/Scripts/python.exe 是 launcher：它还会拉起真正的 uv python 子进程，
 // 真正听端口、装模型的是那个子进程（关的时候要连树一起收，见 shutdown.mjs）。
@@ -133,7 +134,7 @@ const VOICE = [
   // 业务代码引用 0 处、插件日志 0 条、账本 0 次提及，唯一产物是搭完测的 3.6 秒 wav。
   // 她的声音一直走 edge-tts（zh-CN-YunxiNeural，她自己听完十条挑的，理由「别给我一副
   // 好听的嗓子」）。留着它只意味着每次启动多等 2-3 分钟加载 5.3G 权重，于 11-06 摘出。
-  // 要用时手动：cd D:\Code\<同级目录>\dialogue-tts && venv\Scripts\python.exe server.py --port 18767
+  // 要用时手动：cd <本仓同级>\dialogue-tts && venv\Scripts\python.exe server.py --port 18767
   { id: 'duplex', key: '全双工 18768', port: 18768, exe: PY_STDLIB,
     args: ['duplex.py', '--port', '18768'], cwd: join(PLUG, 'full-duplex') },
 ]
