@@ -147,6 +147,7 @@ const FORK_DESC_CUES = [
   ['her_world', /看看外面现在什么样/],
   ['her_draw', /讲题排算式、画示意图、画流程、圈重点/],
   ['her_formula', /讲题、写推导用它/],
+  ['her_space', /把重要的东西放进你自己的文件夹/],
 ]
 
 /** 从源码取每件工具的 description（同 definedTools：不信手抄清单）。 */
