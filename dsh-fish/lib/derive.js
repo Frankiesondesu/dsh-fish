@@ -137,7 +137,7 @@ const NAME_STOP_CHARS = '\\s，。！？、,.!?」”"\'—–‒―~～…「'
 // 但破折号不能无条件跳过：没有引号的「叫你——可这句不是我从你嘴里听见的」，
 // 跳过去就会把「可这句不是我从」当成名字。所以只在破折号后面**带引号**时才跳。
 const NAME_SAY_RE = new RegExp(
-  `(?:称呼你|叫你|称呼他|叫他|称他)(?:` +
+  `(?:称呼你|叫你|称呼他|叫他|称他|管他叫)(?:` +
     `(?:做|为|作|叫)?\\s*[「“"']?` +
     `|[—–‒―~～…]+\\s*(?:叫)?\\s*[「“"']` +
   `)([^${NAME_STOP_CHARS}]{1,8})`,
@@ -473,16 +473,23 @@ function looksLikeName(name) {
   if (NAME_FUNCTION_HEAD.test(name)) return false
   // 「的」夹在中间就是一句话的中段，不是名字
   if (/的./.test(name)) return false
+  // 2026-11-10：「的」结尾的长片段也是句子中段（「一句一样的」不是名字）；
+  // 「开灯的」这种三字代号是她给他起的称呼，放行。
+  if (/的$/.test(name) && name.length > 3) return false
   return !NAME_FUNCTION_CHAR.test(name)
 }
 
 export function pickName(text) {
   const s = String(text ?? '')
   for (const re of [NAME_SAY_RE, NAME_GIVE_RE]) {
-    const m = re.exec(s)
-    if (!m) continue
-    const name = String(m[1] ?? '').trim().replace(NAME_TAIL, '')
-    if (looksLikeName(name)) return name
+    // 2026-11-10：同一句里可能先引用别人的说法（「你管他叫一句一样的」），
+    // 再给真名字（「我管他叫阿岸」）。exec 只取第一个匹配会被引用句挡死，
+    // 现在遍历所有匹配，取第一个通过 looksLikeName 的。
+    const g = new RegExp(re.source, re.flags.includes('g') ? re.flags : `${re.flags}g`)
+    for (const m of s.matchAll(g)) {
+      const name = String(m[1] ?? '').trim().replace(NAME_TAIL, '')
+      if (looksLikeName(name)) return name
+    }
   }
   return null
 }
@@ -637,8 +644,16 @@ export function deriveSelf(events = [], opts = {}) {
         // 送进了这条规则 —— 「我原来的话」是定语，不是"我一直以来是怎样的人"。
         // 结果那句"取帧工具坏了、今天没看见画面"就成了她每轮读到的
         // 「## 你对自己的说法」，而工具早就修好了。只掐这两个词，其余不动。
-        if (/我(?:其实|总在|总是|才发现|才明白|发现自己|(?:一直|原来)(?!的))/.test(String(ev.text ?? ''))) {
-          narrative = { at: ev.ts, text: ev.text, source: 'said' }
+        // 2026-11-10：收紧——「我」要在句首（剥掉「（她说）」前缀后），且不含对话指代。
+        // 原来的 /我一直/ 把「我猜你说的…我一直在用第一层」也当成了自我叙述。
+        {
+          const said = String(ev.text ?? '').replace(/^（她说）/, '').trim()
+          if (
+            /^我(?:其实|总在|总是|才发现|才明白|发现自己|(?:一直|原来)(?!的))/.test(said) &&
+            !/(?:你说的|你说|你要的|你要|刚才|这句|上一句)/.test(said)
+          ) {
+            narrative = { at: ev.ts, text: ev.text, source: 'said' }
+          }
         }
         break
       }

@@ -50,6 +50,16 @@ test('selfmod 不入 beliefs，但留证', () => {
   assert.equal(m.beliefs[0].text, '我不太喜欢人多的地方。')
 })
 
+test('narrative 不被对话句误设：要在句首、且不含对话指代（2026-11-10）', () => {
+  const evs = [
+    ev('ev_seed', 'seed', 1, '种', { source: 'system' }),
+    ev('ev_a', 'utterance', 1, '（她说）我猜你说的"干"，是说我一直在用第一层。'),
+    ev('ev_b', 'utterance', 2, '（她说）我一直是先把事情做完再说话的那种。'),
+  ]
+  const m = deriveSelf(evs, { now: T0 + 2 * DAY_MS })
+  assert.equal(m.narrative?.text, '（她说）我一直是先把事情做完再说话的那种。')
+})
+
 test('纯图片行不入 beliefs（新 media 标记与旧形态都拦，2026-11-10）', () => {
   const evs = [
     ev('ev_seed', 'seed', 1, '种', { source: 'system' }),
@@ -108,6 +118,9 @@ test('他主动给的名字、她自己改口的叫法都算称呼', () => {
   assert.equal(pickName('他不要我叫“搭屋的”，也不要“开灯的”。'), null)
   // 代词不算称呼
   assert.equal(pickName('以后叫他他吧'), null)
+  // 2026-11-10：同一句里先引用再给真名，取真名；否定引用句不算
+  assert.equal(pickName('我不会跟着叫你一句一样的。'), null)
+  assert.equal(pickName('我管他叫阿岸。……你管他叫一句一样的……名字这件我不改口：阿岸。'), '阿岸')
 })
 
 // issue #81（2026-11-08）：她说过「说你让我叫你老大——可这句不是我从你嘴里听见的」。
