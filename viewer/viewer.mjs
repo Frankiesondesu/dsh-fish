@@ -329,12 +329,20 @@ const PAGE = String.raw`<!doctype html>
   .hd .spacer{flex:1}
   .live{display:inline-flex;align-items:center;gap:6px;font-size:11.5px;color:var(--dim);border:1px solid var(--line);background:var(--panel);border-radius:999px;padding:4px 10px;white-space:nowrap}
   .live i{width:6px;height:6px;border-radius:50%;background:var(--ok);box-shadow:0 0 0 3px rgba(95,211,154,.14)}
-  .tabs{display:flex;gap:2px;overflow-x:auto;scrollbar-width:none}
-  .tabs::-webkit-scrollbar{display:none}
-  .tabs button{position:relative;background:none;border:0;color:var(--dim);padding:14px 14px 15px;font-size:13.5px;cursor:pointer;white-space:nowrap;transition:color .15s;font-weight:500}
-  .tabs button:hover{color:var(--fg)}
-  .tabs button.on{color:var(--fg);font-weight:600}
-  .tabs button.on:after{content:'';position:absolute;left:14px;right:14px;bottom:0;height:2px;background:linear-gradient(90deg,var(--acc),var(--acc2));border-radius:2px 2px 0 0}
+  .navtoggle{display:inline-flex;align-items:center;gap:8px;background:var(--panel);border:1px solid var(--line);color:var(--fg);border-radius:999px;padding:6px 12px;font:inherit;font-size:12.5px;cursor:pointer;white-space:nowrap}
+  .navtoggle:hover{border-color:rgba(138,164,255,.45)}
+  .navtoggle .navcount{color:var(--dim2);font-size:11.5px}
+  .navtoggle .chev{color:var(--dim);font-size:10px;transition:transform .18s}
+  .navtoggle.open .chev{transform:rotate(180deg)}
+  .tabs{display:none;gap:12px;padding:2px 0 16px}
+  .tabs.open{display:grid;grid-template-columns:repeat(3,minmax(0,1fr))}
+  .tabs[hidden]{display:none!important}
+  .tabgroup{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:10px 12px 12px}
+  .tabgroup-t{font-size:11px;color:var(--dim2);font-weight:650;letter-spacing:.08em;margin:0 0 8px 2px}
+  .tabgroup-b{display:flex;flex-wrap:wrap;gap:6px}
+  .tabs button{background:transparent;border:1px solid var(--line);color:var(--dim);padding:7px 11px;border-radius:9px;font:inherit;font-size:12.5px;cursor:pointer;white-space:nowrap;transition:color .15s,border-color .15s,background .15s}
+  .tabs button:hover{color:var(--fg);border-color:rgba(138,164,255,.4)}
+  .tabs button.on{color:var(--fg);border-color:rgba(138,164,255,.55);background:rgba(138,164,255,.11);font-weight:600}
   main{position:relative;z-index:1;max-width:1120px;margin:0 auto;padding:26px 24px 100px}
   .sec{margin:22px 0 10px;display:flex;align-items:center;gap:8px;font-size:11.5px;color:var(--dim2);font-weight:650;letter-spacing:.1em;text-transform:uppercase}
   .sec:first-child{margin-top:0}
@@ -401,7 +409,8 @@ const PAGE = String.raw`<!doctype html>
   .empty-state .ic{font-size:26px;opacity:.4;margin-bottom:10px}
   .dim{color:var(--dim)}
   .err{color:#ff9aa8}
-  @media(max-width:640px){header{padding:0 14px}.hd{height:auto;flex-wrap:wrap;gap:8px;padding:10px 0}main{padding:18px 14px 90px}.hero{padding:18px}.tabs button{padding:12px 11px 13px}}
+  @media(max-width:900px){.tabs.open{grid-template-columns:repeat(2,minmax(0,1fr))}}
+  @media(max-width:640px){header{padding:0 14px}.hd{height:auto;flex-wrap:wrap;gap:8px;padding:10px 0}main{padding:18px 14px 90px}.hero{padding:18px}.tabs.open{grid-template-columns:1fr}.navcount{display:none}}
   /* ---- 设置页（2026-11-04，现代布局）---- */
   .st-wrap{display:grid;grid-template-columns:190px minmax(0,1fr);gap:20px;align-items:start}
   .st-nav{position:sticky;top:78px;display:flex;flex-direction:column;gap:2px}
@@ -449,14 +458,40 @@ const PAGE = String.raw`<!doctype html>
 </style></head><body>
 <header>
   <div class="hd"><div class="brand"><span class="mark">她</span> 她 · 查看器</div>
+    <button class="navtoggle" id="navtoggle" aria-expanded="false" aria-controls="tabs"><span id="navcurrent">人格数据</span><span class="navcount">全部 13 页</span><span class="chev">▾</span></button>
     <div class="spacer"></div>
     <div class="live"><i></i><span id="sub">读取中</span></div></div>
-  <div class="tabs" id="tabs"></div>
+  <div class="tabs" id="tabs" hidden></div>
 </header>
 <main id="main"><p class="dim">读数据中…</p></main>
 <script>
 let D = null, tab = 'profile';
 const TABS = [['profile','人格数据'],['said','她说的话'],['mine','你说的话'],['acts','她做过的事'],['events','事件流'],['observe','观测台'],['bili','上网'],['memory','记忆'],['data','数据'],['intercom','对讲机'],['usage','用量'],['status','本机状态'],['settings','设置']];
+// 13 个页签按语义分三组，默认收起；点顶栏胶囊向下展开，选完自动收起。
+// 只改展示方式：data-tab、tab 值、各页渲染逻辑一个没动。
+const TAB_GROUPS = [
+  ['她', ['profile','said','acts','memory','bili']],
+  ['往来与记录', ['mine','intercom','events','observe']],
+  ['本机', ['usage','status','data','settings']],
+];
+let navOpen = false;
+const tabName = k => (TABS.find(x => x[0] === k) || [k, k])[1];
+function renderTabs(){
+  const box = document.getElementById('tabs');
+  if(box) box.innerHTML = TAB_GROUPS.map(([g, ks]) =>
+    '<div class="tabgroup"><div class="tabgroup-t">'+esc(g)+'</div><div class="tabgroup-b">'+
+    ks.map(k => '<button data-tab="'+k+'" class="'+(k===tab?'on':'')+'">'+esc(tabName(k))+'</button>').join('')+
+    '</div></div>').join('');
+  const cur = document.getElementById('navcurrent');
+  if(cur) cur.textContent = tabName(tab);
+}
+function setNavOpen(v){
+  navOpen = !!v;
+  const box = document.getElementById('tabs');
+  if(box){ box.hidden = !navOpen; box.className = 'tabs'+(navOpen?' open':''); }
+  const tg = document.getElementById('navtoggle');
+  if(tg){ tg.className = 'navtoggle'+(navOpen?' open':''); tg.ariaExpanded = navOpen?'true':'false'; }
+}
 const esc = s => String(s??'').replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
 const t = ms => { if(!ms) return ''; const d=new Date(ms); return String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0'); };
 
@@ -475,8 +510,8 @@ const nl = s => esc(s).replace(/\n/g,'<br>');
 const badge = (cls,txt) => '<span class="badge '+cls+'">'+esc(txt)+'</span>';
 
 function render(){
-  document.getElementById('tabs').innerHTML = TABS.map(([k,n])=>
-    '<button data-tab="'+k+'" class="'+(k===tab?'on':'')+'">'+n+'</button>').join('');
+  renderTabs();
+  setNavOpen(navOpen);
   const m = D.model || {};
   const HM = humanMetrics();
   const el = document.getElementById('main');
@@ -943,20 +978,18 @@ function renderData(el){
 
 // ---------------- 设置页（2026-11-04，现代布局）----------------
 // 这段跑在模板字符串里，不能写美元花括号插值，全部用字符串拼接。
-let SCHEMA=null, CFG=null, DEFS=null, SAVED='{}';
+let SCHEMA=null, CFG=null, DEFS=null, UNIT={}, SAVED='{}';
 const fid = k => 'f_'+k.replace(/[^a-zA-Z0-9]/g,'_');
 const getIn = (o,p) => p.split('.').reduce((a,k)=>(a==null?undefined:a[k]),o);
 const setIn = (o,p,v) => { const ks=p.split('.'); const last=ks.pop(); let t=o; for(const k of ks){ if(!t[k]) t[k]={}; t=t[k] } t[last]=v };
-const UNIT = {
-  'growthDays':'天','wakesPerDay':'次','daily.events':'条','daily.questions':'条',
-  'diary.keepDays':'天','recall.oldDays':'天','absenceAfterDays':'天',
-  'proactive.maxPerDay':'次','proactive.minIdleHours':'小时','proactive.cooldownHours':'小时',
-  'proactive.rollsPerHour':'次','browse.perDay':'次','browse.topN':'条',
-  'avoid.minDuration':'秒','bili.minIntervalMs':'ms','bili.jitterMs':'ms'
-};
+// 单位表从 /api/config 一次性带来，与 settings-schema.mjs 的 UNIT 是同一份。
+// 以前页面里另抄了一份只 18 项，新增字段的单位一直不显示（2026-11-10 修）。
 
 function fieldHTML(s){
-  const cur = getIn(CFG, s.key), dflt = getIn(DEFS, s.key);
+  const raw = getIn(CFG, s.key), dflt = getIn(DEFS, s.key);
+  // /api/config 回的是原始 config.json（未归一化）：老配置缺键时若不回退到默认值，
+  // 新加的开关会显示成「关」，用户随便改一格保存就把她真的关掉了。
+  const cur = raw === undefined ? dflt : raw;
   const key = esc(s.key), id = fid(s.key);
   let ctl = '';
   if(s.kind==='bool'){
@@ -1299,7 +1332,7 @@ async function renderSettings(el){
     if(!SCHEMA){
       const r = await fetch('/api/config', {cache:'no-store'});
       const d = await r.json();
-      SCHEMA=d.schema||[]; CFG=d.config||{}; DEFS=d.defaults||{};
+      SCHEMA=d.schema||[]; CFG=d.config||{}; DEFS=d.defaults||{}; UNIT=d.unit||{};
     }
   }catch(e){ el.innerHTML='<p class="err">读不到配置：'+esc(e.message)+'</p>'; return }
   SAVED = JSON.stringify(CFG);
@@ -1352,10 +1385,12 @@ async function saveConfig(){
   }
 }
 
+document.getElementById('navtoggle').addEventListener('click', () => setNavOpen(!navOpen));
 document.getElementById('tabs').addEventListener('click', ev => {
   const b = ev.target.closest('button'); if(!b) return;
-  tab = b.dataset.tab; render();
+  tab = b.dataset.tab; setNavOpen(false); render();
 });
+document.addEventListener('keydown', ev => { if(ev.key==='Escape') setNavOpen(false); });
 
 // 自动刷新（2026-11-04）：原来只 fetch 一次，页面开着就一直显示打开那一刻的数字，
 // 用户对着它看「自主为什么是 0」，其实账本早变了。
@@ -1520,7 +1555,7 @@ createServer(async (req, res) => {
       const config = readJson(join(ROOT, 'config.json'), {})
       const defaults = await readDefaults(FISH)
       res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
-      return res.end(JSON.stringify({ config, defaults, schema: SETTINGS }))
+      return res.end(JSON.stringify({ config, defaults, schema: SETTINGS, unit: UNIT }))
     }
     // 写配置：走插件自己的 updateConfig（合并 + 归一化 + 写盘 + 清缓存），
     // 不自己拼 JSON——那边已经有一整套上下限夹紧，重复实现只会两边不一致。

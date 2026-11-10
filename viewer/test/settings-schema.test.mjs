@@ -56,3 +56,48 @@ test('kind 合法、danger 项都给了 hint', () => {
     assert.ok(tops.has(g), `allowed 里的 ${g} 组没有任何一项被搬进查看器设置`)
   }
 })
+
+/**
+ * 2026-11-10：核对查看器设置与插件设置时，查出 17 处范围对不上、1 个旋钮没搬
+ * （bili.enabled）。两条都是「保存时静默夹值 / 用户根本调不到」的哑故障，人眼很难发现。
+ * 这里直接从 settings.js 源码解析 LIMITS 与 DEFAULTS 对账——判据只有一份，别抄第二份。
+ */
+test('SETTINGS 的 num 范围与插件 LIMITS 逐项相等（防保存时静默夹值）', async () => {
+  const src = await readFile(join(HERE, 'dsh-fish', 'lib', 'settings.js'), 'utf8')
+  const m = /const LIMITS = \{([\s\S]*?)\n\}/.exec(src)
+  assert.ok(m, 'settings.js 里要能解析出 LIMITS（它改名或挪位置了就改这条）')
+  const limits = {}
+  for (const line of m[1].split('\n')) {
+    const g = /^\s*['"]?([A-Za-z.]+)['"]?\s*:\s*\[\s*(-?\d+)\s*,\s*(-?\d+)\s*\]/.exec(line)
+    if (g) limits[g[1]] = [Number(g[2]), Number(g[3])]
+  }
+  assert.ok(Object.keys(limits).length >= 25, `LIMITS 只解析出 ${Object.keys(limits).length} 条，正则可能哑了`)
+  const bad = []
+  for (const s of SETTINGS.filter((x) => x.kind === 'num')) {
+    const L = limits[s.key]
+    if (!L) continue // 插件不夹紧的 fork 自有项，查看器保留自己的 UI 范围
+    if (L[0] !== s.min || L[1] !== s.max) {
+      bad.push(`${s.key}: 查看器 ${s.min}–${s.max} / 插件 ${L[0]}–${L[1]}`)
+    }
+  }
+  assert.deepEqual(bad, [], `范围对不上，保存时会被静默夹值：\n${bad.join('\n')}`)
+})
+
+test('DEFAULTS 里用户可调的叶子键都在 SETTINGS 里（防上游加了旋钮没搬）', () => {
+  // 这几项是运行时状态或观测接口，本来就不做成旋钮
+  const INTERNAL = new Set([
+    'notify.lastShown', 'comment.lastScanAt', 'ui.ownerHintDismissed',
+    'observe.enabled', 'observe.port',
+  ])
+  const keys = new Set(SETTINGS.map((s) => s.key))
+  const missing = []
+  const walk = (o, p = '') => {
+    for (const [k, v] of Object.entries(o)) {
+      const path = p ? `${p}.${k}` : k
+      if (v && typeof v === 'object' && !Array.isArray(v)) walk(v, path)
+      else if (!INTERNAL.has(path) && !keys.has(path)) missing.push(path)
+    }
+  }
+  walk(DEFAULTS)
+  assert.deepEqual(missing, [], `这些可调键没出现在查看器设置页：${missing.join('、')}`)
+})

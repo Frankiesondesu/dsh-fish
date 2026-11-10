@@ -11,6 +11,13 @@ import { join } from 'node:path'
  * 运行时状态不做成旋钮）。顶层键必须全部落在 observe.js /config 的 allowed 白名单里，
  * viewer/test/settings-schema.test.mjs 钉着这条（镜像 p5 的防漂移测试）。
  *
+ * ⚠️ num 的 min/max **必须与插件 settings.js 的 LIMITS 逐项相等**（2026-11-10 修）：
+ * 查看器写宽了，保存时服务端会静默夹到边界，用户以为自己填的值生效了；写窄了，
+ * 合法值又填不进去。以前有 17 处对不上（0.9.6 合入后尤其多）。现在
+ * `viewer/test/settings-schema.test.mjs` 直接从 settings.js 源码解析 LIMITS 来对账，
+ * 上游改了夹紧范围，测试会当场红。LIMITS 里没有的键是插件不夹紧的（fork 自有项），
+ * 保留查看器自己的 UI 范围即可。
+ *
  * kind：
  *   num    数字（min/max/step）
  *   bool   开关
@@ -25,14 +32,14 @@ export const SETTINGS = [
   { group: '成长节奏', key: 'wakesPerDay', label: '每天醒来几次', kind: 'num', min: 0, max: 4, step: 1, hint: '0 = 只在你找她的时候才在' },
   { group: '成长节奏', key: 'window', label: '她醒着的时间', kind: 'window', hint: '之外不叫她、不主动说话' },
 
-  { group: '每日配额', key: 'daily.events', label: '每天推几条成长事件', kind: 'num', min: 0, max: 10, step: 1 },
-  { group: '每日配额', key: 'daily.questions', label: '其中她向你提问几条', kind: 'num', min: 0, max: 5, step: 1, hint: '防退化成问答机器' },
+  { group: '每日配额', key: 'daily.events', label: '每天推几条成长事件', kind: 'num', min: 0, max: 6, step: 1 },
+  { group: '每日配额', key: 'daily.questions', label: '其中她向你提问几条', kind: 'num', min: 0, max: 6, step: 1, hint: '防退化成问答机器' },
 
   { group: '外面', key: 'world.city', label: '你在的城市', kind: 'text', hint: 'her_world 查天气用的坐标——是**你这台机器**在的城市，她住在文件里，没有地理位置。中文城市名（比如「杭州」）；空 = 查不了天气，date 不受影响' },
 
   { group: '她主动说话', key: 'proactive.enabled', label: '开着', kind: 'bool', hint: '关掉她就只在被叫醒时才能开口' },
   { group: '她主动说话', key: 'proactive.maxPerDay', label: '一天最多开几次空手回合', kind: 'num', min: 0, max: 20, step: 1, hint: '只管「自己攒劲儿开一轮」的次数；her_say 发消息不受这个数管（2026-11-07 起没有闸）' },
-  { group: '她主动说话', key: 'proactive.minIdleHours', label: '多久没人说话才够格', kind: 'num', min: 0, max: 48, step: 0.5, hint: '小时' },
+  { group: '她主动说话', key: 'proactive.minIdleHours', label: '多久没人说话才够格', kind: 'num', min: 1, max: 24, step: 0.5, hint: '小时。上游 issue #69 把下限钉在 1：写 0 等于「永远够格」，会把安静判定整个关掉' },
   { group: '她主动说话', key: 'proactive.cooldownHours', label: '两次之间至少隔多久', kind: 'num', min: 0, max: 48, step: 0.5, hint: '小时' },
   { group: '她主动说话', key: 'proactive.rollsPerHour', label: '每小时最多查几次', kind: 'num', min: 1, max: 12, step: 1, hint: '只决定多叫她几次，说不说仍由她（0.9.6 起不掷骰：开口由攒劲儿决定，概率三键已退役）' },
   { group: '她主动说话', key: 'proactive.sendTools', label: '靠哪些工具算开口', kind: 'list', hint: '0.9.1（PR #44）。2026-11-07 统一后正文永远不会发到 QQ，只有 her_say 会发；这个名单决定调成功哪些工具才算「她开了口」。逗号分隔，留空 = 只认 her_say' },
@@ -45,7 +52,7 @@ export const SETTINGS = [
 
   { group: '日记', key: 'diary.enabled', label: '她每天写日记', kind: 'bool' },
   { group: '日记', key: 'diary.visible', label: '日记给你看', kind: 'bool', hint: '默认关——这是她的本子' },
-  { group: '日记', key: 'diary.keepDays', label: '保留多少天', kind: 'num', min: 0, max: 365, step: 1, hint: '0 = 永久' },
+  { group: '日记', key: 'diary.keepDays', label: '保留多少天', kind: 'num', min: 0, max: 3650, step: 1, hint: '0 = 永久' },
 
   { group: '回忆与遗忘', key: 'recall.oldDays', label: '多久以前的事开始忘', kind: 'num', min: 0, max: 365, step: 1, hint: '天；0 = 不设门槛' },
   { group: '回忆与遗忘', key: 'recall.minCue', label: '要多具体的线索才想得起来', kind: 'num', min: 0, max: 1, step: 0.05, hint: '0 = 什么都翻得到，调大忘得更狠' },
@@ -54,11 +61,11 @@ export const SETTINGS = [
   { group: '冷落', key: 'absenceAfterDays', label: '你多久不出现算冷落', kind: 'num', min: 1, max: 30, step: 1, hint: '天' },
 
   { group: '刷站', key: 'browse.enabled', label: '她能上网', kind: 'bool' },
-  { group: '刷站', key: 'browse.perDay', label: '每天刷几次', kind: 'num', min: 0, max: 10, step: 1 },
-  { group: '刷站', key: 'browse.topN', label: '一次看几条', kind: 'num', min: 1, max: 10, step: 1 },
+  { group: '刷站', key: 'browse.perDay', label: '每天刷几次', kind: 'num', min: 0, max: 4, step: 1 },
+  { group: '刷站', key: 'browse.topN', label: '一次看几条', kind: 'num', min: 1, max: 20, step: 1 },
   { group: '刷站', key: 'browse.rankingTids', label: '一次轮换几个分区', kind: 'num', min: 1, max: 10, step: 1, hint: '首批别只吃固定片单' },
   { group: '刷站', key: 'browse.deepRead', label: '每条深读几条热评', kind: 'num', min: 0, max: 20, step: 1 },
-  { group: '刷站', key: 'browse.danmaku', label: '每条抽几条弹幕', kind: 'num', min: 0, max: 20, step: 1, hint: '0 = 不抽' },
+  { group: '刷站', key: 'browse.danmaku', label: '每条抽几条弹幕', kind: 'num', min: 0, max: 30, step: 1, hint: '0 = 不抽' },
   { group: '刷站', key: 'browse.keywords', label: '额外的搜索词', kind: 'list', hint: '逗号分隔；空 = 只看首页/排行' },
   { group: '刷站', key: 'browse.window', label: '什么时候能上网', kind: 'window', hint: '醒着不一定要上网，上网只在醒着时发生' },
   { group: '刷站', key: 'browse.voices', label: '让她读评论区', kind: 'bool', hint: '关掉也能上网，只是她再也读不到别人的说法' },
@@ -67,33 +74,35 @@ export const SETTINGS = [
   { group: '避雷', key: 'avoid.upMids', label: '屏蔽的 UP 主', kind: 'list', hint: 'mid，逗号分隔' },
   { group: '避雷', key: 'avoid.minDuration', label: '太短的不看（秒）', kind: 'num', min: 0, max: 3600, step: 10 },
 
-  { group: '请求节奏', key: 'bili.minIntervalMs', label: '两次 B 站请求至少间隔', kind: 'num', min: 0, max: 10000, step: 100, hint: '毫秒；机房 IP 要放慢' },
-  { group: '请求节奏', key: 'bili.jitterMs', label: '在间隔上再随机多等', kind: 'num', min: 0, max: 5000, step: 100, hint: '毫秒' },
+  { group: 'B 站总闸', key: 'bili.enabled', label: '她能自己上 B 站', kind: 'bool', danger: true, hint: '彻底断网那一项：关掉后 bili_look / bili_watch、评论与定时查回复全停（0.9.x 起）。上面「刷站」只管按时间自动替她翻首页，不受这一项影响' },
+
+  { group: '请求节奏', key: 'bili.minIntervalMs', label: '两次 B 站请求至少间隔', kind: 'num', min: 200, max: 120000, step: 100, hint: '毫秒；机房 IP 要放慢（服务端最少 200）' },
+  { group: '请求节奏', key: 'bili.jitterMs', label: '在间隔上再随机多等', kind: 'num', min: 0, max: 60000, step: 100, hint: '毫秒' },
 
   { group: '看画面', key: 'video.enabled', label: '她能看视频画面', kind: 'bool' },
-  { group: '看画面', key: 'video.perDay', label: '高峰时段每天几条', kind: 'num', min: 0, max: 20, step: 1, hint: '工作日 9-12 / 14-18 点（原价）' },
-  { group: '看画面', key: 'video.offPeakPerDay', label: '空闲时段每天几条', kind: 'num', min: 0, max: 20, step: 1, hint: '其余时间（半价），额度给得多些' },
+  { group: '看画面', key: 'video.perDay', label: '高峰时段每天几条', kind: 'num', min: 0, max: 6, step: 1, hint: '工作日 9-12 / 14-18 点（原价）' },
+  { group: '看画面', key: 'video.offPeakPerDay', label: '空闲时段每天几条', kind: 'num', min: 0, max: 12, step: 1, hint: '其余时间（半价），额度给得多些' },
   { group: '看画面', key: 'video.vsPath', label: 'vs 外挂目录', kind: 'text', hint: '空 = 自动找，通常不用填' },
   { group: '看画面', key: 'video.hotword', label: '听写热词', kind: 'text', hint: '空格分开，提高专有名词识别率；空 = 不用' },
 
   { group: '评论区', key: 'comment.enabled', label: '她能在 B 站说话', kind: 'bool', danger: true, hint: '唯一会改动她账号上东西的功能：发评论留痕、别人能看见。默认关' },
-  { group: '评论区', key: 'comment.perDay', label: '每天最多发几条', kind: 'num', min: 0, max: 10, step: 1 },
+  { group: '评论区', key: 'comment.perDay', label: '每天最多发几条', kind: 'num', min: 0, max: 5, step: 1 },
   { group: '评论区', key: 'comment.replyPerDay', label: '每天最多回几条楼中楼', kind: 'num', min: 0, max: 10, step: 1 },
   { group: '评论区', key: 'comment.replyToReplies', label: '有人回她时允许回一句', kind: 'bool' },
-  { group: '评论区', key: 'comment.scanEveryMin', label: '多久看一眼有没有人回她', kind: 'num', min: 5, max: 240, step: 5, hint: '分钟' },
+  { group: '评论区', key: 'comment.scanEveryMin', label: '多久看一眼有没有人回她', kind: 'num', min: 5, max: 720, step: 5, hint: '分钟' },
   { group: '评论区', key: 'comment.window', label: '只在什么时段说话', kind: 'window', hint: '与她的作息分开，可单独调' },
   { group: '评论区', key: 'comment.atOwner', label: '评论开头 @ 你', kind: 'bool', hint: '需要先在 DSH 侧存过你的昵称' },
 
-  { group: '对话', key: 'chat.rotateAfter', label: '聊满几轮换新会话', kind: 'num', min: 0, max: 400, step: 10, hint: '0 = 永不换。撑爆上下文的那次事故根因就是轮数；换会话=侧栏上下文换一条，账本记忆不断。改之前先想清楚' },
+  { group: '对话', key: 'chat.rotateAfter', label: '聊满几轮换新会话', kind: 'num', min: 0, max: 500, step: 10, hint: '0 = 永不换。换会话=侧栏上下文换一条，账本记忆不断；下面还有按会话大小的触发器，谁先到谁生效' },
   { group: '对话', key: 'chat.rotateWhenKB', label: '会话内容多大换新', kind: 'num', min: 0, max: 5000, step: 100, hint: 'KB，0 = 不看大小。轮数和上下文大小不挂钩（一轮调很多次工具也会顶爆），量的是会话日志里会进上下文的内容（估），与轮数谁先到谁生效。默认 1MB（2026-11-10 计量修准后调上来；800 是旧口径虚高时的保守值）' },
-  { group: '对话', key: 'chat.replyChars', label: '单轮最多写多少字', kind: 'num', min: 0, max: 4000, step: 100, hint: '0 = 不限（默认），提示词里不出现任何长度要求' },
+  { group: '对话', key: 'chat.replyChars', label: '单轮最多写多少字', kind: 'num', min: 0, max: 2000, step: 100, hint: '0 = 不限（默认），提示词里不出现任何长度要求' },
 
-  { group: '房间', key: 'rooms.groupRotateDays', label: '群房用几天换新', kind: 'num', min: 0, max: 60, step: 1, hint: '0 = 不换；书房按 chat.rotateAfter 的轮数换' },
+  { group: '房间', key: 'rooms.groupRotateDays', label: '群房用几天换新', kind: 'num', min: 0, max: 365, step: 1, hint: '0 = 不换；书房按 chat.rotateAfter 的轮数换' },
 
   { group: '记忆与上下文', key: 'memory.docBudget', label: '身份文档字数预算', kind: 'num', min: 600, max: 4000, step: 100, hint: '超了按优先级丢可选段，「你是谁」永不丢；2400 实测一段不丢' },
   { group: '记忆与上下文', key: 'memory.sleepEveryDays', label: '每几天让她想一想', kind: 'num', min: 0, max: 60, step: 1, hint: '0 = 不主动想' },
   { group: '记忆与上下文', key: 'memory.selfWake', label: '空醒时自己找事做', kind: 'bool', hint: '0.9.0：醒来没派活、桌上也没东西时' },
-  { group: '记忆与上下文', key: 'memory.sleepKeep', label: '总共留多少条自述', kind: 'num', min: 1, max: 50, step: 1, hint: '超出后最早的折进「更早以前」' },
+  { group: '记忆与上下文', key: 'memory.sleepKeep', label: '总共留多少条自述', kind: 'num', min: 0, max: 100, step: 1, hint: '超出后最早的折进「更早以前」；0 = 一条不留' },
   { group: '记忆与上下文', key: 'memory.beliefsShown', label: '一轮摆几条判断', kind: 'num', min: 1, max: 8, step: 1, hint: '其余折成一行' },
   { group: '记忆与上下文', key: 'memory.hearEvery', label: '每几轮旁听你一句话', kind: 'num', min: 0, max: 50, step: 1, hint: '0 = 不记；记的是你曾经说过什么' },
 
