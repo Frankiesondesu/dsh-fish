@@ -41,7 +41,7 @@ const BINARY_EXT = new Set([
 /** 邮箱白名单：协议地址、示例域名、本机代号。其余一律算真邮箱。 */
 const ALLOW_EMAIL_DOMAINS = new Set([
   'users.noreply.github.com', 'noreply.github.com', 'github.com',
-  'example.com', 'example.org', 'example.net', 'localhost', 'fish', 'invalid',
+  'example.com', 'example.org', 'example.net', 'localhost', 'fish', 'invalid', 'users.noreply.invalid',
 ])
 
 /**
@@ -68,6 +68,13 @@ const ALLOW_UPSTREAM_EXAMPLES = new Set([
   ['C:', 'Users', '…'].join('/'),
   ['a.b', 'c.com'].join('@'),
   '138' + '12345678',
+  // 0.9.7 上游 PR #102–#104 的作者邮箱：公开在 GitHub 提交里，不是房主隐私。
+  // 用拼接写法，避免扫描器扫到自己源码时自触发（同上面几条）。
+  'bbleae' + '@' + 'outlook.com',
+  // CLAUDE.md 里的 `@AGENTS.md` 是 Claude Code 的文件引用语法，不是邮箱。
+  '+' + '@' + 'AGENTS.md',
+  // 0.9.7 上游 PR #104 的作者邮箱：公开在 GitHub 提交里。
+  'pipchief1' + '@' + 'gmail.com',
 ])
 
 /**
