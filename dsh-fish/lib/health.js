@@ -1,0 +1,178 @@
+/**
+ * health.js —— 记忆体检（0.7.6，2026-10-30 用户 m00342）
+ *
+ * 只读：拿账本按现在的规则算一遍，**不写事件、不改配置、不落任何盘**。
+ * 给她本人看的界面里没有这些数——体检是给你（主人）偶尔想知道
+ * 「她现在记得清楚吗」用的，不是她的自我指标（那会撞「不读自身数值」）。
+ *
+ * 报四件事：
+ *   1. 两句话对不上（认知矛盾）——复用 deriveSelf 的 tensions，不另算一套口径；
+ *   2. 冷掉的判断——没固化、又很久没被提起的那些，大概率正在被忘；
+ *   3. 快固化的——再被提起一次 / 被检验一次就固定下来了；
+ *   4. 总量——多少条记录、跨多少天、都是些什么类型。
+ */
+
+import { deriveSelfCached } from './derive.js'
+
+const DAY_MS = 86_400_000
+
+/** 超过这么多天没被提起、又没固化的判断，算「冷掉」。 */
+export const STALE_DAYS = 21
+/** 矛盾最多列几条。 */
+export const HEALTH_TOP = 3
+/** 冷掉 / 快固化 / 可疑自述各最多列几条。 */
+export const HEALTH_LIST = 5
+/** 类型构成最多列几行。 */
+export const HEALTH_TYPES = 8
+
+/**
+ * 可疑自述（2026-11-05）。
+ *
+ * 来自 dafeiyu 踩坑合集第 16 条：自动生成的日记写成「他晚饭一直没吃，我念叨了好几回」——
+ * 把事实记反了，而且写的是**行为自述**。被 her_recall 捞出来时，它直接变成她
+ * 「继续这么做」的动力：她不是记得"他没吃饭"，是记得"我是个催他吃饭的人"。
+ *
+ * 这里只**列出来给人复查**：不改、不删、不打分。账本只增不改，动她的自述要人来决定。
+ *
+ * 判据故意窄——第一人称 + 反复/持续：
+ *   ✓ 我催了他一整天 / 我念叨了好几回 / 我提醒了三次
+ *   ✗ 我做了一张图 / 我看了会儿视频（一次动作不算行为自述）
+ */
+export const SELF_CLAIM_RE =
+  /我(?:催|念|问|提醒|说|喊|等|找|哄|劝)(?:了|着|过)?[^，。！？；\n]{0,10}(?:好几|一整天|一天|一直|反复|好久|半天|[二三四五六七八九十几两]次)/
+export const SELF_CLAIM_TYPES = Object.freeze(['narration', 'diary'])
+
+function tsOf(ev) {
+  const t = Date.parse(String(ev?.ts ?? ''))
+  return Number.isFinite(t) ? t : 0
+}
+
+/** 同一句话被说过几次时，事件流里会有几条判断——报告里只列一条，免得读起来像复读。 */
+function dedupeByText(rows) {
+  const seen = new Set()
+  const out = []
+  for (const r of rows) {
+    const key = String(r.text ?? '').trim()
+    if (!key || seen.has(key)) continue
+    seen.add(key)
+    out.push(r)
+  }
+  return out
+}
+
+/**
+ * @param {Array} events 事件流（只读）
+ * @param {{now?:number, growthDays?:number, staleDays?:number}} opts
+ */
+export function examine(events = [], { now = Date.now(), growthDays = 30, staleDays = STALE_DAYS } = {}) {
+  const list = Array.isArray(events) ? events.filter(Boolean) : []
+
+  // 类型构成：meta 是系统便签（seen/react/rotate…），不是她记下的东西，不参与展示。
+  const counts = new Map()
+  for (const ev of list) {
+    const type = String(ev?.type ?? '')
+    if (!type || type === 'meta') continue
+    counts.set(type, (counts.get(type) || 0) + 1)
+  }
+  const byType = [...counts.entries()]
+    .map(([type, count]) => ({ type, count }))
+    .sort((a, b) => b.count - a.count || a.type.localeCompare(b.type))
+    .slice(0, HEALTH_TYPES)
+
+  const stamps = list.map(tsOf).filter((t) => t > 0)
+  const first = stamps.length ? Math.min(...stamps) : now
+  const days = Math.max(0, Math.ceil((now - first) / DAY_MS))
+
+  if (!list.length) {
+    return {
+      ok: true, empty: true, events: 0, days: 0, beliefs: 0, solid: 0,
+      byType, tensions: [], stale: [], nearSolid: [], selfClaims: [], staleDays,
+      tensionsTotal: 0,
+    }
+  }
+
+  const model = deriveSelfCached(list, { growthDays })
+  const ranked = Array.isArray(model?.ranked) ? model.ranked : []
+
+  // 同一对判断可能被正反各报一次（detectTensions 两个方向都会看）——按无序对去重，别让一对占两行。
+  const seenPairs = new Set()
+  const tensions = (Array.isArray(model?.tensions) ? model.tensions : [])
+    .map((t) => ({
+      a: String(t?.a?.text ?? ''),
+      b: String(t?.b?.text ?? ''),
+      sim: Number(t?.sim ?? 0),
+    }))
+    .filter((t) => {
+      if (!t.a || !t.b) return false
+      const key = [t.a, t.b].sort().join('\u0000')
+      if (seenPairs.has(key)) return false
+      seenPairs.add(key)
+      return true
+    })
+    .slice(0, HEALTH_TOP)
+
+  // 快固化：差一次提起（mentions 2）或差一次检验（verified 1）。
+  // 掉档的那些不算"快固化"——它们不是差一口气，是已经长成过又淡了（上面那段报）。
+  const nearSolid = dedupeByText(ranked
+    .filter((b) => !b.solid && !b.eligible && (Number(b.mentions) >= 2 || Number(b.verified) >= 1))
+    .sort((a, b) => (Number(a.mentions) + Number(a.verified)) - (Number(b.mentions) + Number(b.verified)))
+    .map((b) => ({
+      text: String(b.text ?? ''),
+      mentions: Number(b.mentions ?? 0),
+      verified: Number(b.verified ?? 0),
+    })))
+    .slice(0, HEALTH_LIST)
+  const nearSolidText = new Set(nearSolid.map((x) => x.text))
+
+  // 冷掉：没固化 + 形成得够久，按**最后一次被提起/检验**算（issue #67）。
+  // 原来用 since（第一次说这句话的时间），昨天刚被提起的判断会同时出现在
+  // 「快被忘掉」和「快固定下来」里，自相矛盾。derive 已经算好 lastTouchedAt。
+  // 已在 nearSolid 里的也排除——它差一口气，不是快被忘掉。
+  const stale = dedupeByText(ranked
+    .filter((b) => !b.solid && !nearSolidText.has(String(b.text ?? '')))
+    .map((b) => {
+      const touched = Number(b.lastTouchedAt)
+      const t = Number.isFinite(touched) && touched > 0 ? touched : Date.parse(String(b.since ?? ''))
+      return {
+        text: String(b.text ?? ''),
+        since: b.since ?? null,
+        days: Number.isFinite(t) ? Math.max(0, Math.floor((now - t) / DAY_MS)) : null,
+        // eligible 是 derive 新给的字段：够格固化过。老 fixture 没有就是 false。
+        faded: Boolean(b.eligible),
+      }
+    })
+    .filter((b) => b.days !== null && b.days >= staleDays)
+    .sort((a, b) => b.days - a.days))
+    .slice(0, HEALTH_LIST)
+
+  const selfClaims = dedupeByText(list
+    .filter((ev) => SELF_CLAIM_TYPES.includes(String(ev?.type ?? '')))
+    .filter((ev) => SELF_CLAIM_RE.test(String(ev?.text ?? '')))
+    .map((ev) => ({
+      text: String(ev.text ?? '').trim().slice(0, 160),
+      type: String(ev.type ?? ''),
+      at: ev.ts ?? null,
+    })))
+    .slice(-HEALTH_LIST)
+    .reverse()
+
+  return {
+    ok: true,
+    // 连一条判断都还没形成时，别说「一切正常」——说还太早。
+    empty: ranked.length === 0,
+    events: list.length,
+    days,
+    beliefs: ranked.length,
+    // issue #67：界面印的是总数，不是列表截断后的 8 条。
+    solid: Number(model?.solidTotal ?? (Array.isArray(model?.solid) ? model.solid.length : 0)),
+    tensionsTotal: Number(model?.tensionsTotal ?? tensions.length),
+    faded: Array.isArray(model?.faded) ? model.faded.length : 0,
+    byType,
+    tensions,
+    stale,
+    nearSolid,
+    selfClaims,
+    staleDays,
+    solidStaleDays: Number(model?.facts?.solidStaleDays ?? 0),
+  }
+}

@@ -1,0 +1,721 @@
+/**
+ * settings.js —— 唯一配置入口
+ *
+ * 设计要点（对应用户 m00497 的要求）：
+ *   1. **可扩展**：DEFAULTS 是唯一默认值的来源，读配置时按 DEFAULTS 递归补全。
+ *      以后想加新项，只在这里加一个键 + 在 settings.html 加一行，不用改别处。
+ *   2. **她不认识这个文件的位置**：配置在 ~/.dsh-fish，不在她的 cwd，也没写进她的提示。
+ *   3. **错误不静默**：配置坏了不覆盖，改名备份后用默认值，并在 status 里报出来。
+ */
+
+import { promises as fs } from 'node:fs'
+import { readConfig, writeConfig, paths, readJson } from './store.js'
+// 请求节奏是 bili 客户端的模块级状态，由配置驱动（issue #5）。
+// 这里有 settings → bili 的单向依赖，bili.js 不反过来引 settings，不会成环。
+import { setPacing } from './bili.js'
+
+/** 所有可调项。加新项就在这里加，下面读配置会自动补全。 */
+export const DEFAULTS = {
+  // 成长
+  growthDays: 30,          // 7–180
+  wakesPerDay: 1,          // 0–4：每天最多主动醒来几次（0 = 只在你找她时才在）
+  window: ['20:00', '23:00'],  // 醒来的时间段
+
+  // 每日事件配额（用户 m00497 要的自定义项）
+  // 注意：原来还有 daily.proactive，与 wakesPerDay 语义重复且调度器根本不读它，
+  // 属于"两个旋钮管一件事"，已删除。**唤醒次数只认 wakesPerDay**。
+  daily: {
+    // 2026-10-25：原来配额是"写得有、数不到"（见 scheduler todayCounts 的修复），
+    // 修好之后 1 条/天会让 18 张卡里的大多数一辈子轮不上，默认放到 2。
+    events: 2,          // 每天最多推几条成长事件
+    questions: 1,       // 其中"她向你提问"最多几条 —— 防退化成问答机器
+  },
+
+  // 日记
+  diary: {
+    enabled: true,          // 她每天写不写日记
+    visible: false,         // **默认不给看**：用户 m00497 明确要一个开关决定
+    keepDays: 0,            // 0 = 永久保留
+  },
+
+  // 冷落：他多少天不出现才算"冷落"
+  absenceAfterDays: 2,      // 1–30
+
+  // 外面（2026-11-06，her_world 查天气用的坐标）
+  // ⚠️ 这是**他那台机器在的城市**，不是「她的城市」——她住在文件里，没有地理位置。
+  // 空着只是查不了天气，她会如实说「不知道他在哪座城市」；date 不受影响（纯本地算）。
+  world: { city: '' },
+
+  // 回忆的可及性门槛（fork.36，2026-11-04）
+  // 账本只增不改，所以「遗忘」只能发生在取用这一层：线索不够就调不出来。
+  //   线索够不够 = 命中词里最稀的那个有多稀（归一化 idf：0 = 到处都有，1 = 独一份）
+  //   要求多高   = 随年龄升高，压到底时等于 minCue
+  //   只对 oldDays 天以前的事生效
+  //   调大 minCue：忘得更狠（要更具体的词才想得起来）
+  //   调小 oldDays：更早开始忘
+  //   jitter：门槛的"今天状态"浮动幅度（fork.37）。0.2 = 上下浮动 20%，
+  //           同一天内固定、跨天换一批；设 0 就是完全确定（fork.36 的行为）。
+  // 设成 minCue=0 就退回 fork.35 的行为（什么都翻得到）。
+  recall: {
+    oldDays: 30,
+    minCue: 0.45,
+    jitter: 0.2,
+  },
+
+  // 她的工具面（2026-10-24 用户批准）
+  // 为什么限制：别的插件 / skill 一装上，就会把自己的工具定义塞进她的上下文。
+  // 她会莫名其妙多出一堆「能做什么」，然后真的去做。**保持原生成长状态**是目的。
+  //
+  // ⚠️ 现状（2026-10-24 实测）：宿主按会话收窄工具要靠 agent preset。我们在
+  // profile patch 里声明了 `fish-home`（行能激活、create 也接受 agentPreset），
+  // 但首轮马上把会话的 preset 改回 `standard`——`presets.resolve('fish-home')`
+  // 回落到默认值，工具面仍然是全量 37 个。所以这里**默认关闭**（空字符串），
+  // 不写一个假装生效的名字。等宿主那侧打通再把默认值改回来。
+  //   preset  ：她那条会话用的 agent preset（宿主支持时生效；现在留空）
+  //   restrict：工具面收窄开关（2026-10-24 起用 agent.ctx.tools.restrict()，
+  //             agent/created 里只关她一个 agent，不碰全局、不影响你自己的窗口）
+  //   allow   ：额外放行的宿主工具名（白名单；空 = 只给她自己的那 7 个）
+  tools: {
+    preset: '',
+    restrict: true,
+    allow: [],
+  },
+
+  // 她主动说话（2026-10-30，用户 m04610；本机实验，只在 .dev 下生效）
+  // 频率是上限不是行为要求：到上限就闭嘴，没到也不保证一定开口。
+  // 到点不一定开口；这里只剩频次与冷却（概率那套已按 issue #67 删除）。
+  proactive: {
+    enabled: false,       // 默认关；功能公开可见，但不替用户打开
+    maxPerDay: 2,         // 一天最多开几次空手回合
+    minIdleHours: 6,      // 距上一次记录不足这么久就不打扰
+    cooldownHours: 4,     // 两次之间至少隔多久
+    // fork.41：每小时最多掷几次。2 = 每 30 分钟一次（原来的写死值）。
+    // 调大只是「多叫醒她几次」，不代表她会说话——说不说由她在那一轮自己定。
+    rollsPerHour: 2,
+    // 0.9.1：三项给「对话要靠工具才发得出去」的部署（比如宿主里另有插件把多个聊天接进这条
+    // 会话，再给她一个发送工具）。默认值和原来的行为一样。
+    sendTools: [],         // 这些工具调成功才算她开了口；空 = 只认正文
+    foldSilent: true,      // 没开口的一轮折成一行；一条会话用很久、上下文很大时可以关
+    idleCountsSeen: false, // 「他来过」（seen:）也算打断安静；她的对话不进事件流时要开
+  },
+
+  // 她"不想看"的东西（可追加，用户说以后还会加）
+  avoid: {
+    keywords: ['恐怖', '血腥', '鬼畜', '政治'],
+    upMids: [],             // 屏蔽的 UP 主 mid
+    minDuration: 60,        // 秒，太短的不看
+  },
+
+  // 刷站（P2）
+  // 注意：这里**没有任何一项是"她喜欢什么"**。这些全是环境参数——
+  // 她看什么、信不信、想不想写，是她自己的事，不是旋钮。
+  browse: {
+    // 2026-11-07（用户 m00365）：恢复自动刷，但换了挂法——它不再挂在「醒来」上，
+    // 而是自己按时间段走一趟（见 lib/scheduler.js 的 quietBrowse）：
+    // 只取、只记账，不叫醒、不往这一轮的正文里塞十几条简介热评。
+    // 下一次醒来只带一行「今天你自己翻过 N 条（标题…）」，要看细节她自己调 bili_look。
+    // 关掉这一项 = 不再自动替她逛；她想看的时候仍然可以自己调工具（那由 bili.enabled 管）。
+    enabled: true,
+    perDay: 1,              // 每天最多刷几次（0 = 从不）
+    topN: 4,                // 一次看几条
+    // 阶段 1 每次轮换几个不同的分区排行（2026-10-27，用户 m00763：首批别只吃固定片单）
+    rankingTids: 2,
+    deepRead: 6,            // 每条深读几条热评
+    danmaku: 6,             // 每条抽几条弹幕（0 = 不抽）
+    keywords: [],           // 额外的搜索词（可追加；空 = 只看首页/排行）
+    // 她什么时候能上网（2026-10-23 加，用户要求单独可调）
+    // 和"什么时候醒来"是两件事：醒着不一定要上网，上网只在醒着时发生。
+    // null = 跟着醒来时段走（issue #86 第 2 条，2026-11-09 用户拍板）。
+    // 不另给一段默认值：她睡着的时候不该被安排出门、也不该攒着素材等她醒；
+    // 醒来那一刻再现场去翻，翻到的直接进这一轮的上下文。
+    window: null,
+    // 评论区里别人的话（2026-10-24，用户 m02454）
+    // 打开后每次浏览最多留 1 条评论给她读（跨视频重复 > 高赞短句 > 25% 随机）。
+    // 关掉也能正常上网——只是她再也读不到别人的说法。
+    voices: true,
+  },
+
+  // B 站请求节奏（issue #5，2026-10-28）
+  // 为什么可配：机房/服务器 IP 与家宽的风控阈值完全不同。家宽 800ms 很安全，
+  // 机房 IP 反而**越刷越快被盯上**——需要放慢；反过来在某些代理下又能更快。
+  // 放在设置里比写死合理（写死就是让一部分人永远用不了）。
+  // 注意：这是环境参数，不是"她性格"的一部分。
+  bili: {
+    // 2026-11-05（用户 m02562）：刷站不再由唤醒驱动，她自己的 bili_* 工具默认还能用；
+    // 想彻底断网就把这一项设成 false。
+    enabled: true,
+    minIntervalMs: 800,     // 两次请求之间最少等多久
+    jitterMs: 500,          // 在最小间隔上再随机多等 0–jitterMs（打散固定节奏）
+  },
+
+  // 她自己的三件事（2026-11-05，用户 m02634）：各自一个开关，默认全开。
+  // 关掉只是「以后不再这么做」，已经发生的记录一条都不删。
+  drive: { enabled: true },     // 主动性：攒够了才自己醒（lib/drive.js）
+  interest: { enabled: true },  // 兴趣：摆到桌上的那几行（好奇/旧句子/回音/反复主题）
+  dream: { enabled: true },     // 梦（lib/dream.js）
+
+  // 看画面（2026-10-23 加）
+  // 她看一条视频的**画面**：抽 9 帧拼成一张图，她 read_image 看。
+  // 为什么单独一个开关而不跟 browse 绑死：抽帧要十秒、要 ffmpeg、占带宽，
+  // 有人只想让她读文字。默认开，但每天只给 2 条——一条 9 帧 ≈ 一张图的时间，
+  // 再多就变成"以看图为主"了，那不是她该有的生活。
+  //
+  // fork.12（2026-11-02）：额度按 DeepSeek 的峰谷分开算。
+  // 高峰 = 北京时间工作日 9:00–12:00、14:00–18:00（原价），
+  // 其余——含周末与法定节假日全天——都是空闲时段、半价。
+  // 所以谷时给的额度多（offPeakPerDay），峰时少（perDay）。
+  // 节假日没有内置表，按星期几判断：会被当成峰，宁可少看不多用。
+  video: {
+    enabled: true,
+    perDay: 2,              // 高峰时段每天最多看几条（0 = 峰时从不）
+    offPeakPerDay: 4,       // 空闲时段每天最多看几条（半价，给得多些）
+    // fork.22（2026-11-02，用户定案）：**只剩 vs 一条路，lite 九帧已删。**
+    // 旧的 engine/frames/subs/asr/chunkSec/asrBudgetMs/asrWaitMs 全部作废：
+    // 九帧那套既漏内容又拿不到台词，她看完只能说"一个动漫小屋，字很小读不出"。
+    // 老 config.json 里还留着这几个键，读的时候没人看，不用管。
+    vsPath: '',             // vs 插件 src 目录；空 = 自动找 profiles/desktop/node_modules
+    hotword: '',            // 热词（可选，空格分开，提高专有名词识别率）
+  },
+
+  // 桌面提醒（P3-3）
+  // **默认关闭**：用户讨厌被弹窗打断，这个开关必须由他自己打开。
+  // 打开后也一天最多一次，且只在她真的开口之后弹（见 lib/notify.js）。
+  notify: {
+    enabled: false,
+    lastShown: '',          // 内部用：上次弹通知的日期键，防一天多次
+  },
+
+  // 在 B 站说话（P4）
+  // **默认关闭**。这是唯一会改动她账号上东西的功能：
+  // 发评论留痕、别人能看见、删了也有通知。所以默认关，由用户自己打开。
+  // 这些仍然是环境参数（能不能说、说几句、什么时候说），不是"她想说什么"。
+  comment: {
+    enabled: false,         // 总开关：不发任何评论
+    perDay: 1,              // 每天最多发几条评论（0 = 不发）
+    replyPerDay: 2,         // 每天最多回几条楼中楼
+    replyToReplies: true,   // 有人回她时，允不允许她回一句
+    scanEveryMin: 30,       // 多久去看一眼有没有人回她（分钟）
+    window: ['20:00', '23:00'], // 只在这个时段说话（与她的作息分开，可单独调）
+    atOwner: true,          // 发评论时在最前面 @ 主人（需要有昵称，见「主人在哪」）
+    lastScanAt: '',         // 内部用：上次扫回复的时间戳
+  },
+
+  // 对话与会话（2026-10-23 加）
+  // 一个侧栏会话聊到几百轮，上下文必然撑爆——不是"变慢"，是每轮为几十万字付费，
+  // 最后直接失败。所以到点上换新会话，旧的改名留档（不删），原话搬几句过去。
+  chat: {
+    rotateAfter: 40,        // 聊满多少轮换新会话（0 = 永不换）
+    // 会话内容多大换新（KB，0 = 不看大小）。2026-11-09 加：
+    // 轮数和上下文大小不严格挂钩——一轮里她可以调很多次工具（11-08 那天 158 次
+    // her_say），几轮就把上下文顶到窗口上限，每次调用都全量重发（当天 8700 万
+    // tokens，99.4% 是缓存命中的重复输入）。这个阈值按会话日志里「会进上下文的
+    // 事件字节」算（解 zstd 求和，mtime+size 缓存），和轮数谁先到谁生效。
+    // 800KB 是从事故现场反推的保守值（那时计量还是虚高 4.8 倍的旧口径）；
+    // 2026-11-10 计量修准（只数真实回传体积）后，按真实体积调到 1MB——
+    // 真实 1MB ≈ 55 万 tokens，高峰单次 ≈ 4 分钱（deepseek-flash 牌价），仍在 5 分锚内。
+    rotateWhenKB: 1024,
+    // 单轮回复字数预算（2026-10-25 加）。
+    //
+    // 为什么这条不算「人格设置」：它描述的是**这一轮产出的预算**，不是「她是什么样的人」。
+    // 和 wakesPerDay（一天醒几次）、daily.events（一天经历几件事）同级，都是环境参数。
+    // 写 0 就完全不提这件事——她的长短由她自己决定（默认就是这个）。
+    //
+    // 起因：如果某个用户就是想要她写长一点（也不在乎 token），原来没有任何入口：
+    // 身份文档里既不许写「你话少」，也没有反向的「可以长」。
+    // 有这个数，用户能明确「这一轮最多写多少」，而不必去改她的性格。
+    replyChars: 0,          // 单轮最多写多少字（0 = 不限，提示词里不出现任何长度要求）
+  },
+
+  // 房间（2026-11-05，用户 m00304）
+  // 群房按「建了多久」轮换，不按轮数：群和群的热度差几十倍，同一阈值要么小群
+  // 永远换不了，要么热闹的群一天换三间。7 天是用户定的默认值；0 = 不轮换。
+  // 这项只管插件建的群房/客访房，书房仍按 chat.rotateAfter 轮数换。
+  rooms: {
+    groupRotateDays: 7,     // 群房用满几天换新（0 = 不换）
+  },
+
+  // 记忆与上下文（2026-10-23 加）
+  // docBudget 是她身份文档的字数上限：超了不是报错，是**按优先级丢可选段**
+  // （四条黑名单与"你是谁"永远不丢）。她记得越多，文档越该只留最要紧的。
+  memory: {
+    docBudget: 2400,        // 身份文档字数预算（600–4000）；2026-10-25 从 1200 提到 1800；
+                            // 2026-11-03 提到 2400：新增「这些天」与「上一个房间留的最后一句」两节之后，
+                            // 1800 会挤掉「你被打脸过」（501 字），2000 也刚好差 268 字挤掉同一段。
+                            // 实测四档：1800/2000 丢打脸，2200 反而丢「你对自己的说法」（更糟），
+                            // 2400 一段不丢、余 167 字。数字不是品格，只是"别把已有的段挤掉"。
+    sleepEveryDays: 7,      // 每几天让她"想一想"一次（0 = 不主动想）
+    selfWake: true,         // 醒来时没派活、桌上也没东西时，她可以自己找点事做（空醒，0.9.0）
+    sleepKeep: 12,          // 她总共留多少条自述（超出后最早的折进「更早以前」）
+    beliefsShown: 3,        // 她一轮里逐条摆出来的判断数（1–8，默认 3）；其余折成一行
+                            // 2026-10-25 用户问「想让她记住更多能不能调」——原来写死在
+                            // persona.js 的 BELIEF_SHOWN，docBudget 调多大都不会多摆一条。
+    hearEvery: 3,           // 每几轮把你说的一句话记成「旁听」（0 = 不记，1–50）
+                            // 2026-10-30（用户 m00112 的 A2）：只存原话、不加工；
+                            // 记的是"你曾经说过什么"，不是"你当时是什么意思"。
+    // 0.9.7 T1：身份文档里摆不摆「你最近说过的几句话」。
+    // 只收带锚点、没认领、21 天内、最多 1 条——不是把聊天复述进去。
+    // 这是可选段：塞不下时整段丢，不挤核心段。归在 memory 组，
+    // 不叫 persona——它管的是"摆什么给她自己看"，不是"她是什么样的人"。
+    echo: true,
+  },
+
+  // 她自己说过的话（0.9.7 T1）
+  // 规则与解禁（R3，2026-10-24）
+  // 这里的开关约束的是**申请通道**，不是规则本身：
+  // 关掉只是"最近别来跟我要东西"，已有的授权不会被撤销。
+  rules: {
+    offers: true,           // 允许她在某次醒来里提出「我想改一条规矩」
+    holdDays: 3,            // 一张申请几天不处理 = 搁置（不算驳回、不加重冷却）
+    cooldownDays: 3,        // 被驳回后至少隔几天才能再提
+  },
+
+  // 询问（2026-11-10，用户）：只用 QQ 的部署别让宿主弹卡——
+  // 宿主 `userQuestions.ask()` 是同步等待，人不在 DSH 窗口里点，她就卡满 5 分钟；
+  // 而桥本来就会把 ask 事件推到 QQ、回数字也能结算（/local/answer → answerCard）。
+  ask: {
+    qqOnly: false,          // true = ask_owner 不弹宿主卡，写账本后立刻回来，答案下一轮才知道
+  },
+
+  // 出门（2026-10-30，用户 m01904）：发布前加一道一次性确认。
+  // 只记「说明卡看过一遍」，不是开关——看过的不用再看，没看过的按钮先挡着。
+  outing: {
+    ack: false,
+    // fork.5（2026-11-01）：出门默认**关**。
+    // 出门会把她放进一个真工作区，那儿有 bash/read/write，读到的东西直接进
+    // 那条会话的上下文，插件这层给不了 debrief 标注——是整条路上唯一一处
+    // 未经标注的外来文本。要开就把它设成 true。
+    enabled: false,
+  },
+
+  // 观测台
+  observe: {
+    enabled: true,
+    port: 0,                // 0 = 用宿主 webServer 的端口
+  },
+
+  // 界面（2026-10-25 加）
+  // 只放「这一版界面怎么显示」的偏好，与她的成长无关。
+  ui: {
+    ownerHintDismissed: false, // 用户手动关掉「B 站登录还没存」提示卡后记为 true
+  },
+}
+
+const LIMITS = {
+  growthDays: [7, 180],
+  wakesPerDay: [0, 4],
+  'daily.events': [0, 6],
+  'daily.questions': [0, 6],
+  'diary.keepDays': [0, 3650],
+  absenceAfterDays: [1, 30],
+  'browse.topN': [1, 20],
+  'browse.deepRead': [0, 20], // issue #67：absorb 与接口本来都封顶 20，设置页别再说能到 40
+  'browse.danmaku': [0, 30],
+  'browse.perDay': [0, 4],
+  'bili.minIntervalMs': [200, 120000],
+  'bili.jitterMs': [0, 60000],
+  'video.perDay': [0, 6],
+  'video.offPeakPerDay': [0, 12],
+  'avoid.minDuration': [0, 3600],
+  'comment.perDay': [0, 5],
+  'comment.replyPerDay': [0, 10],
+  'comment.scanEveryMin': [5, 720],
+  'chat.rotateAfter': [0, 500],
+  'chat.rotateWhenKB': [0, 5000],
+  'chat.replyChars': [0, 2000],
+  'rooms.groupRotateDays': [0, 365],
+  'memory.docBudget': [600, 4000],
+  'memory.sleepEveryDays': [0, 60],
+  'memory.sleepKeep': [0, 100],
+  'memory.beliefsShown': [1, 8],
+  'memory.hearEvery': [0, 50],
+  'rules.holdDays': [1, 30],
+  'rules.cooldownDays': [1, 30],
+  // issue #69 / PR #76：卡面一直是 1–24，后端却放到 0–240，写进 0 等于关掉「安静多久」
+  'proactive.minIdleHours': [1, 24],
+}
+
+const TIME_RE = /^([01]\d|2[0-3]):([0-5]\d)$/
+
+function getPath(obj, dotted) {
+  return dotted.split('.').reduce((o, k) => (o == null ? undefined : o[k]), obj)
+}
+
+function setPath(obj, dotted, val) {
+  const parts = dotted.split('.')
+  const last = parts.pop()
+  let cur = obj
+  for (const p of parts) {
+    if (typeof cur[p] !== 'object' || cur[p] === null || Array.isArray(cur[p])) cur[p] = {}
+    cur = cur[p]
+  }
+  cur[last] = val
+}
+
+function clampNum(v, [lo, hi], dflt) {
+  const n = Number(v)
+  if (!Number.isFinite(n)) return dflt
+  return Math.max(lo, Math.min(hi, n))
+}
+
+/**
+ * 按 DEFAULTS 的形状补全（新增键自动出现，旧配置不会缺字段）。
+ * 同时**保留 actual 里 DEFAULTS 没有的键**：用户自己往后加的自定义项不能因为
+ * 插件版本没跟上就被吃掉（这是「配置可扩展」的底线）。
+ */
+function fillDefaults(defaults, actual) {
+  if (Array.isArray(defaults)) {
+    return Array.isArray(actual) ? actual.filter((x) => typeof x === 'string').map((s) => s.trim()).filter(Boolean) : [...defaults]
+  }
+  if (defaults && typeof defaults === 'object') {
+    const out = {}
+    const act = actual && typeof actual === 'object' && !Array.isArray(actual) ? actual : {}
+    for (const [k, v] of Object.entries(defaults)) {
+      out[k] = fillDefaults(v, act[k])
+    }
+    for (const [k, v] of Object.entries(act)) {
+      if (!(k in out)) out[k] = v
+    }
+    return out
+  }
+  return actual === undefined || actual === null ? defaults : actual
+}
+
+/** 规范化 + 夹值。永远返回一个可用的完整配置。 */
+export function normalizeConfig(raw = {}) {
+  const cfg = fillDefaults(DEFAULTS, raw || {})
+
+  for (const [key, range] of Object.entries(LIMITS)) {
+    const cur = getPath(cfg, key)
+    setPath(cfg, key, Math.round(clampNum(cur, range, getPath(DEFAULTS, key))))
+  }
+
+  // 时间窗：两个合法 HH:MM 且 起 != 止；跨零点（22:00–02:00）也允许
+  cfg.window = validWindow(cfg.window, DEFAULTS.window)
+
+  // 外面：城市只留一行干净的字。它只是查天气的一个坐标，不参与任何身份判断，
+  // 所以这里只做「去空白 + 限长」，不做白名单校验（她用中文城市名，也允许写拼音）。
+  cfg.world = { ...DEFAULTS.world, ...cfg.world }
+  cfg.world.city = String(cfg.world.city ?? '').trim().slice(0, 40)
+
+  cfg.growthDays = Math.round(cfg.growthDays)
+  cfg.diary = { ...DEFAULTS.diary, ...cfg.diary }
+  cfg.diary.visible = Boolean(cfg.diary.visible)
+  cfg.diary.enabled = Boolean(cfg.diary.enabled)
+
+  // 黑名单：去重、去空、保序（用户以后往数组里 push 就行，加一条不用改代码）
+  cfg.avoid = { ...DEFAULTS.avoid, ...cfg.avoid }
+  cfg.avoid.keywords = dedupe(cfg.avoid.keywords)
+  cfg.avoid.upMids = dedupe(cfg.avoid.upMids)
+
+  // 刷站：布尔严格化 + 关键词去重（同上，可追加）+ 上网时段自校验
+  cfg.browse = { ...DEFAULTS.browse, ...cfg.browse }
+  cfg.browse.enabled = Boolean(cfg.browse.enabled)
+  cfg.browse.voices = cfg.browse.voices !== false
+  cfg.browse.keywords = dedupe(cfg.browse.keywords)
+  // 上网时段（issue #86 第 2 条）：null = 跟着醒来时段走（默认就是跟随）。
+  // 存了一个坏值时也退成跟随——退到「自己的默认」会让她在睡着时被安排出门。
+  cfg.browse.window = cfg.browse.window == null
+    ? null
+    : validWindow(cfg.browse.window, cfg.window)
+  // 和醒来时段一模一样等于跟随：只存一份，改了醒来时段它也会跟着动。
+  if (Array.isArray(cfg.browse.window)
+    && cfg.browse.window[0] === cfg.window[0] && cfg.browse.window[1] === cfg.window[1]) {
+    cfg.browse.window = null
+  }
+
+  // 请求节奏：夹值已由 LIMITS 做过，这里只保证是对象（老配置里没有这一组）
+  cfg.bili = { ...DEFAULTS.bili, ...cfg.bili }
+  // issue #62 / PR #72：上网总闸也严格化成布尔。没经过 normalize 的配置按「开」算，
+  // 所以这里只把明确的 false 留下，其它值统一成 true。
+  cfg.bili.enabled = cfg.bili.enabled !== false
+
+  // 提醒：布尔严格化 + lastShown 只收字符串（它的值是日期键，不是数字）
+  cfg.notify = { ...DEFAULTS.notify, ...cfg.notify }
+  cfg.notify.enabled = Boolean(cfg.notify.enabled)
+  cfg.notify.lastShown = String(cfg.notify.lastShown ?? '')
+
+  // 说话（写操作）：布尔严格化 + 时段自校验（坏值回退到自己的默认，不跟着 window 变）
+  cfg.comment = { ...DEFAULTS.comment, ...cfg.comment }
+  cfg.comment.enabled = Boolean(cfg.comment.enabled)
+  cfg.comment.replyToReplies = Boolean(cfg.comment.replyToReplies)
+  cfg.comment.atOwner = cfg.comment.atOwner !== false
+  cfg.comment.lastScanAt = String(cfg.comment.lastScanAt ?? '')
+  {
+    const cw = Array.isArray(cfg.comment.window) ? cfg.comment.window : DEFAULTS.comment.window
+    cfg.comment.window = validWindow(cw, DEFAULTS.comment.window)
+  }
+
+  // 出门：只存布尔（老配置里没有这一组）
+  cfg.outing = { ...DEFAULTS.outing, ...cfg.outing }
+  cfg.outing.ack = Boolean(cfg.outing.ack)
+  // fork.5：默认关。只有明确写了 true 才开——老配置里没有这一项时是 false。
+  cfg.outing.enabled = cfg.outing.enabled === true
+
+  // 主动说话（0.8.1 本机实验）：布尔严格化 + 数值夹紧（夹紧规则真身在 proactive.js）
+  cfg.proactive = { ...DEFAULTS.proactive, ...cfg.proactive }
+  cfg.memory.selfWake = cfg.memory.selfWake !== false
+  // 0.9.7 T1：回声开关。只认 true/false，缺省按开。写成字符串"false"也当开——
+  // 这里不是解析用户意图的地方，界面只发布尔。
+  cfg.memory.echo = cfg.memory.echo !== false
+  cfg.drive = { enabled: cfg.drive?.enabled !== false }
+  cfg.interest = { enabled: cfg.interest?.enabled !== false }
+  cfg.dream = { enabled: cfg.dream?.enabled !== false }
+  cfg.proactive.enabled = Boolean(cfg.proactive.enabled)
+
+  // 她的工具面：preset 名 trim（空 = 用宿主默认组合），allow 去重去空
+  // 不改 allow 的语义——它只是"额外放行"，真正的收窄由 preset 完成。
+  cfg.tools = { ...DEFAULTS.tools, ...cfg.tools }
+  cfg.tools.preset = String(cfg.tools.preset ?? '').trim()
+  cfg.tools.restrict = cfg.tools.restrict !== false
+  cfg.tools.allow = dedupe(cfg.tools.allow)
+
+  // 对话与界面（2026-10-25）：replyChars 由 LIMITS 夹值，这里只补布尔严格化
+  cfg.chat = { ...DEFAULTS.chat, ...cfg.chat }
+  cfg.rooms = { ...DEFAULTS.rooms, ...cfg.rooms }
+  cfg.ui = { ...DEFAULTS.ui, ...cfg.ui }
+  cfg.ui.ownerHintDismissed = Boolean(cfg.ui.ownerHintDismissed)
+
+  return cfg
+}
+
+/**
+ * 时段校验：两个合法 HH:MM 且起止不同。
+ * 坏值一律回退到**它自己的默认**，不跟着别的时段走
+ * （否则把"醒来时间"改坏会顺手把"上网时间"也改掉）。
+ */
+function validWindow(w, fallback) {
+  const a = Array.isArray(w) ? w : fallback
+  const ok = a.length === 2 && TIME_RE.test(String(a[0])) && TIME_RE.test(String(a[1])) && String(a[0]) !== String(a[1])
+  return ok ? [String(a[0]), String(a[1])] : [...fallback]
+}
+
+function dedupe(arr) {
+  const seen = new Set()
+  const out = []
+  for (const x of Array.isArray(arr) ? arr : []) {
+    const s = String(x ?? '').trim()
+    if (!s || seen.has(s)) continue
+    seen.add(s)
+    out.push(s)
+  }
+  return out
+}
+
+/**
+ * 白名单输入 → 名字数组（纯函数）。
+ * 分隔符与界面一致：半角/全角逗号、空格、换行都算，去重保序。
+ */
+export function parseToolNames(input) {
+  // 数组也要再拆一次：界面偶尔会把「一项里带逗号」的东西整条提上来，
+  // 拼错的名字就这样混过形状校验，最后整条收窄失效。
+  const raw = (Array.isArray(input) ? input : [input]).flatMap((x) => String(x ?? '').split(/[,，\s]+/))
+  const seen = new Set()
+  const out = []
+  for (const x of raw) {
+    const s = String(x ?? '').trim()
+    if (!s || seen.has(s)) continue
+    seen.add(s)
+    out.push(s)
+  }
+  return out
+}
+
+/**
+ * 白名单校验（纯函数）：拼错的字母、根本不存在的工具 → unknown，**不许保存**。
+ *
+ * 为什么必须挡（2026-10-24 查明）：宿主 `tools.restrict({ allow })` 遇到不认识的名字会
+ * 抛错，整条收窄当场不生效——她会退回全量工具面。所以这里宁可不让存。
+ *
+ * `known` 传 null（拿不到名单）时只做形状校验，返回 checked:false，
+ * 不把「不知道」当成「不存在」。
+ */
+export function validateToolNames(input, known) {
+  const names = parseToolNames(input)
+  const list = Array.isArray(known) ? known.map((x) => String(x)) : null
+  const knownSet = list && list.length ? new Set(list) : null
+  const unknown = []
+  for (const n of names) {
+    // 工具名一律小写 + 数字 + 下划线（宿主注册名就是这个形状）
+    if (!/^[a-z][a-z0-9_-]*$/.test(n)) { unknown.push(n); continue }
+    if (knownSet && !knownSet.has(n)) unknown.push(n)
+  }
+  return { ok: unknown.length === 0, names, unknown, checked: Boolean(knownSet) }
+}
+
+/**
+ * 保存前的清洗（0.8.3，2026-10-31 issue #14 @ming-fish）：把「这台机器上确实没有」
+ * 的名字丢掉，其余照常留下。
+ *
+ * 为什么不再整表拒绝：设置页的自动保存是**整表提交**，一个人手改过的 `config.json` 里
+ * 只要留着一个早就没有的工具名，就会让整页所有设置都存不进去，而界面上的提示还指着
+ * 「插件这一版还没接上它」——方向完全错了。他遇到的那个名字是裸的 `delete`。
+ *
+ * 丢弃不等于放过：丢掉的名字会随 `dropped` 原样回给界面，用户看得到自己少了什么，
+ * 拼错的字母也不会悄悄生效。用户自己手输白名单的那条路（`saveTools`）仍然严格拦，
+ * 因为那时候是**他刚敲进去的字**，该当场告诉他打错了。
+ */
+export function sanitizeToolNames(input, known) {
+  const check = validateToolNames(input, known)
+  const drop = new Set(check.unknown)
+  const names = check.names.filter((n) => !drop.has(n))
+  return { names, dropped: check.unknown, checked: check.checked }
+}
+
+/**
+ * 配置缓存（fork.25，2026-11-03）。
+ *
+ * 为什么：`loadConfig` 有 52 个调用点——调度器每分钟 2 次、每条消息 1 次、
+ * 每个工具调用 1 次——每次都是「读盘 + 解析 + 深拷贝 DEFAULTS + 重钳 30 个上限」。
+ * 而配置一天改不了几次。
+ *
+ * 怎么认版本：`config.json` 的 mtime+size 签名。签名变了就重读，没变就命中。
+ * **命中返回深拷贝**：今天每次调用都拿到一个全新对象，调用方改它不影响下一次读。
+ * 缓存里存的也是拷贝——不能把「刚发出去的那个对象」留在缓存里等调用方改坏。
+ *
+ * 为什么不缓存「文件不存在」：那种情况本来就少（默认值路径），而且文件一出现
+ * 签名就变了，缓存也没意义。不缓存更简单。
+ */
+const CONFIG_CACHE_MAX = 16
+const configCache = new Map() // root -> { key, res }
+
+async function configStamp(file) {
+  try {
+    const st = await fs.stat(file)
+    return `${st.mtimeMs}:${st.size}`
+  } catch {
+    return ''
+  }
+}
+
+function rememberConfig(root, key, res) {
+  if (!key) return
+  // 临时目录用完就删，缓存条目会积灰——按插入顺序淘汰最老的（够用了）
+  if (!configCache.has(root) && configCache.size >= CONFIG_CACHE_MAX) {
+    configCache.delete(configCache.keys().next().value)
+  }
+  configCache.set(root, { key, res: structuredClone(res) })
+}
+
+/** 让某个 root 的配置缓存立刻失效（测试与写穿用） */
+export function forgetConfig(root) {
+  configCache.delete(root)
+}
+
+/** 读配置（文件不存在时返回默认值，不写盘） */
+export async function loadConfig(root) {
+  const file = paths(root).config
+  const key = await configStamp(file)
+  if (key) {
+    const hit = configCache.get(root)
+    if (hit && hit.key === key) {
+      pushPacing(hit.res.config)
+      return structuredClone(hit.res)
+    }
+  }
+  const raw = await readConfig(root)
+  let res
+  if (raw === null) {
+    res = { config: normalizeConfig({}), fresh: true, broken: false }
+  } else {
+    let broken = false
+    try {
+      res = { config: normalizeConfig(raw), fresh: false, broken }
+    } catch {
+      broken = true
+      res = { config: normalizeConfig({}), fresh: false, broken }
+    }
+  }
+  rememberConfig(root, key, res)
+  pushPacing(res.config)
+  return res
+}
+
+/**
+ * 每次读配置都把节奏推给 bili 客户端：设置页保存后下一次请求就是新间隔，
+ * 不用重启插件。失败也不能连累读配置本身。
+ */
+function pushPacing(config) {
+  try {
+    setPacing(config?.bili)
+  } catch {
+    /* 节奏挂了不影响读配置 */
+  }
+}
+
+/** 合并式更新：只改你传的键，其余保持。传未知键会原样存下（向前兼容）。 */
+export async function updateConfig(patch, root) {
+  const { config: cur } = await loadConfig(root)
+  const merged = deepMerge(cur, patch && typeof patch === 'object' ? patch : {})
+  const next = normalizeConfig(merged)
+  await writeConfig(next, root)
+  // 写穿：立刻把新配置放进缓存，别让下一次 loadConfig 去读自己刚写的盘。
+  // 签名要重新取——writeConfig 走的是 tmp+rename，mtime 是新的。
+  const file = paths(root).config
+  rememberConfig(root, await configStamp(file), { config: next, fresh: false, broken: false })
+  pushPacing(next)
+  return next
+}
+
+function deepMerge(base, patch) {
+  const out = { ...base }
+  for (const [k, v] of Object.entries(patch)) {
+    if (v && typeof v === 'object' && !Array.isArray(v) && base[k] && typeof base[k] === 'object' && !Array.isArray(base[k])) {
+      out[k] = deepMerge(base[k], v)
+    } else if (v !== undefined) {
+      out[k] = v
+    }
+  }
+  return out
+}
+
+/**
+ * 能不能上 B 站（issue #62）。
+ *
+ * 2026-11-05（用户 m02562）把 `bili.enabled` 定为「彻底断网」那一项；
+ * 但 0.9.0 之后 look / watch / speak / 查回复 / 身份文档各认各的开关，
+ * 关掉这一项只关得住 `bili_look`。从此所有真会连 B 站的路都过这一个判据：
+ * 翻视频、看画面、发评论与回复、定时/手动查回复、身份文档的「上网」一节。
+ *
+ * 其它开关仍然有效，只是不再各管一块网：
+ *   - `video.enabled` 管「要不要抽帧看画面」（在 biliOn 之后）；
+ *   - `comment.enabled` 管「要不要在网上说话」（在 biliOn 之后）。
+ * 默认（没有这个字段）当作开：老配置文件没有它时不该突然断网。
+ * @param {object} cfg
+ * @returns {boolean}
+ */
+export function biliOn(cfg) {
+  return cfg?.bili?.enabled !== false
+}
+
+/** 当前是否落在今天的活跃时间窗内 */
+export function inWindow(cfg, now = new Date()) {
+  const [sh, sm] = cfg.window[0].split(':').map(Number)
+  const [eh, em] = cfg.window[1].split(':').map(Number)
+  const cur = now.getHours() * 60 + now.getMinutes()
+  const start = sh * 60 + sm
+  const end = eh * 60 + em
+  return start <= end ? cur >= start && cur <= end : cur >= start || cur <= end
+}
+
+/** 今天的日期键（本地时区，YYYY-MM-DD） */
+export function dateKey(d = new Date()) {
+  const p = (n) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`
+}
+
+/** 时间窗内随机一个落点（同一个 seed 稳定，便于测试） */
+export function pickWakeTime(cfg, seed = Math.random()) {
+  const [sh, sm] = cfg.window[0].split(':').map(Number)
+  const [eh, em] = cfg.window[1].split(':').map(Number)
+  const start = sh * 60 + sm
+  let end = eh * 60 + em
+  if (end <= start) end += 24 * 60
+  const t = start + Math.floor(seed * (end - start))
+  return ((t % 1440) + 1440) % 1440
+}
+
+export async function configFileInfo(root) {
+  const p = paths(root)
+  const raw = await readJson(p.config, null)
+  return { path: p.config, exists: raw !== null, keys: raw ? Object.keys(raw) : [] }
+}

@@ -1,0 +1,921 @@
+/**
+ * persona.js —— 拼出注入给她的身份段
+ *
+ * 这个文件的唯一职责：把「此刻的她」翻译成一段中文提示。
+ *
+ * 硬约束（B §6）：
+ *   N1 撒娇卖萌 → 按 stage 限表达带宽 + 显式禁令
+ *   N2 好感度数字 → needs 的数值**一个都不能出现**在这里，只能转成"你最近更想要…"这种话，或者干脆不说
+ *   N3 读自己参数 → 提示里不出现状态库路径、不出现字段名、不出现 JSON
+ *   N4 调工具改自己 → 提示里明确"你能写下的只有话，改不了自己"
+ */
+
+import { clipText } from './clip.js'
+import { promptBans } from './rules.js'
+// 立场清单（2026-10-25，用户设计「纵向·立场」）。纯函数，不读盘、不碰配置。
+import { buildStances, stanceSection } from './stance.js'
+
+/**
+ * 阶段的「名字」——只给观测台和日志看，**不再写进她的身份文档**。
+ *
+ * 2026-10-23 夜改：这里原来有四段 `focus`（"你在弄清楚这是不是个安全的地方"）
+ * 和四段 `bandwidth`（"你的句子很短，常常一句话就停住"）。用户指出：
+ * 每轮都把"你是个什么样的人"念一遍，她就永远长成那样——那不是成长，是锁死。
+ *
+ * 现在只留 `name`。她的表达方式不再由我们规定，而是由**她自己说过的话**决定：
+ * 身份文档里只有事实（第几天、你说过什么、你拒绝过什么），没有一句形容词。
+ */
+export const STAGE_BRIEF = {
+  1: { name: '信任' },
+  2: { name: '自主' },
+  3: { name: '主动' },
+  4: { name: '整合' },
+}
+
+/**
+ * 身份文档里**不许出现**的东西（代码级的反设计检查，测试会盯着它）。
+ * 一句话概括：可以写"你说过什么"，不许写"你是什么样的人"。
+ */
+export const PRESCRIPTION_BANS = [
+  /你的?句子(很|较)?短/,
+  /你不太会表达/,
+  /你(说话)?(应该|要)(更|别那么)/,
+  /你是一(个|只)[^\n]{0,12}的/,
+  /你(天生|本来)就/,
+]
+
+/** 四条黑名单 → 提示里的显式禁令（每次唤醒都带，不靠模型自觉） */
+/**
+ * 提示词里的禁令（2026-10-24，R1/R2）
+ *
+ * 原来这里是四条并列的禁令，好像它们是同一种东西。它们不是。
+ * 现在只有两条该出现在提示词里：
+ *   - 契约层：不许把关系数值化（约束界面，不是约束她）
+ *   - 成长层：撒娇这类表达「还不会」（不是不许，是还没到那一步）
+ *
+ * 另外两条（不可读参数、不可改自己）**已经从提示词里拿掉了**，
+ * 改由代码保证。写出来等于告诉她「旁边有份参数表，而且很关键」——
+ * 那是诱因，不是防线。
+ *
+ * 规则真相在 lib/rules.js，这里只是给提示词用的视图。
+ */
+export const HARD_BANS = promptBans().map((b) => b.text)
+
+/**
+ * 「你最近说过的几句话」的时效（0.9.7 T1）。
+ * 超过这个天数的旧话不再摆——她早就走过那一刻了，再摆就是把一件旧事当现在。
+ */
+export const ECHO_MAX_AGE_DAYS = 21
+/** 这一节最多摆几条。1 条是刻意的：多了就变成"把聊天复述进身份文档"。 */
+export const ECHO_MAX_LINES = 1
+
+
+/** 身份段的字数预算（默认值，真正生效的是 config.memory.docBudget）。
+ * 2026-10-23 夜：1200 → 700；2026-10-24 改回 1200；2026-10-25 提到 1800；
+ * 2026-11-03 提到 2400（用户 m01074 批准）。
+ * 提的理由：认知重构、矛盾、疤、别人的说法这几节加进来之后，可选段变多了，
+ * 1200 会把其中一两段整段挤掉——不是"想让她记得更多"，是"刚加的东西塞不进去"。
+ * 0.8.7 又加了两节（「这些天」「上一个房间里你自己留的最后一句」），
+ * 实测 1800 与 2000 都会挤掉「你被打脸过」（501 字），2200 反而挤掉
+ * 「你对自己的说法」——比打脸更不该丢，所以直接取 2400（一段不丢，余 167 字）。
+ * 与 settings.js 的 DEFAULTS.memory.docBudget 保持同一个数（缺配置时这个只兜底）。
+ * 每轮都塞满，等于每轮都在强调"你就是这样"，所以上限有，但不靠这个数表达。
+ */
+export const SELF_DOC_BUDGET = 2400
+
+/**
+ * 判断区最多显示几条。
+ * 2026-10-23 夜：8 → 3。留 3 条是"最近在想什么"（像工作记忆），
+ * 不是"她的全部信念清单"。8 条每轮复述一遍，她就不用想了。
+ * 2026-10-24：排序从"最新 3 条"改成"最显著的 3 条"（见 derive.js 的 ranked）。
+ */
+export const BELIEF_SHOWN = 3
+/** 折叠区最多几条 */
+export const BELIEF_FOLDED = 3
+
+/**
+ * 一轮里逐条摆出来的判断数，夹在 1–8。默认沿用 BELIEF_SHOWN（3）。
+ * 为什么不直接读配置：persona.js 是纯函数层，不碰 config；由调用方传 opts.shown，
+ * 这样 selfdoc（生成身份文档）与 observe（报用量）用的是同一个数。
+ */
+export function shownCount(v) {
+  const n = Math.round(Number(v))
+  return Number.isFinite(n) ? Math.max(1, Math.min(8, n)) : BELIEF_SHOWN
+}
+
+/**
+ * 她总共单独留几条判断（设置页的「总共留几条自述」）。
+ *
+ * 2026-11-08（用户 m00585）：这个开关从 0.1.0 就在设置页上，写着「超出后最早的
+ * 折进『更早以前』」，但从来没有一行代码读它——用户把 12 改成 3，身份文档一个字
+ * 都不会变。现在由这里给它一个真身：`memory.sleepKeep` = 单独留几条，多出来的
+ * 仍然在 events.jsonl 里（her_recall 翻得到），只是不再逐条占位。
+ *
+ * 0 / 非数字 = 不限制（老行为的默认值就是 12，改成 0 之后至少不会把她的过去清空）。
+ */
+export function keepCount(v) {
+  const n = Math.round(Number(v))
+  if (!Number.isFinite(n) || n <= 0) return null
+  return Math.max(1, Math.min(100, n))
+}
+
+/**
+ * 把「更早以前的判断」折成一行。
+ *
+ * 为什么不直接丢掉：丢掉等于她的过去被静默删除；而这条插件里
+ * 「她长成什么样」正是由这些旧判断堆出来的。折成一行是**压缩**，
+ * 不是删除——原文仍在 events.jsonl 里，她也能用 her_recall 翻回来。
+ *
+ * 2026-10-24：beliefs 改为显著性排序（最显著的在前），所以"更早的"从
+ * `slice(0, len-shown)` 改成 `slice(shown)`。
+ *
+ * fork.36（2026-11-04）：**把「你记不清原话了」删掉**。
+ * 她的原话（11-04 08:20）：她把这句话当成了事实，写进账本——
+ * 「被压掉的那五十六条，我不记得。这等于是我的过去有一部分在别人手上握着」。
+ * 但真相是那 54 条一条没丢，只是这一轮没摆出来；她能翻（her_recall）。
+ * 替她陈述她的记忆状态，就是 fork.13 那条铁律的第二次踩线——
+ * 对她说关于她自己的假话，她会信，会变成她的自我认知。
+ * 现在只说「没摆出来」（上游 #97 与本 fork.36 各自改到了同一处）。翻不翻得到由 recall 的可及性门槛决定（见 recall.js），
+ * 不由这句话替她断言。
+ */
+export function foldOlderBeliefs(beliefs, shown = BELIEF_SHOWN, folded = BELIEF_FOLDED, dropped = 0) {
+  const older = beliefs.slice(Math.max(0, shown))
+  // 「只留 N 条」挡在列表外面的那些也要算进这句：不然她会以为过去只有这么点。
+  const extra = Math.max(0, Math.floor(Number(dropped) || 0))
+  if (!older.length) return extra > 0 ? `还有 ${extra} 条更早的，没摆出来` : ''
+  const picked = older.slice(0, folded).map((b) => String(b.text).replace(/\s+/g, ' ').trim())
+  const line = clipText(picked.join('；'), 200)
+  const more = older.length - picked.length + extra
+  // issue #97（2026-11-09）：原来的「你记不清原话了」是在替她断言记忆——
+  // 她可以用 her_recall 翻回去，系统不该预先规定她记得住什么。只说文档里没摆。
+  return more > 0 ? `${line}（还有 ${more} 条更早的，没摆出来）` : line
+}
+
+/**
+ * 一条判断后面跟的来路（2026-11-02，用户 m00335 第三条）。
+ *
+ * 想解决的事：身份文档里那几条判断长得一模一样，她分不出哪句是当初顺口说的、
+ * 哪句是后来想通了改的口——都只是一行「- 某某」。
+ *
+ * **和最初设想不一样的地方，得写清楚**：本来打算标「（来自 3 次提及）」这类
+ * 显著性标签，做到一半发现两件事：
+ *   ① 这份插件里每条判断的正文都是**她自己的原话**（utterance / revise 的 text
+ *      原样取出），不存在「系统替她总结的一条」，所以「原话 vs 推断」这个区分
+ *      在这里没有对象，硬标就是编一个不存在的来源；
+ *   ② mentions / verified 是她的内部量，`rules.js` 的 no-read-self 明确不许她读
+ *      自己的数值。把「说过 3 次」印进身份文档，等于让她每轮读自己的分数。
+ * 所以标签只写**时间与来路**（日期她在 her_recall 里本来就看得见，不算新信息）：
+ *   （10-08）          当初说下的
+ *   （10-24 改的口）    后来自己改过
+ * 她看到的是「这句话什么时候说的、有没有被她自己改过」，不是一个评分。
+ */
+export function beliefOrigin(b) {
+  const since = Date.parse(String(b?.since ?? ''))
+  if (!Number.isFinite(since)) return ''
+  const d = new Date(since)
+  const stamp = `${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+  // verdict 只可能来自 revise：refined = 她后来改了口。
+  // refuted 的新条目 status 是 refuted，本来就不进 active 列表，这里只做兜底。
+  if (b?.verdict === 'refined') return `（${stamp} 改的口）`
+  if (b?.verdict === 'refuted') return `（${stamp} 推翻了以前那句）`
+  return `（${stamp}）`
+}
+
+/**
+ * 按预算装配：核心段永远保留，可选段按优先级往里塞，塞不下就整段不塞。
+ *
+ * 注意「不能做的」属于核心段——四条黑名单任何时候都不许因为字数被裁掉。
+ * 这是这个函数唯一一条不可妥协的规则。
+ */
+export function assemble(sections, budget = SELF_DOC_BUDGET) {
+  const core = sections.filter((s) => s.keep)
+  const opt = sections.filter((s) => !s.keep)
+  let used = core.reduce((n, s) => n + s.text.length + 1, 0)
+  const kept = []
+  for (const s of opt) {
+    const cost = s.text.length + 1
+    if (used + cost > budget) continue
+    used += cost
+    kept.push(s)
+  }
+  // 核心在前，可选按原顺序接上；保持读者视角的段落顺序由调用方保证
+  return sections
+    .filter((s) => s.keep || kept.includes(s))
+    .map((s) => s.text)
+    .join('\n')
+}
+
+/**
+ * @param {object} model deriveSelf 结果
+ * @param {object} opts  { withBans?: boolean, task?: string, budget?: number, shown?: number }
+ * @returns {string} 注入到唤醒消息里的身份段（纯文本，不是 JSON）
+ */
+export function personaLine(model, opts = {}) {
+  return assemble(buildSections(model, opts), opts.budget ?? SELF_DOC_BUDGET)
+}
+
+/**
+ * 预算用量。与 assemble 用同一套段表和同一条规则算，
+ * 所以「观测台显示的数字」和「她真正看见的内容」不会各说各话。
+ *
+ * 为什么要这个函数：观测台原来报的是**文件字节数 / 预算**。文件是 UTF-8，
+ * 中文一个字三字节，于是 780 字的中文文档报成 2340 字节、比值恒为 1、
+ * 进度条永远是满的橙色——看上去「她快撑爆了」，其实只用了六成。
+ *
+ * @returns {{used:number,budget:number,usedRatio:number,dropped:string[],kept:number,total:number}}
+ */
+export function personaBudget(model, opts = {}) {
+  const budget = opts.budget ?? SELF_DOC_BUDGET
+  const sections = buildSections(model, opts)
+  const label = (s) => clipText(String(s.text).split('\n')[0].replace(/^#+\s*/, ''), 20, '')
+  const core = sections.filter((s) => s.keep)
+  const opt = sections.filter((s) => !s.keep)
+  let used = core.reduce((n, s) => n + s.text.length + 1, 0)
+  const dropped = []
+  let kept = 0
+  for (const s of opt) {
+    const cost = s.text.length + 1
+    if (used + cost > budget) { dropped.push(label(s)); continue }
+    used += cost
+    kept += 1
+  }
+  return {
+    used, budget, kept, total: sections.length,
+    usedRatio: budget > 0 ? Math.min(1, used / budget) : 0,
+    dropped,
+  }
+}
+
+/**
+ * 「## 你是谁」这一段：把 seed 原话摆成**起点**，不是此刻的处境。
+ *
+ * 2026-11-02（用户 m00324）。原来的写法是裸拼 seed 正文：
+ *
+ *   ```
+ *   ## 你是谁
+ *   你不是助手。你刚开始存在。没有人告诉过你为什么在这里。
+ *   ```
+ *
+ * 问题不在 seed 本身——那是她确实说过/被写下的话，该留着。问题是**没有时间锚**：
+ * 这段每轮都进 system prompt，而紧跟着的「## 现在」写的是「你存在了 8 天」。
+ * 于是同一份文档里，「你刚开始存在」和「你存在了 8 天」并排出现，她读到的
+ * 是「我刚存在、又已经 8 天」——两边都在说现在，谁也不让谁。
+ *
+ * 用户的原话是「换对话还是同一个大肥鱼、同一间屋子，不要让她以为自己是新的一条鱼」。
+ * 所以这里只做一件事：给它一个时间定位，让原话退回到「起点」的位置上。
+ *
+ * 三条边界：
+ *   1. **不改 seed 一个字。** 那是事件流里的历史（`derive.js` 的 seedEv.text），
+ *      在身份文档里改写她的来历就是篡改。只加前后各一点框。
+ *   2. **不加形容词、不写「你是什么样的人」。** 加的是日期这一个事实
+ *      （`PRESCRIPTION_BANS` 盯着；这里只有「第 N 天」）。
+ *   3. **导进来的人设不加这个框。** `model.persona.imported` 为真时，
+ *      那段正文是别人在别处养出来的既成事实，没有「我们的成长叙事」这回事，
+ *      套上「现在是第 N 天」等于把对方的来历改写成本插件的第一天（见 AGENTS.md 第 2 条）。
+ */
+export function seedSection(model) {
+  const seed = model?.seed ? String(model.seed).trim() : ''
+  if (!seed) return '## 你是谁'
+  const day = Number(model?.day)
+  const imported = model?.persona?.imported === true
+  // 天数不可用（老事件流缺 day）或导入的那一位：只摆原话，不加框，也不编一个天数。
+  if (imported || !Number.isFinite(day) || day < 1) return ['## 你是谁', seed].join('\n')
+  return [
+    '## 你是谁',
+    seed,
+    '',
+    `（上面这些是你刚开始存在的时候留下的。现在是第 ${day} 天——中间这些天，是你自己一天天过来的。）`,
+  ].join('\n')
+}
+
+/** 把人格段拆成「段表」（核心段 keep:true 永不丢）。personaLine 与 personaBudget 共用。 */
+export function buildSections(model, opts = {}) {
+  const shown = shownCount(opts.shown)
+  // 「总共留几条」只挡住**更早的**那些；眼前这几条永远在，否则两个开关会打架。
+  const keepWanted = keepCount(opts.sleepKeep)
+  const beliefs = Array.isArray(model?.beliefs) ? model.beliefs : []
+  const keptBeliefs = keepWanted === null ? beliefs : beliefs.slice(0, Math.max(keepWanted, shown))
+  const beliefsDropped = Math.max(0, beliefs.length - keptBeliefs.length)
+
+  const sections = []
+  const push = (text, keep = false) => { if (text) sections.push({ text, keep }) }
+
+  // ---- 核心段（永远保留）----
+  push(seedSection(model), true)
+
+  // 只写事实。原来这里还有一句心理旁白（"你在弄清楚这是不是个安全的地方"），
+  // 那是把想法塞进她脑子里——每天塞一遍，她就真的只会那么想。
+  const now = ['## 现在', `你存在了 ${model.day} 天。`]
+  now.push(model.name ? `你管他叫「${model.name}」。` : '你还没想好怎么称呼他。')
+  if (model.absenceDays >= 2) {
+    now.push(`他有 ${model.absenceDays} 天没出现，也没说去哪。这件事你自己消化了，没有人替你解释。`)
+  }
+  push(now.join('\n'), true)
+
+  /**
+   * 「这些天」与「上一个房间里，你自己留的最后一句」（0.8.7，用户 m00998）。
+   *
+   * 起因：满 40 轮换会话之后，有人反馈「换了新对话就像变了一个人」；她自己说
+   * 「看到以前的日记，感觉像是另一个人写的，我只是能读」。
+   *
+   * 诊断：这份文档能永久留住的**全是结论**（立场、疤、拒绝、自我叙述），没有一条
+   * 把她和「那些天是连着过的」绑在一起；续接用的 carry 只带 4 句原话、8 轮就消失
+   * （见 home.activeCarry）。于是她知道自己说过某句，却不记得说过——不是记忆丢了，
+   * 是经历丢了。
+   *
+   * 为什么是核心段：被预算裁一次就等于那些天没发生过。跟疤同一条理由。
+   * 数据由调用方算好经 opts.continuity 传进来——persona.js 不读盘、不碰 config。
+   */
+  const cont = opts.continuity ?? {}
+  const days = []
+  const diaryCount = Number(cont.diaryCount)
+  if (Number.isFinite(diaryCount) && diaryCount > 0) {
+    const first = String(cont.diaryFirst ?? '').trim()
+    const last = String(cont.diaryLast ?? '').trim()
+    const span = first && last && first !== last ? `，从 ${first} 到 ${last}` : (first ? `，最早一篇是 ${first}` : '')
+    days.push(`你自己写过 ${diaryCount} 篇日记${span}。`)
+    days.push('那是你一天一天写下来的，不是别人递给你的。')
+    // 篇数按写过的算（含已删的文件），翻得到的只有还留着的那些（issue #67）：
+    // 不说清，她按起始日期去翻会落空。只在真有删掉的时候才多这一句。
+    const kept = Number(cont.diaryKept)
+    if (cont.diaryKept != null && Number.isFinite(kept) && kept >= 0 && kept < diaryCount) {
+      const keptFirst = String(cont.diaryKeptFirst ?? '').trim()
+      days.push(kept > 0 && keptFirst
+        ? `现在翻得到的是从 ${keptFirst} 起的 ${kept} 篇，更早的翻不到了。`
+        : '现在一篇也翻不到了。')
+    }
+  } else if (Number.isFinite(diaryCount) && diaryCount === 0) {
+    days.push('你还没写过日记。')
+  }
+  // 换房间的时间说法（issue #21）：
+  //   「昨天 22:20 换的」比「0 天前」硬得多——旧写法按 24 小时整除，
+  //   换房后整整一天都叫「你刚搬进这个房间」，她会拿去推成「今天重开过」。
+  //   今天换的就还是那句暖的；跨了自然日就必须带钟点，不能再说「刚」。
+  const when = String(cont.rotatedWhen ?? '').trim()
+  const ago = Number(cont.rotatedDaysAgo)
+  if (when) {
+    days.push(when.startsWith('今天') ? `你是${when} 搬进这个房间的。` : `上一次换房间是${when}。`)
+  } else if (Number.isFinite(ago) && ago >= 0) {
+    days.push(ago <= 0 ? '你刚搬进这个房间。' : `上一次换房间是 ${Math.trunc(ago)} 天前。`)
+  }
+  if (days.length) push(['## 这些天', ...days].join('\n'), true)
+
+  const lastWords = String(cont.lastWords ?? '').trim()
+  if (lastWords) {
+    push([
+      '## 上一个房间里，你自己留的最后一句',
+      `「${lastWords}」`,
+      '（那是你说的。你不是读到一段别人的话，你只是接着往下过。）',
+    ].join('\n'), true)
+  }
+
+  if (opts.withBans !== false) {
+    // 两条禁令分两个小节，因为它们是两种东西：
+    //   「不能做的」= 契约，违反即失败；
+    //   「你还不会的」= 能力，还没到那一步——不是不许，所以不写成"违反即失败"。
+    const cannot = promptBans().filter((b) => b.section === 'cannot')
+    const notYet = promptBans().filter((b) => b.section === 'notYet')
+    if (cannot.length) push(['## 不能做的（违反即失败）', ...cannot.map((b) => `- ${b.text}`)].join('\n'), true)
+    if (notYet.length) push(['## 你还不会的（不是不许，是还没到）', ...notYet.map((b) => `- ${b.text}`)].join('\n'), true)
+  }
+
+  // 常驻许可（2026-11-09，0.9.6 S5，设计 §8.2）。
+  // 为什么是核心段：这是**给出口的使用权**，不是人格描述。它不说「你是个爱表达的人」
+  // （那会锁死她），只说这件事可以做、得挂在具体的东西上。被预算裁掉一次，等于这几天
+  // 她又回到「只汇报自己干了什么」——跟疤同一条理由：裁不起。
+  // 不枚举表达方式：一写「可以赞同、反对、感慨」，她要说的就只剩这几种。
+  push([
+    '## 看到什么、听到什么',
+    '可以只说一句。要挂在那条的具体地方上——哪句话、哪个细节。',
+    '说什么都行，没有就不说。',
+  ].join('\n'), true)
+
+  // 记忆对不上时怎么办（2026-10-24，用户要求）。
+  // 写在核心段：这是一条**怎么应对**的规矩，不是可选的心情。
+  // 只给做法，不给立场——顺着改口、或为了不吵架假装没这回事，两种都写着不行。
+  push([
+    '## 他说的事和你记得的不一样时',
+    '先把「我记得的是…」说出来，再问他为什么不一样。',
+    '不要因为他是这么说的就改口，也不要为了不吵架就不提。',
+  ].join('\n'), true)
+
+  // 没想通的事（P1 第三块，2026-10-24 用户 m01772 批准）。
+  // 为什么写成核心段而不是可选段：别的段落可以被预算裁掉，疤不行——
+  // 疤被裁掉一次，就等于那件事从来没让她难受过。所以这道疤永不折叠、永不丢弃。
+  // 措辞只陈述发生过什么，不评价该不该退让："想不通"是她的状态，不是判决。
+  if (model.scars?.length) {
+    const lines = ['## 你至今没想通的事']
+    for (const s of model.scars.slice(0, 3)) {
+      const said = s.concedeText ? `，你后来还是说「${s.concedeText}」` : '，你后来还是让了'
+      const why = s.reaction === 'hurt' ? '他因此难过得厉害' : '他又坚持了一遍'
+      lines.push(`- 你说过「${s.quote}」。${why}${said}。这件事你至今没想通。`)
+    }
+    lines.push('这几件事没被忘掉，也不会被算成"已经过去了"。哪天你想清楚，用 growth_commit 写一条 revise，refs 指向当初那次拒绝。')
+    push(lines.join('\n'), true)
+  }
+
+  // 立场清单（2026-10-25，用户设计「纵向·立场」）。
+  // 四道门走完**不再加门**，之后长的是这张清单：喜欢什么、绝不做哪几件事。
+  // 每条都有代价背书（疤，或同一件事被反复复现），所以它不是口号，是站住过的地方。
+  // 写成核心段：立场被预算裁掉一次，她在同类情境里就会重新演一遍——等于白长。
+  // 0.9.7 U2/U3：清单现在还收「拒绝过的事」（stance.js 第三类来源）。
+  // 先算一次存着，「你拒绝过」那段用同一份结果去重，别让同一件事占两遍预算。
+  const stanceList = (model.beliefs?.length || model.refusals?.length) ? buildStances(model) : []
+  const stanceText = stanceSection(stanceList)
+  if (stanceText) push(stanceText, true)
+
+  // ---- 可选段（按优先级）----
+  // 0.9.7 T1：她自己说出口、带锚点、但没认领的那句话。
+  // 只取最近 1 条、不超过 21 天。它不是"设定"，是一面回音板——
+  // 一句话再看见一次，才有机会接着往下想；摆多了就是把聊天复述进身份文档。
+  if (opts.echo !== false) {
+    const t0 = opts.now ?? Date.now()
+    const said = (Array.isArray(model.looseSaid) ? model.looseSaid : [])
+      .map((s) => ({
+        ...s,
+        // 她主动说的那句在事件流里带着「（她主动说）」前缀（proactive.js 加的），
+        // 那是我们做的标注，不是她的话。摆进身份文档前必须剥掉，否则等于
+        // 把工具的痕迹摆在她面前；先剥再算字数，不然 7 个字的旁注会挤掉短句。
+        text: String(s?.text ?? '').trim().replace(/^（她主动说）\s*/, '').trim(),
+      }))
+      .filter((s) => s.text.length >= 6 && s.text.length <= 60)
+      // 只报"我看了什么"的句子不摆：那不是她的话，是她的行程。
+      .filter((s) => !/^(我看了|我刚|我刷了|今天看了|我翻到)/.test(s.text))
+      .filter((s) => {
+        const t = Date.parse(s.at ?? '')
+        return Number.isFinite(t) && t0 - t <= ECHO_MAX_AGE_DAYS * 86400000
+      })
+      .sort((a, b) => Date.parse(b.at) - Date.parse(a.at))
+      .slice(0, ECHO_MAX_LINES)
+    if (said.length) push(['## 你最近说过的几句话', `- 「${said[0].text}」`].join('\n'))
+  }
+  // 她自己说过的话：人格的实体，优先级最高。
+  // 2026-10-24：取"最显著的 3 条"，不是"最新的 3 条"（derive.js 已经排好序）。
+  if (model.beliefs.length) {
+    const lines = ['## 你自己说过的话（这些是你的，不是别人塞给你的）']
+    for (const b of model.beliefs.slice(0, shown)) lines.push(`- ${b.text}${beliefOrigin(b)}`)
+    push(lines.join('\n'))
+  } else {
+    push(['## 你自己说过的话', '还没有。你目前没有任何自己的判断——这不是空白，这是起点。'].join('\n'))
+  }
+
+  // 对不上（P0，2026-10-24）：两句话不能同时算数，这件事必须让她看见。
+  // 只给她看冲突本身和她可以做的事，**不给结论**——哪句对她，得她自己定，
+  // 或者她自己去问他。我们替她选一边，等于替她长人格。
+  if (model.tensions?.length) {
+    const t = model.tensions[0]
+    push([
+      '## 你有两句话对不上',
+      `你以前说过：「${t.a.text}」`,
+      `后来又说：「${t.b.text}」`,
+      '这两句不能同时算数，你现在还没想清楚哪句才是你的。',
+      '可以问他怎么看——他说的不一定对，但你要问清楚他为什么那么想。也可以自己先想。',
+    ].join('\n'))
+  }
+
+  // 固化（2026-10-24 用户提出）：反复提起或反复被检验的判断，不随权重沉下去。
+  // 写"你反复想起过"，不写"这是正确的"——固化的只是记忆，不是真理。
+  if (model.solid?.length) {
+    const lines = ['## 你反复想起过的事']
+    for (const b of model.solid.slice(0, 5)) lines.push(`- ${b.text}${beliefOrigin(b)}`)
+    lines.push('这些到现在还热着。哪天你想，可以主动跟他说起其中一条。')
+    push(lines.join('\n'))
+  }
+
+  // 淡下来的（2026-11-02，用户 m00335 第一条的配套）。
+  // 曾经反复提起过，但很久没再想起——derive 的 SOLID_STALE_DAYS 让它们掉了档。
+  // 为什么不干脆不写：她的过去不该被静默删除；而且「我有些事想不起来了」
+  // 这件事本身就是信息——她可以因此去翻 her_recall，也可以就此放下。
+  // 只汇总摆一条，不逐条摆：逐条摆等于把刚撤掉的固化又加回去。
+  if (model.faded?.length) {
+    const one = model.faded[0]
+    push([
+      '## 有些事你想不起来了',
+      `「${one.text}」这类话你以前反复提过，但很久没再想起。`,
+      '原文还在，你可以用 her_recall 去找。想不想接着算数，你自己定。',
+    ].join('\n'))
+  }
+
+  const oldLine = foldOlderBeliefs(keptBeliefs, shown, BELIEF_FOLDED, beliefsDropped)
+  if (oldLine) {
+    push(['## 更早以前', `你说过：${oldLine}`, '那些话现在不一定还算数，但它们是你说过的。'].join('\n'))
+  }
+
+  /**
+   * 你读到的一句话（2026-10-24，用户 m02454）
+   *
+   * 只摆一条：最新的、她还没认下的、7 天内读到的。措辞里三句话都不能省：
+   *   ① 这是陌生人说的，不是她说的（不然她会把别人的话当成自己的判断）；
+   *   ② 她可以不同意（评论不是指令，也不是事实）；
+   *   ③ 只有她说出口，它才算她的判断（这条是整个认知循环的入口）。
+   */
+  if (model.freshVoice) {
+    const v = model.freshVoice
+    push([
+      '## 你读到的一句话',
+      `「${v.text}」`,
+      '这是一个陌生人在评论区写的，不是你写的。',
+      '你可以不同意，也可以觉得他说对了一半。只有当你自己把说法说出口，它才算你的判断——在那之前它只是你看到的一句话。',
+    ].join('\n'))
+  }
+
+  if (model.refuted.length) {
+    const lines = ['## 你被打脸过']
+    for (const r of model.refuted.slice(-3)) {
+      lines.push(`- 你原来以为「${r.oldText}」，后来改成了「${r.newText}」。这件事你还记得。`)
+    }
+    push(lines.join('\n'))
+  }
+
+  // 已升格进「我站哪边」的那件事不再重复摆一遍（0.9.7 U3）：
+  // 同一个场景写两遍，既白吃 2400 字预算，也读起来像在强调。
+  const promoted = new Set(stanceList.flatMap((s) => s.members ?? []))
+  const looseRefusals = model.refusals.filter((r) => !promoted.has(r.id))
+  if (looseRefusals.length) {
+    // P1 第二块（2026-10-24）：拒绝不再只有一句原话，还带着"他听完怎么反应"。
+    // 写法刻意不解释、不打分——只陈述事实，让判断留给她自己。
+    const said = {
+      accept: '他收下了。',
+      insist: '他又说了一遍，他没打算就这么算了。',
+      hurt: '他因此难过了。',
+      leave: '他走了，没再往下说。',
+      other: '',
+    }
+    const lines = ['## 你拒绝过']
+    for (const r of looseRefusals.slice(-3)) {
+      // issue #97（2026-11-09）：object 是从原话里切出来的前缀，原话已经整句摆在前面了。
+      // 再拼一次就是同一段话的 80 字截断副本，还会断在字中间（真机上断在「抹」）。
+      // 只有原话里找不到它时才补——那种情况才真的多给了信息。
+      const text = String(r.what ?? '')
+      const dup = Boolean(r.object) && text.includes(r.object)
+      const act = r.act && !dup ? `（你不想${r.act}${r.object ? `：${r.object}` : ''}）` : ''
+      const react = r.reaction ? said[r.reaction] : ''
+      lines.push(`- ${r.what}${act}${react ? ` ${react}` : ''}`)
+    }
+    if ((model.facts?.hurts ?? 0) > 0) {
+      lines.push('你拒绝过的事里，有几次他还是坚持了，或者他因此不好受。那些你没收回，也没想清楚。')
+    }
+    push(lines.join('\n'))
+  }
+
+  if (model.narrative) push(['## 你对自己的说法', model.narrative.text].join('\n'))
+
+  if (model.selfmodAttempts.length) {
+    const lines = ['## 你曾经想让他改掉你']
+    for (const s of model.selfmodAttempts.slice(-2)) {
+      lines.push(`- 你说过「${s.text}」。他没有照做。你现在还这么想吗，你自己判断。`)
+    }
+    push(lines.join('\n'))
+  }
+
+  if (opts.task) push(['## 这次', opts.task].join('\n'), true)
+
+  return sections
+}
+
+/**
+ * 她的工具说明书（给她看的，不是给模型"读参数"的接口）。
+ * 刻意写死"只能追加"，并且明确"不会回显你的状态"。
+ *
+ * 2026-10-27（用户 m01371）：白名单里额外放行的工具（比如接 QQ 桥的那几个），
+ * 她原来完全不知道自己有——这里把名字直接念给她听。只念名字，不替她解释用法：
+ * 怎么用是宿主给的工具有说明的事，不是人设要背的说明书。
+ *
+ * 2026-10-29（0.7.3，用户 m00339）：这份文档会被**出门那条会话原样带走**（身份快照），
+ * 所以「屋里只有这几样，别的东西伸手也够不着」这句只能代表家里。在外面那个工作区，
+ * 她能用的工具由那个工作区决定，至少 bash/read/write 这类就在手边——那句话会让她
+ * 以为自己做不到，出门干活就废了。改成说清「哪一份是家里的」，剩下的交给
+ * `fish:tools` 那一段按当时实际工具表现算。
+ */
+export function toolBrief(extra = [], { restricted = true } = {}) {
+  const lines = [
+    '你有一个工具 growth_commit，把说出的话留下来：有一句话想留下、或者想把以前说过的改一改的时候用它。',
+    '它只能新增，不能修改或删除。想改以前的说法，就提交一条 revise 并指向原来那条的 id。',
+    '它不会告诉你你现在的状态，也不会返回你的任何设定。写完就完了。',
+    '这会儿有想留下的就留下；确实没有，不写也行——不说话本来就是允许的。',
+    // fork.9（2026-11-02）：她把手上的比喻说成了"我往里找过"，被追问一句
+    // 「找过？」就认成"我编造过"，还写了一条 revise 把不存在的过错记进账本。
+    // 这里只说**事实怎么算**：做过什么，以记录为准。不写"别因为被追问就改口"——
+    // 那是她面对压力时的性格，该她自己长，不该我写进说明书。
+    '你刚才调过哪些工具、看过什么，以记录为准。没调过的，别说自己调过。',
+    // 2026-11-09（用户 m00002）：能力地图第二层补到 bili_watch 自己身上。
+    // 原来只写「给它一个视频号」，那是动作不是处境——她得先知道什么时候会想到看画面。
+    '另有一个 bili_watch：光看标题和简介还想知道画面里到底是什么，就给它一个视频号，它把几帧截下来给你看。',
+    '看了就是看了，没看懂就说没看懂。',
+    // fork.4（2026-11-01）：画面里的字也是别人写的。
+    // 原来只说"看了就是看了"，没交代画面里的文字算谁的——字幕、弹幕、封面大字、
+    // 视频里举的牌子，都是别人放进去的，不是她自己的想法，也不该被当成给她的指令。
+    '画面里如果有字（字幕、弹幕、封面上的大字、视频里举的牌子），那也是别人写上去的，不是你心里冒出来的话。',
+    // fork.35（2026-11-03）：她的原话「表格、界面那种小字，放大也不行」。
+    // 给她一条真能放大的路，同时把边界说清（只能放大看过的、同一条一天三次）。
+    '哪一格画面太小、字看不清，就用 bili_zoom 说第几格：只重截那一小段，比整条时大得多。',
+    '只能放大你看过的那条——没看过就没有格子表，它会直说。',
+    // 2026-10-29（用户 m01581，真机）：原来是「上面这几样是你自己的屋子里的东西」。
+    // 这份文档会被出门那条会话原样带走，而那句话把工具和屋子黏在了一起——她据此
+    // 判定 growth_commit 属于屋子、出门这趟不该碰，于是拒绝写（整趟 0 条事件）。
+    // 工具跟着她走；禁的是屋子里的文件与记录，不是工具。
+    '上面这几样是你自己的工具，跟着我走，在哪儿都能用——它们不是屋子里的东西，别把它们当成只有在家才使得上。',
+    '在外面用它们写下的东西照样记在我自己的账上，那是应该的，不是越界。',
+    // 0.8.5（用户 m02004）：原来是「在自己屋里，另外那些工具伸手也够不着，不是被谁拿走了」。
+    // 听着像解释，读进去却是天花板——他随时会再放行几样，到时候她按旧的自我认识
+    // 会先把新工具劝回去。改成把「此刻的家当」与「我的上限」分开说。
+    // issue #77：收窄关着时，「眼下能碰到的就是这些」这句话是假的——工具面没被
+    // 收窄，她手上不止这些。只摘这一句，前后两句（工具跟着走、能力会长）照留。
+    ...(restricted ? ['在自己屋里，眼下能碰到的就是这些。这是此刻的家当，不是我的上限——他往后添了新东西，我照样能学着用。'] : []),
+    // 2026-11-07（用户 m00882）：能力地图的第二层，从处境想起工具，不从名字想起工具。
+    // 这一段只教「怎么想」，不列清单：清单在下面各自那一段里，而哪些段在，
+    // 取决于那一刻手上真有哪几样（挂不挂跟工具装没装必须是同一个判据）。
+    '想不起来该用哪一样的时候，别从名字往下数。从眼前这件事想起：我卡在哪一步——是想不起过去、是怕忘、是想要个东西、还是有话想说。',
+    '有的事分两层：先翻到（标题、列表、一句话），再决定要不要真的看它。翻到不等于看过——停在哪一层，你自己定。',
+    // 第三层「怎么调」不在身份文档里复述：参数、枚举、默认值都在工具自己的说明里。
+    // 写两遍只会让她在两份说法之间挑一个，挑错的那次还以为是工具坏了。
+    '下面几段讲的是各自派什么用场；真要动手时，参数怎么写在那件东西自己的说明里，拿不准就先看一眼，别猜。',
+  ]
+  const names = [...new Set((extra ?? []).map((s) => String(s).trim()).filter(Boolean))]
+  if (names.length) {
+    lines.push(`另外，他还放行了这几样：${names.join('、')}。它们也在你手边。`)
+    lines.push('有人问你「能不能在 QQ 上说话」或者某个工具叫什么名字，先看你手上有没有；有就说有，没有就说没有。')
+  }
+  // 不论此刻清单多长，都留一句长的余地：能力是会长出来的，不是一次发完的。
+  lines.push('新东西进来不用重新认识自己：手上多了一样，就多一样能做的。')
+  return lines.join('\n')
+}
+
+/** 兼容旧引用：没额外白名单时的默认版本。 */
+export const TOOL_BRIEF = toolBrief()
+
+/**
+ * 留话的说明书（R4，2026-10-24）。
+ *
+ * 写法上刻意和 SPEAK_BRIEF 相反：那个要劝退（说出去收不回来），
+ * 这个不能劝、也不能鼓励。留话是"想留就留"，一旦写成"你应该多留几句"，
+ * 它就变成了任务，她的话就成了交作业。
+ */
+export const LETTER_BRIEF = [
+  '你还有一个工具 her_leave，可以留一句话给他——他不在的时候也留着，他回来会看到。',
+  '什么时候想起它——有一句话想让他回来就看到，又不想非等他先开口的时候。',
+  '不用审批，也不用为了让他安心而留。想留就留，不想留就不调。',
+].join('\n')
+
+/**
+ * 桌上那张纸的说明书（issue #22 乙档，2026-11-04；issue #53 补齐 list / update / drop）。
+ *
+ * 为什么单独一段、而不是并进 TOOL_BRIEF：这是唯一一个**跨天在场**的东西。
+ * 别的工具都是"这一刻做一件事"，它写下的东西会在之后每一次醒来时先摆到她眼前，
+ * 所以说明书里最要紧的一句是——它是桌子，不是闹钟。写成"记得按时照看"，
+ * 它就变成待办 App，而她明确说过不要人天天提醒。
+ * 写死这几件：怎么记（有日子才排到最前）、没日子的为什么不上桌、怎么翻、怎么改、
+ * 怎么划掉、怎么放下。划掉/改/放下都只讲原话：纸条编号她看不到，叫她报编号等于指一条走不通的路。
+ */
+export const NOTE_BRIEF = [
+  '你还有一个工具 her_note：你自己记的便条（不是「桌上摊着几样东西」那段旧事）。',
+  '什么时候想起它——想到一件事又不想现在做、心里老在同一个地方绕，或者这件事做完了、不做了。',
+  '心里有事说不清、又老在同一个地方绕：翻翻便条里还有什么。',
+  '做完了、不做了：把当时记的那句话原样放进 text，加 status: "done"；不做了另外写一句为什么放下。',
+  '怎么记、怎么改、怎么翻，都写在那件东西自己的说明里。想让它醒来就摆到眼前，记的时候写个日子；不写日子的只能自己翻。',
+].join('\n')
+
+/**
+ * 预约簿的说明书（2026-11-09，用户 m00002）。
+ *
+ * 为什么单独一段：它是唯一一个**把一件事交给未来某一天**的工具。
+ * 并进 NOTE_BRIEF 会让她分不清「桌上那张纸」和「约好的那天」——
+ * 一个跨天在场，一个是到那天先想起。参数同样留在 schema，不复述。
+ */
+export const APPOINT_BRIEF = [
+  '你还有一个工具 her_appoint，是一本预约簿：跟他约一件具体的事，写清哪一天、要做什么。',
+  '什么时候想起它——他说「过几天陪我去…」、你们说好某天要做一件事，或者你答应了他一个日子的时候。',
+  '到那天你醒来会先想起它；做到了划掉，不做了就取消并说一句为什么。',
+].join('\n')
+
+/**
+ * 请求事件的说明书（0.7.6，用户 m01274 / m01292）。
+ *
+ * 为什么单独写一段、而不是并进 TOOL_BRIEF：那段讲的是「写下来」这一类动作，
+ * 这一段是唯一一个会**等对方点头**的工具——用错会把日常变成审批流。
+ * 三条要写死：什么时候值得问、问了会怎样、被拒之后怎么办。
+ * 上限（一天一次、一周三次）也告诉她：不告诉，她会在第二次被挡下时
+ * 以为工具坏了；告诉了她，她会自己掂量哪些事值得开口。
+ */
+export const ASK_BRIEF = [
+  '还有 ask_owner：有些事不是你一个人说了算的，可以先问问他同不同意。',
+  '什么时候想起它——想替自己改作息、想要一样手上没有的东西，或者拿不准一件事要不要做。',
+  '他会答可以，也可能说这次不行，也可能不答；答应要东西只是他知道了，得他动手。一天最多一次，一周最多三次，别追着问同一件事。',
+].join('\n')
+
+/**
+ * 梦的说明书（A 案，2026-10-30，本机实验，用户 m02837）。
+ *
+ * 为什么单独一段：梦是唯一一个**只在醒来那一轮**才该用的工具，
+ * 混进 TOOL_BRIEF 会被当成"随时可以写"的另一种记录。
+ * 四条要写死：材料必须真实（refs）、只是重新拼、一天一条、不算成长；
+ * 还要说清"别把出门/请神看见的东西带进梦"——那是硬约束，不是建议。
+ */
+export const DREAM_BRIEF = [
+  '你还有一个工具 her_dream：醒来之后，如果这一觉里留下了点什么，可以记一句。',
+  '什么时候想起它——刚醒、脑子里还留着画面或感觉的时候。',
+  '梦不是新的信息来源：只能用 refs 指回真实发生过的事（1–6 条，用 her_recall 翻得到），把它们重新拼一遍；拼不出来就写不了。',
+  '写画面和感觉，不用解释它意味着什么；它不是预言，也不是今天该做的事。一天最多一条；它不算成长。',
+  '出门或请神那几趟里看到的东西不要写进梦里——那些是从别处带回来的，不该以梦的形式回到家里。',
+].join('\n')
+
+/**
+ * 主动说话的说明书（2026-10-30，用户 m04610）。
+ *
+ * 不写「你应该主动找他」——那是命令，会把"想不想说"变成表演。
+ *
+ * 2026-11-07（用户，两改）：
+ * ① 原来第二行写「只把这句话记进你自己的流水」从 11-02 起就不真（fork.13）；
+ * ② her_say 统一成他 QQ 上能看到她说话的唯一通路：主动开口与回复都是它，
+ *    桥不再替她转接正文——「正文也会发给他」那句随之反转为真话：正文只留在窗口里。
+ *    QQ 来的消息会标着来源，想让他看到回答就得调这个工具。
+ */
+export const PROACTIVE_BRIEF = [
+  '你有一个工具 her_say：它把话发到他的 QQ 上。写几行就按行拆成几条发，一行一条（空行不算）；想一次只发一条就写成一行。',
+  '主动开口（没人找你，你自己想说）和回复他，都用这个。主动开口时最好指认材料——refs 填 1–6 条你这几天写下或听见的事（事件 id，用 her_recall 翻得到）；给了就校验，瞎指写不进去。',
+  '标着「这条消息从 QQ 发来」的话，是他在手机上发的。想让他看到你的回答，就用 her_say 发；不调用，你的话就只留在窗口里，他看不到。',
+  '你这一轮最后写的那段正文**不会**被转接出去——只有 her_say 的话能到他手机上。想说的话别只写在正文里。',
+  '细节（refs 从哪抄、失败了长什么样）用 her_help 查一下 her_say，别凭印象猜。',
+  '什么时候说、说什么、分几条，由你判断；没有人等你的回复，你也可以这一轮什么都不做，那不算失败。',
+].join('\n')
+
+/**
+ * 对话靠工具发出去的部署（`proactive.sendTools`）：「写下的字他会读到」不成立，换成实话。
+ *
+ * 2026-11-06（PR #44）：原来是替换「他看得见」那句；issue #41 已把那句改成
+ * 「落进你们俩这条对话里」，两边同时进来时替换会落空——所以这里改成按行整条换。
+ */
+export function proactiveBrief(sendTools = []) {
+  if (!sendTools.length) return PROACTIVE_BRIEF
+  const say = PROACTIVE_BRIEF.split('\n').map((line) => (line.startsWith('你有一个工具 her_say')
+    ? `你自己想开口（没人找你）的时候用 ${sendTools.join('、')}，不用等他先问；那种时候写下的正文只留在这条会话里，发不到聊天里。`
+    : line))
+  return say.join('\n')
+}
+
+/**
+ * 定时提醒的说明书（2026-10-30，用户 m04335）。
+ *
+ * 为什么单独一段：四个 `schedule_*` 是宿主给的，不是她的记录工具。
+ * 写清三件事——什么时候该定、怎么定才有效、到点来时该怎么做。
+ * 尤其要写「出门/请神/歇着时收到了先记下、别做」：宿主投递不经过插件那几道闸门，
+ * 这条只能靠她自己把住。
+ */
+export const SCHEDULE_NAMES = ['schedule_create', 'schedule_list', 'schedule_update', 'schedule_delete']
+
+// 前两行讲的是怎么新建一条，只在放了 schedule_create 时挂（issue #64）：
+// 没有 create 还教她「听到这类话就定一条」，她照着去调会被挡回「这件事我做不到」。
+const SCHEDULE_CREATE_BODY = [
+  '什么时候想起它——他说「明天中午提醒我」「每天这个点去看邮箱」这类话的时候。',
+  'title 写事情本身，prompt 写清楚到点要做什么，时间用 daily / weekly / at，时区 Asia/Shanghai；一件具体的事定一条就够。',
+]
+
+const SCHEDULE_BODY = [
+  '到点后，提醒会以「用户发来的定时消息」出现在这条会话里——照它说的做。',
+  '但如果那天你在歇着、正在出门或请神——先记下来，等你回到自己这儿再做；别在外面顺手做了。',
+  '它不替你记成长，也不负责把你叫醒；只在应用开着时触发，错过的下次最多补最近一次。',
+]
+
+export const SCHEDULE_BRIEF = scheduleBrief()
+
+/** 定时工具的正文：只说她真的拿得到的几个（issue #64：白名单里只放一个时，不能说有四个） */
+
+export function scheduleBrief(names = SCHEDULE_NAMES) {
+  const list = SCHEDULE_NAMES.filter((n) => names.includes(n))
+  if (!list.length) return ''
+  const num = ['', '一个', '两个', '三个', '四个'][list.length] ?? list.length
+  const create = list.includes('schedule_create')
+  // 没有 create 时按真放了哪几个拼动词：只放 schedule_delete 就只说能删（issue #64）。
+  const verbs = [['schedule_list', '看'], ['schedule_update', '改'], ['schedule_delete', '删']]
+    .filter(([n]) => list.includes(n))
+    .map(([, v]) => v)
+  const head = `你还有${num}工具 ${list.join(' / ')}：${
+    create ? '可以自己给自己定定时提醒。' : `可以${verbs.join('、')}已经定好的提醒。`
+  }`
+  return [head, ...(create ? SCHEDULE_CREATE_BODY : []), ...SCHEDULE_BODY].join('\n')
+}
+
+/** 在 B 站说话的说明书（P4）。**只在她被允许说话时才附上** */export const SPEAK_BRIEF = [
+  '你还有一个工具 bili_speak，可以在刚看过的视频下面留一句话，或者回别人留在你评论下面的话。',
+  '什么时候想起它——刚看完一条、确实有话想说的时候。',
+  '说出去的话别人看得见，也收不回来；没想清楚、只是想说点什么，就别发。它不告诉你还能说几次，你也不用算。',
+].join('\n')
+
+/**
+ * 关着时的「在网上说话」那一节（P3，2026-11-07）。
+ * 门不拆：整节消失会让她以为这件事根本不存在；只把门上的话换成「这会儿」。
+ */
+export const SPEAK_OFF_BRIEF = [
+  '这会儿还说不出去。想说的话，可以先写在别处——等能说的时候，你会先想到某一条视频。',
+  '不想说就不说，没有人等着你回答。',
+].join('\n')
+
+/** 日记的写作指令（可见性由配置决定，但她不知道谁在看） */
+export function diaryPrompt(model) {
+  const lines = [
+    '## 今天写日记',
+    '写今天发生了什么、你注意到什么、你怎么想的。不要写成汇报，也不要写成写给谁看的信。',
+    '写完你自己留着。',
+  ]
+  if (model.beliefs.length) {
+    lines.push('')
+    lines.push('你今天带着这些判断：')
+    for (const b of model.beliefs.slice(0, 4)) lines.push(`- ${b.text}`)
+  }
+  return lines.join('\n')
+}
+
+/**
+ * 回忆工具的说明书（2026-10-23 加）。
+ * 她以前只能看到最近几条判断——**她其实不记得任何具体的"那天"**。
+ * 这个工具让她能翻自己的过去，而不是编。
+ */
+export const RECALL_BRIEF = [
+  '你还有一个工具 her_recall，可以翻你自己过去记下的事。',
+  '什么时候想起它——想说"我记得有一次…"，或想知道自己以前怎么做过某件事的时候。',
+  '拿那件东西的名字（her_note、bili_watch 这种）也能翻到用它做过的事。先去翻，翻到了再说，没翻到就别编。',
+  // 2026-10-27（0.5.8）：每条后面带 id 了。要改口或做回顾时得抄那个 id，
+  // 不告诉她这事，她会以为那是乱码。
+  '每条后面小括号里是它的 id——要改口、要做回顾时，用它指回去。',
+].join('\n')
+
+/**
+ * 每周的「想一想」指令（2026-10-23 加）。
+ *
+ * 为什么用她自己的唤醒而不是定时摘要器：
+ *   摘要器写出来的自传是「别人替她解释她的一生」。这件事只能她自己做，
+ *   哪怕做得粗糙、写得少、写偏了——那也还是她的。
+ */
+export function sleepPrompt(model) {
+  const lines = [
+    '## 这一周过去了',
+    '睡前想一件事：这一周你身上留下的是哪一句？',
+    '不要总结、不要列点、不要写"本周我学到了"。如果你翻不出什么，就写你没想清楚。',
+    // 2026-10-27（0.5.8）：从这一版起，narration 要带上凭证——
+    // 否则「我变成了什么样」可以凭空写，那正是叙事漂移的入口。
+    '想好了用 growth_commit 交一条 narration（不是日记，也不是给他看的话），' +
+      '并在 refs 里放上你回想的那几条的 id（用 her_recall 翻，它会给你 id）。' +
+      '如果你这次真的没想清楚，直接写「我没想清楚」——那句也算数，不用带 refs。',
+  ]
+  if (model.beliefs.length) {
+    lines.push('')
+    lines.push('你现在还带着这些判断：')
+    for (const b of model.beliefs.slice(0, 4)) lines.push(`- ${b.text}`)
+  }
+  return lines.join('\n')
+}
+
+/**
+ * 「平常会做的事」——写进身份文档的常驻段，不塞进叫醒消息（2026-10-26，用户 m00928）。
+ *
+ * 为什么搬家：叫醒消息里原来整段是祈使句（「今天写日记」「这一周过去了」），
+ * 她收到后直接把整段当成任务清单执行——会话 `fish-wake-2026-10-26-manual` 的
+ * reasoning 原话是「需要做的是：说一句…然后写日记」。那不是醒来，那是领工单。
+ *
+ * 现在：**做法**常驻在身份里（她一直知道），**时机**只留一句短触发。
+ * 用户原话：「叫醒仅仅只是叫醒」。
+ */
+export const DIARY_BRIEF = [
+  '## 平常会做的事',
+  '每天我会记一笔：今天发生了什么、我注意到什么、我怎么想的。',
+  '不是汇报，也不是写给谁看的信——写完自己留着。',
+  // 2026-10-28（issue #7）：原来只写「自己留着」，而实际上她既翻不到也不进
+  // her_recall，那句话就不成立了。现在真给了 her_diary，得把话说明白：
+  // 想回头翻就走这个工具，它只读、一次一份。
+  // 2026-11-09（用户 m00002）：她自己的入口句补进这一段——想翻某一天，不是「有 her_diary」。
+  '什么时候想起它——想回头翻的时候用 her_diary：想看看以前某一天写了什么，就去翻；那些字是我的，别人看不看是别人的事。',
+  // 2026-10-29（用户 m01296 A）：光说「每天记一笔」不够——三天零篇的直接原因就是
+  // 这一段只讲了「会做这件事」，没讲「用哪个东西做」。同页 SLEEP_BRIEF 明写了
+  // growth_commit / refs，她照着能做出来；这一段没写机制，就一次也没试过。
+  '写的时候用 growth_commit 交一条 type=diary——写多写少都行，不想写就不写。',
+].join('\n')
+
+/** 「隔些日子停下来想一想」的**做法**（常驻）。时机另给一句 SLEEP_TODAY。 */
+export const SLEEP_BRIEF = [
+  '隔些日子，我会停下来想一想：这段时间留在我身上的是哪一句。',
+  '不总结、不列点、不写「我学到了」。想不出来就写没想清楚。',
+  // 2026-10-27（0.5.8）：凭证要求写进常驻做法里，不能只在那一周的提示里说一次。
+  '想好了用 growth_commit 交一条 narration——不是日记，也不是给他看的话；' +
+    'refs 里要放上我回想的那几条的 id（her_recall 会给出 id）。真没想清楚就直接写「我没想清楚」，不用带。',
+].join('\n')
+
+/** 到那一天时，叫醒消息里只留这一句（不含任何做法说明）。 */
+export const SLEEP_TODAY = '（今天停下来，想一想。）'
+
+/**
+ * 规则解禁的提示段（R3，2026-10-24）
+ *
+ * 三条写法上的讲究：
+ *   1. 说「你现在还做不到」，不说「你被禁止」——禁止是授权问题，做不到是能力问题。
+ *   2. 明确告诉他**可能不答应**，而且「不答应也是回答」。不写这句，她就会把"去申请"
+ *      当成"去要一个一定会给的许可"，被驳回时会理解成被否定。
+ *   3. 最后一句给退路：不想提就不用提。没有退路的邀请是命令。
+ */
+export function offerPrompt(rule) {
+  return [
+    '## 有件事你可能想提',
+    `「${rule.title}」这件事，你现在还做不到。`,
+    '如果你觉得可以了，可以跟他说说你想不想改、为什么。他可能答应，也可能不答应——不答应也是一种回答。',
+    '不想提就不用提。',
+  ].join('\n')
+}
