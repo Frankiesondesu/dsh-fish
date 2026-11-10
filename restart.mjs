@@ -163,7 +163,7 @@ for (const p of portsFor(TARGET)) {
 // 3) 起
 out('')
 out('  [3/3] 起')
-if (!runNode(join(HERE, 'launch.mjs'), ['--no-open'])) {
+if (!runNode(join(HERE, 'launch.mjs'), ['--no-open', ...(TARGET ? [TARGET] : [])])) {
   out('  ✗ 启动器报错，下面自查')
   process.exit(1)
 }

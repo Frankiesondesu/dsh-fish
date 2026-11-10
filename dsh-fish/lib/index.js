@@ -48,9 +48,6 @@ import { ensurePocketOrder, findPocketWorkspace } from './pocket.js'
 import { noteRoot } from './homes.js'
 import { writeSelfDoc } from './selfdoc.js'
 import { claimRoot, beatRoot, releaseRoot, HEARTBEAT_MS } from './tenant.js'
-import { spawn } from 'node:child_process'
-import { createConnection } from 'node:net'
-import { fileURLToPath } from 'node:url'
 import { registerToolRestrict } from './restrict.js'
 import { registerSkillCatalogGuard } from './skillcatalog.js'
 // `clearWakeSection` 在 dispose 里用：它挂在 system prompt 段上，是个模块级变量，
@@ -495,16 +492,6 @@ export function apply(ctx, baseConfig = {}) {
       `[dsh-fish] 启动 · 第 ${model.day} 天 · 阶段 ${model.stage}(${model.stageName}) · 判断 ${model.beliefCount} 条 · 根 ${root}`,
     )
 
-    // fork.42（2026-11-04）：插件一起来就把查看器带上。
-    // 以前只有 `一键启动.cmd` 会拉它；单独重启 DSH（界面里重启 / 直接开 exe）时
-    // 查看器不动，面板上就停在打开那一刻的旧数字（实测差了 50 条事件、18 轮）。
-    // 失败只记一行，不影响她；不 await，别让查看器拖慢启动。
-    void ensureViewer()
-      .then((r) => {
-        if (r === 'started') logger.info('[dsh-fish] 查看器没在跑，已拉起 7788')
-        else if (String(r).startsWith('failed')) logger.warn(`[dsh-fish] 查看器没能拉起：${String(r).slice(8)}`)
-      })
-      .catch(() => {})
   }
 
   // 宿主可能不 await apply，所以自己兜住异常：启动失败不能带走整个插件树
@@ -513,38 +500,6 @@ export function apply(ctx, baseConfig = {}) {
     console.error('[dsh-fish] 启动失败', err)
   })
 
-  /**
-   * 确保查看器在跑（fork.42，2026-11-04）。
-   *
-   * 只做两件事：探一下 7788，没人在就 spawn 一个；失败只报，不影响她。
-   * 不 import viewer.mjs —— 那是独立进程，插件不该把它的模块拉进来。
-   * 也不开浏览器（`一键启动.cmd` 那套会 `start` 一下），这里安静起，不抢焦点。
-   */
-  async function ensureViewer(port = 7788) {
-    const busy = await new Promise((resolve) => {
-      const s = createConnection({ port, host: '127.0.0.1' })
-      let settled = false
-      const done = (v) => {
-        if (settled) return
-        settled = true
-        try { s.destroy() } catch { /* ignore */ }
-        resolve(v)
-      }
-      s.once('connect', () => done(true))
-      s.once('error', () => done(false))
-      const t = setTimeout(() => done(false), 800)
-      t.unref?.()
-    })
-    if (busy) return 'running'
-    const file = fileURLToPath(new URL('../../viewer/viewer.mjs', import.meta.url))
-    try {
-      const child = spawn(process.execPath, [file], { detached: true, stdio: 'ignore', windowsHide: true })
-      child.unref()
-      return 'started'
-    } catch (err) {
-      return `failed: ${err?.message ?? err}`
-    }
-  }
   // 卡片被别的插件接走之后（dsh-fish/card），人的回答从这里回来（lib/cardanswer.js）。
   // 同步挂上：宿主重启后 IM 插件可能先连上、先收到人的回答，这时启动还没走完。等它走完才知道这个家是不是自己的。
   // 没认领到就不写，和那些工具同一条理由：被占着，或者启动没走到认领那一步（默认值 ok 是真的，不能信）。
