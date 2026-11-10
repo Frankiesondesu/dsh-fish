@@ -100,6 +100,7 @@ export const SETTINGS = [
   { group: '房间', key: 'rooms.groupRotateDays', label: '群房用几天换新', kind: 'num', min: 0, max: 365, step: 1, hint: '0 = 不换；书房按 chat.rotateAfter 的轮数换' },
 
   { group: '记忆与上下文', key: 'memory.docBudget', label: '身份文档字数预算', kind: 'num', min: 600, max: 4000, step: 100, hint: '超了按优先级丢可选段，「你是谁」永不丢；2400 实测一段不丢' },
+  { group: '记忆与上下文', key: 'memory.echo', label: '身份段末尾摆一句她自己说过的话', kind: 'bool', hint: '0.9.7 T1：开着她能在身份文档末尾看到自己的一句旧话；关掉就不摆' },
   { group: '记忆与上下文', key: 'memory.sleepEveryDays', label: '每几天让她想一想', kind: 'num', min: 0, max: 60, step: 1, hint: '0 = 不主动想' },
   { group: '记忆与上下文', key: 'memory.selfWake', label: '空醒时自己找事做', kind: 'bool', hint: '0.9.0：醒来没派活、桌上也没东西时' },
   { group: '记忆与上下文', key: 'memory.sleepKeep', label: '总共留多少条自述', kind: 'num', min: 0, max: 100, step: 1, hint: '超出后最早的折进「更早以前」；0 = 一条不留' },
