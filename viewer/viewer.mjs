@@ -866,8 +866,17 @@ function renderMemory(el){
       : '<div class="card"><div class="stats">'+
           stat('跨度', h.days??'—', '天')+
           stat('事件', h.events??'—', '条')+
+          stat('判断', h.beliefs??'—', '条')+
+          stat('固化', h.solid??'—', '条')+
+          stat('张力', h.tensionsTotal??'—', '对')+
+          stat('褪色', h.faded??'—', '条')+
           stat('类型分布', (h.byType||[]).length, '种')+
-        '</div><pre style="margin-top:10px">'+esc(JSON.stringify(h, null, 2)).slice(0,2400)+'</pre></div>');
+          stat('久未检验', (h.stale||[]).length, '条')+
+        '</div>'+
+        // 2026-11-10：原始诊断 JSON 收进 details，默认看不见；要细查再展开。
+        // 它只是给房主看的只读诊断数据，不进她的身份文档、不占字数预算。
+        '<details style="margin-top:10px"><summary class="dim" style="font-size:12px;cursor:pointer">查看原始诊断 JSON</summary>'+
+        '<pre style="margin-top:8px">'+esc(JSON.stringify(h, null, 2)).slice(0,4000)+'</pre></details></div>');
 }
 
 function renderData(el){
