@@ -139,6 +139,29 @@ test('save：超过单文件上限就拒绝（不复制）', async () => withSpa
   assert.match(out.note, /超过单文件上限/)
 }))
 
+test('安全闸：可执行文件与脚本一律不存，改扩展名的也认得出', async () => withSpace(async ({ root, tool }) => {
+  await mkdir(join(root, 'home', 'inbox'), { recursive: true })
+
+  await writeFile(join(root, 'home', 'inbox', 'evil.exe'), Buffer.from('MZ\x90\x00', 'binary'))
+  const exe = await call(tool, { action: 'save', path: join(root, 'home', 'inbox', 'evil.exe') })
+  assert.equal(exe.ok, false)
+  assert.match(exe.note, /可执行/)
+
+  await writeFile(join(root, 'home', 'inbox', 'run.js'), 'console.log(1)')
+  const js = await call(tool, { action: 'save', path: join(root, 'home', 'inbox', 'run.js') })
+  assert.equal(js.ok, false, '脚本也不存')
+
+  // 改了扩展名：PE 魔数认得出
+  await writeFile(join(root, 'home', 'inbox', 'fake.txt'), Buffer.from([0x4d, 0x5a, 0x90, 0x00]))
+  const fake = await call(tool, { action: 'save', path: join(root, 'home', 'inbox', 'fake.txt') })
+  assert.equal(fake.ok, false)
+  assert.match(fake.note, /文件头是程序/)
+
+  // 普通文本照常
+  await writeFile(join(root, 'home', 'inbox', 'ok.txt'), 'hello')
+  assert.equal((await call(tool, { action: 'save', path: join(root, 'home', 'inbox', 'ok.txt') })).ok, true)
+}))
+
 test('remove 是真删；get 对二进制只给路径', async () => withSpace(async ({ root, tool }) => {
   await mkdir(join(root, 'home', 'inbox'), { recursive: true })
   await writeFile(join(root, 'home', 'inbox', 'v.mp4'), Buffer.from([0, 1, 2, 3]))

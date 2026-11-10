@@ -98,6 +98,40 @@ function kindOf(name) {
 }
 const isTextName = (name) => kindOf(name) === '文本'
 
+/**
+ * 可执行/脚本类：一律不存（用户 2026-11-10：「万一中毒就惨了」）。
+ * 她本来就没有运行任何文件的工具，这里是第二道闸——防的是「存进来之后
+ * 被别的东西翻出来执行」，以及以后误加执行能力时旧文件变成炸弹。
+ */
+const EXEC_EXT = /\.(exe|dll|com|scr|pif|cpl|msi|msp|msix|appx|hta|jar|bat|cmd|ps1|psm1|psd1|vbs|vbe|js|jse|wsf|wsh|reg|lnk|url|sh|bash|zsh|py|pyw|pl|rb|php|cgi|scf|inf|msc)$/i
+
+/** 文件头是程序（PE / ELF / Mach-O / Java class）——改了扩展名也认得出。 */
+const EXEC_MAGIC = [
+  [0x4d, 0x5a],             // MZ（Windows PE）
+  [0x7f, 0x45, 0x4c, 0x46], // ELF
+  [0xcf, 0xfa, 0xed, 0xfe], // Mach-O（小端）
+  [0xfe, 0xed, 0xfa, 0xcf], // Mach-O（大端）
+  [0xca, 0xfe, 0xba, 0xbe], // Mach-O fat / Java class
+]
+
+function looksExecutable(buf) {
+  for (const sig of EXEC_MAGIC) {
+    if (buf.length >= sig.length && sig.every((b, i) => buf[i] === b)) return true
+  }
+  return false
+}
+
+async function headOf(p, n = 8) {
+  const fh = await fs.open(p, 'r')
+  try {
+    const buf = Buffer.alloc(n)
+    const { bytesRead } = await fh.read(buf, 0, n, 0)
+    return buf.subarray(0, bytesRead)
+  } finally {
+    await fh.close()
+  }
+}
+
 const fmtSize = (n) => (n >= 1024 * 1024 ? `${(n / 1048576).toFixed(1)}MB` : `${(n / 1024).toFixed(1)}KB`)
 const fmtTime = (ms) => {
   const d = new Date(Number(ms) || 0)
@@ -131,7 +165,8 @@ export function registerSpace(ctx, deps = {}) {
         'put 放一段文字（同名覆盖）；append 接着写；list 翻一翻；get 读；' +
         'save 把他发给你的文件（文本/图片/视频/音频/别的）存进来，或者存你自己 media/ 里的东西；' +
         'remove 删掉一个（真删，删了就没了）。' +
-        '笔记一篇最多 16KB；单个文件最多 200MB、整个文件夹 2GB。',
+        '笔记一篇最多 16KB；单个文件最多 200MB、整个文件夹 2GB。' +
+        '可执行文件和脚本（.exe/.bat/.ps1/.js 这些）一律不存——改了扩展名也认得出。',
       parameters: toJsonSchema({
         type: 'object',
         properties: {
@@ -196,6 +231,21 @@ export function registerSpace(ctx, deps = {}) {
             try { st = await fs.stat(src) } catch { return { ok: false, text: '', note: '这个路径下没有文件。' } }
             if (!st.isFile()) return { ok: false, text: '', note: '这不是一个文件。' }
             if (st.size === 0) return { ok: false, text: '', note: '这个文件是空的，没东西可存。' }
+            // 安全闸：可执行/脚本不存；改了扩展名的，看文件头
+            if (EXEC_EXT.test(basename(src))) {
+              return {
+                ok: false,
+                text: '',
+                note: `《${basename(src)}》是可执行文件或脚本，不能存——万一有毒，我不碰。代码想留就贴进笔记里（存成 .md，不会被执行）。`,
+              }
+            }
+            if (looksExecutable(await headOf(src))) {
+              return {
+                ok: false,
+                text: '',
+                note: `《${basename(src)}》的文件头是程序（改了扩展名也认得出），不能存。`,
+              }
+            }
             if (st.size > LIMITS.fileMax) {
               return { ok: false, text: '', note: `这一个 ${fmtSize(st.size)}，超过单文件上限 ${fmtSize(LIMITS.fileMax)}——存不进来。` }
             }
