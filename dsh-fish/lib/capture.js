@@ -15,7 +15,7 @@ import { HER_TYPES, Reject } from './schema.js'
 // 这里带兜底：本地跑单测/冒烟时没有宿主，退回一个同形状的薄封装，
 // 让 test 能在没有 DSH 的情况下验证参数校验与写盘路径。
 import { defineTool } from './tool.js'
-import { appendEvent, readEvents, rootDir, writeDaily } from './store.js'
+import { appendEvent, readEvents, rootDir, writeDaily, pruneDiary } from './store.js'
 import { deriveSelfCached } from './derive.js'
 import { loadConfig, dateKey } from './settings.js'
 import { toJsonSchema } from './toolschema.js'
@@ -87,7 +87,9 @@ export function registerCapture(ctx, deps = {}) {
           required: false,
           items: { type: 'string' },
           description:
-            'type=revise 或 narration 时必填：指向被改写/被回顾的那条事件的 id（形如 ev_xxx，用 her_recall 翻得到）。',
+            'type=revise 或 narration 时必填：指向被改写/被回顾的那条事件的 id（形如 ev_xxx，用 her_recall 翻得到）。' +
+            'type=utterance 时，如果你这句话是因为看到了某条具体的东西（一句话、一个视频、他提过的一件事），把那条的 id 也写上——' +
+            '这不算必须，但写了以后你自己翻得回来。',
         },
         verdict: {
           type: 'string',
@@ -147,6 +149,9 @@ export function registerCapture(ctx, deps = {}) {
             if (!config.diary.enabled) return { ok: false, id: '', note: '今天不写日记。' }
             const dk = dateKey()
             const file = await writeDaily('diaryDir', dk, text, root)
+            // 写完之后按 diary.keepDays 清一遍超期的（2026-11-08，用户 m00585）。
+            // 清理失败不能连带把「写日记」判成失败——那会让她以为自己没写下来。
+            await pruneDiary(config.diary.keepDays, dk, root).catch(() => 0)
             // 这一篇是不是出门那趟写的（0.6.17 旅行日记）：只有「进行中的出门会话」
             // 才打趟次标记，家里写的不打。日记本体仍然写进同一个 diary/YYYY-MM-DD.md，
             // 标记只进 meta，界面按标记把这一趟的几篇聚在一起。

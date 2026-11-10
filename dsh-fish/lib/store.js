@@ -380,6 +380,66 @@ export async function readDaily(dirName, dateKey, root = rootDir()) {
   }
 }
 
+/**
+ * 按 `diary.keepDays` 清掉超期的日记（2026-11-08，用户 m00585）。
+ *
+ * 这个设置从 0.1.0 就摆在设置页上，写着「超期的日记按天清掉」，但从来没有
+ * 一行代码读它——用户把 30 天改成 365 天、或者改成永久，文件一个都不会动。
+ * 现在由写日记那一步顺手清理（一天最多跑一次，不需要定时器）。
+ *
+ * 三条边界：
+ *   - `keepDays <= 0` = 永久保留（设置页的默认值就是这个意思），一个都不删；
+ *   - 只删**顶层**形如 `YYYY-MM-DD.md` 的文件，`archive/`（0.6.4–0.6.27 的旧稿）
+ *     与别的文件一律不碰；
+ *   - 按日期键比大小，不按 mtime——mtime 会被备份恢复、复制、编辑器重写改掉。
+ *
+ * @returns {Promise<number>} 删掉几篇
+ */
+export async function pruneDiary(keepDays, todayKey, root = rootDir()) {
+  const days = Number(keepDays)
+  if (!Number.isFinite(days) || days <= 0) return 0
+  const today = Date.parse(`${String(todayKey).slice(0, 10)}T00:00:00Z`)
+  if (!Number.isFinite(today)) return 0
+  const cutoff = today - Math.floor(days) * 86400000
+  let removed = 0
+  let names = []
+  try {
+    names = await fs.readdir(paths(root).diaryDir)
+  } catch (err) {
+    if (err.code === 'ENOENT') return 0
+    throw err
+  }
+  for (const name of names) {
+    const m = /^(\d{4}-\d{2}-\d{2})\.md$/.exec(name)
+    if (!m) continue
+    const at = Date.parse(`${m[1]}T00:00:00Z`)
+    if (!Number.isFinite(at) || at >= cutoff) continue
+    try {
+      await fs.unlink(join(paths(root).diaryDir, name))
+      removed++
+    } catch (err) {
+      if (err.code !== 'ENOENT') throw err
+    }
+  }
+  return removed
+}
+
+/**
+ * 写过日记的日期（新→旧）：diary/ 里现存的文件，并上事件流里每篇写下时留的 `diary:<日期>` 记录。
+ *
+ * 「日记留多久」只删文件、不动事件流（issue #67），所以被清掉的那些也还算写过；同一天写两次只算一篇。
+ * 身份文档的「写过几篇」、her_diary 的「一共写过几篇」、记忆页的篇数都用这一个口径，别各数各的。
+ * 纯函数。files 传 listDiary 的结果；它不是数组（读不到目录）时原样返回，调用方自己当「不知道」。
+ */
+export function diaryDatesWritten(files, events = []) {
+  if (!Array.isArray(files)) return files
+  const meta = (Array.isArray(events) ? events : [])
+    .filter((e) => e?.type === 'meta')
+    .map((e) => /^diary:(\d{4}-\d{2}-\d{2})/.exec(String(e.text ?? ''))?.[1])
+    .filter(Boolean)
+  return [...new Set([...files, ...meta])].sort().reverse()
+}
+
 /** 列出已有的日记日期（新→旧） */
 export async function listDiary(root = rootDir()) {
   try {

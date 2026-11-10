@@ -127,8 +127,22 @@ export function isProofOnly(ev) {
  * 三种说法都认，但**不认「他给我起了名字：大肥鱼」**——那是她自己的名字，不是他的。
  * 所以「名字」这条必须带「他自己的」，裸的「名字」不算。
  */
-const NAME_SAY_RE = /(?:称呼你|叫你|称呼他|叫他|称他)(?:做|为|作|叫)?\s*[「“"']?([^\s，。！？、,.!?」”"']{1,8})/
-const NAME_GIVE_RE = /他(?:给(?:了)?)?(?:自己)?的?名字\s*(?:是|叫|：|:)?\s*[「“"']?([^\s，。！？、,.!?」”"']{1,8})/
+//
+// 2026-11-08（issue #81）：她说过「说你让我叫你老大——可这句不是我从你嘴里听见的」，
+// 截出来是「老大——可这句不」——正好 {1,8} 抓满 8 个字。破折号、省略号都是
+// 「话说到一半」的标记，名字不可能跨过去，两种说法共用这一份排除集。
+const NAME_STOP_CHARS = '\\s，。！？、,.!?」”"\'—–‒―~～…「'
+// issue #97（2026-11-09，外部用户真机）：「我想好了怎么叫你——叫「某名字」」。
+// 破折号挡在「叫你」和名字之间，原来的壳只吃空白/一个引号，整句认不出来。
+// 但破折号不能无条件跳过：没有引号的「叫你——可这句不是我从你嘴里听见的」，
+// 跳过去就会把「可这句不是我从」当成名字。所以只在破折号后面**带引号**时才跳。
+const NAME_SAY_RE = new RegExp(
+  `(?:称呼你|叫你|称呼他|叫他|称他)(?:` +
+    `(?:做|为|作|叫)?\\s*[「“"']?` +
+    `|[—–‒―~～…]+\\s*(?:叫)?\\s*[「“"']` +
+  `)([^${NAME_STOP_CHARS}]{1,8})`,
+)
+const NAME_GIVE_RE = new RegExp(`他(?:给(?:了)?)?(?:自己)?的?名字\\s*(?:是|叫|：|:)?\\s*[「“"']?([^${NAME_STOP_CHARS}]{1,8})`)
 // 截出来的常常带尾巴：「我叫你老张好了」会截到「老张好了」。
 // 只剥语气词和「了/好」这类收尾——**不剥「的」**，「开灯的」剥掉就成了「开灯」。
 const NAME_TAIL = /[了吧呢啊嘛哦诶欸呀哈哇哦嘞好]+$/
@@ -244,7 +258,19 @@ export function detectTensions(beliefs = [], { minSim = 0.5, limit = 3, measure 
     })
   }
   hits.sort((x, y) => y.sim - x.sim || x.i - y.i || x.j - y.j)
-  return hits.slice(0, limit).map((h) => h.item)
+  // issue #67 / PR #75：同一句话说过三遍时，每一遍都会和反面那句配成一对。
+  // 不去重的话，总数会把一处矛盾数成三处，前几个位置也可能被同一对占满。
+  // 按两句原话的无序对去重，留第一次出现的那对（顺序不变，第一处不变）。
+  const seen = new Set()
+  const unique = []
+  for (const h of hits) {
+    const a = String(h.item.a?.text ?? ''), b = String(h.item.b?.text ?? '')
+    const key = a <= b ? `${a}\u0000${b}` : `${b}\u0000${a}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    unique.push(h)
+  }
+  return unique.slice(0, limit).map((h) => h.item)
 }
 
 /**
@@ -328,7 +354,8 @@ export const IMPORT_MARK_PREFIX = 'import-mark:'
 
 /** 成长第几天 = 距 seed 的自然日 + 1（不因没互动而暂停，也不回退） */
 export function growthDay(events, now = Date.now()) {
-  const seed = events.find((e) => e.type === 'seed')
+  // issue #65：重开一局后导入的人设排在自动补的默认 seed 后面，要用它。
+  const seed = events.find((e) => e.type === 'seed' && e.source === 'import') ?? events.find((e) => e.type === 'seed')
   const snap = events.reduce((m, e) => Math.max(m, Number(e.day) || 0), 0)
   if (!seed) return Math.max(1, snap)
   const t0 = Date.parse(seed.ts)
@@ -449,13 +476,32 @@ export function deriveSelf(events = [], opts = {}) {
   // 侧栏聊天那条路不写，于是聊得再多也会到点落一条假的「他有 N 天没出现」。
   // 写入口已经补上（turns.js 结账时写 seen:），历史里那条假的靠这个前缀排除。
   const REJECT_PREFIXES = ['outing-reject:', 'possess-reject:', 'absence-reject:']
-  const rejectedIds = new Set()
+  // issue #68 第 1 条：出门时记录对不上，整趟先标成不收（pending 期间不该偷偷长）；
+  // 复核通过后追加一条 keep，把当时没被划掉的条目捞回来。两条都只追加，原文永远还在。
+  // keep 只解出门 / 请神各自那条路的 reject，而且先收齐、循环完再减：
+  // `orderEvents` 按 id 里的时间排，回家和复核之间重启过、系统时钟又往回调过时，
+  // keep 那行会排到 reject 前面——边读边删的话，这几条就再也捞不回来了。
+  const KEEP_PREFIXES = { 'outing-keep:': 'outing-reject:', 'possess-keep:': 'possess-reject:' }
+  const rejectedBy = new Map(REJECT_PREFIXES.map((p) => [p, new Set()]))
+  const keptBy = new Map(Object.values(KEEP_PREFIXES).map((p) => [p, new Set()]))
   for (const e of ordered) {
     if (e.type !== 'meta') continue
     const t = String(e.text ?? '')
-    const prefix = REJECT_PREFIXES.find((p) => t.startsWith(p))
-    if (!prefix) continue
-    for (const id of t.slice(prefix.length).split(/[\s,]+/)) if (id) rejectedIds.add(id)
+    const reject = REJECT_PREFIXES.find((p) => t.startsWith(p))
+    if (reject) {
+      for (const id of t.slice(reject.length).split(/[\s,]+/)) if (id) rejectedBy.get(reject).add(id)
+      continue
+    }
+    const keep = Object.keys(KEEP_PREFIXES).find((p) => t.startsWith(p))
+    if (keep) {
+      const kept = keptBy.get(KEEP_PREFIXES[keep])
+      for (const id of t.slice(keep.length).split(/[\s,]+/)) if (id) kept.add(id)
+    }
+  }
+  const rejectedIds = new Set()
+  for (const [prefix, ids] of rejectedBy) {
+    const kept = keptBy.get(prefix)
+    for (const id of ids) if (!kept?.has(id)) rejectedIds.add(id)
   }
   // 梦（2026-10-30，本机实验）：**不参与任何派生**。
   // 它只是把真实发生过的事重新拼一遍，不是新信息——不该变成信念、不推进成长日、
@@ -463,7 +509,7 @@ export function deriveSelf(events = [], opts = {}) {
   // 「梦」卡里给人看；她自己翻 her_recall 时才看得到。
   const evs = (rejectedIds.size ? ordered.filter((e) => !rejectedIds.has(e.id)) : ordered)
     .filter((e) => e.type !== 'dream')
-  const seedEv = evs.find((e) => e.type === 'seed')
+  const seedEv = evs.find((e) => e.type === 'seed' && e.source === 'import') ?? evs.find((e) => e.type === 'seed')
   const seed = seedEv?.text ?? ''
 
   const day = growthDay(evs, now)
@@ -484,6 +530,9 @@ export function deriveSelf(events = [], opts = {}) {
   let personaSource = ''
   let narrative = null
   let refined = 0
+  // issue #66：refuted 也算一次改口（用户裁定「认错也是改」）。
+  // refined 只数 refined（needs 折射沿用旧口径），facts.revises 数两者。
+  let revisions = 0
   let lastAbsence = null
   let lastReunion = null
   // 2026-10-25：两条新事件卡需要「他说过话没有 / 她开口之后他接没接」。
@@ -569,8 +618,12 @@ export function deriveSelf(events = [], opts = {}) {
           for (const b of olds) {
             refuted.push({ oldId: b.id, oldText: b.text, newText: ev.text, at: ev.ts })
           }
+          revisions++
         }
-        if (ev.verdict === 'refined') refined++
+        if (ev.verdict === 'refined') {
+          refined++
+          revisions++
+        }
         beliefs.push({
           id: ev.id, text: ev.text, since: ev.ts,
           confidence: Number(ev.confidence ?? 0.5), status: 'active', verdict: ev.verdict ?? null,
@@ -915,10 +968,27 @@ export function deriveSelf(events = [], opts = {}) {
     if (wa !== wb) return wb - wa
     return (idTime(b.id) || Date.parse(b.since) || 0) - (idTime(a.id) || Date.parse(a.since) || 0)
   })
-  const solid = ranked.filter((b) => b.solid).slice(0, 8)
+  // 2026-11-09（issue #86 第 4 条，用户拍板「N、M 都去重」）：界面上的两个数按**原话**算，
+  // 同一句话说三遍算一条。矛盾数与体检早就是按原话去重的，这里跟上——否则一处矛盾被说三遍，
+  // 界面上看着像她记得三件事。
+  const textCount = (rows) => new Set(rows.map((b) => String(b.text ?? '').trim())).size
+  // issue #67：列表照旧只摆前 8 条，但界面要印「总数」——不然看起来像她只记得住 8 条。
+  // 2026-11-09：摆出来的和数出来的都按原话去重，同一句说三遍不会在文档里占三行。
+  const seenSolidText = new Set()
+  const solidUnique = ranked.filter((b) => {
+    if (!b.solid) return false
+    const t = String(b.text ?? '').trim()
+    if (seenSolidText.has(t)) return false
+    seenSolidText.add(t)
+    return true
+  })
+  const solidTotal = solidUnique.length
+  const solid = solidUnique.slice(0, 8)
   // 曾经固化、但因为太久没被提起而掉下来的那些（体检与界面各要一份口径）。
   const faded = ranked.filter((b) => b.eligible && b.stale)
   const tensions = detectTensions(scored)
+  // issue #67：detectTensions 默认最多 3 条；界面印「几处」时要用截断前的总数。
+  const tensionsTotal = detectTensions(scored, { limit: 500 }).length
 
   // ---- needs（内部量，永不外露）----
   // 话里明确拒绝过几次（严格口径，见 REFUSE_RE）。refusal 事件另算，两边加起来才是「勇于拒绝」。
@@ -1001,10 +1071,12 @@ export function deriveSelf(events = [], opts = {}) {
     beliefs: ranked,
     ranked,
     solid,
+    solidTotal,
     // 掉档的固化（2026-11-02）：曾经够格、但太久没被提起/检验的那些。
     // 与 solid 互斥；给体检和界面各一份口径，不用再各算一遍。
     faded,
     tensions,
+    tensionsTotal,
     // 疤（P1 第三块）：他顶回来或因此难过、而她后来退了一步的那些拒绝。
     // 只放**没想通**的（未被 revise 指向过）；想通了的那条留在 refusals 里，不进身份文档。
     scars: openScars,
@@ -1012,7 +1084,7 @@ export function deriveSelf(events = [], opts = {}) {
     // 她读到过的别人的话（近 5 条）+ 这一次可以摆在眼前的、还没认下的那一条。
     voices: recentVoices,
     freshVoice,
-    beliefCount: active.length,
+    beliefCount: textCount(active),
     refuted,
     refusals,
     selfmodAttempts: selfmod,
@@ -1035,14 +1107,14 @@ export function deriveSelf(events = [], opts = {}) {
       // 「勇于拒绝」= 正式拒绝事件 + 话里明确拒绝过（严格口径）。界面显示与门禁用同一个数，
       // 免得出现「拒绝过 0 却能过自主门」这种自相矛盾的画面。
       refused: refusals.length + wontCount,
-      revises: refined,
+      revises: revisions,
       narrations,
       corrected: corrected.length,
       reunions: reunions.length,
       reunionAfterAbsence,
       // 判断之间对不上几处 / 固化了几条（2026-10-24，P0）
-      tensions: tensions.length,
-      solid: solid.length,
+      tensions: tensionsTotal,
+      solid: solidTotal,
       // 掉档的有几条（不进界面数字，只给体检与自检看）
       faded: faded.length,
       solidStaleDays: SOLID_STALE_DAYS,
@@ -1094,14 +1166,24 @@ export function deriveSelf(events = [], opts = {}) {
 
   model.stageGate = {
     passed,
-    pending: passed.length < GATE_ORDER.length ? GATE_ORDER[passed.length] : null,
+    // 下一道还没过、也没被时间兜底放行的门。原来取 GATE_ORDER[passed.length]：成长期过后
+    // 兜底放行的进 forced、不进 passed，信任、主动过了而自主没过时，会指着已经过了的「主动」。
+    // 成长期里 passed 总是从头连着的，两种取法一样；成长期过后没过的都放行了，这里就是 null。
+    pending: GATE_ORDER.find((g) => !passed.includes(g) && !forced.includes(g)) ?? null,
+    // 第一道还没真过的门，不管它是不是兜底放行了。pending 是给人看的「下一个瓶颈」，
+    // 成长期过后恒为 null；选卡加权（generator.js）要的是这个：立场清单只认真过的三道门
+    // （stance.js 的 gatesDone），兜底放行不算数，期满以后还得把推门的卡往前摆。
+    // 成长期里它和 pending 一样。
+    next: GATE_ORDER.find((g) => !passed.includes(g)) ?? null,
     forced,
     gateStage,
   }
   model.elapsedStage = elapsedStage
   model.stage = Math.min(elapsedStage, gateStage)
   model.stageName = STAGE_NAMES[model.stage - 1]
-  model.stageForced = forced.length > 0 && model.stage < elapsedStage
+  // issue #67：forced 只在 day > growthDays 时产生，那时的 stage 恒等于 elapsedStage，
+  // 原来的 && model.stage < elapsedStage 永远为假——「（时间兜底）」从不出现。
+  model.stageForced = forced.length > 0
 
   return model
 }
@@ -1178,16 +1260,39 @@ export function deriveSelfCached(events = [], opts = {}) {
   return model
 }
 
+/**
+ * 每道门需要多少证据（2026-11-08）。
+ *
+ * 30 天是基准：自主 2 次拒绝、主动 2 次改口。成长期压到 7 / 14 天时，
+ * 同样的 2 次在一个阶段只给两三天的情况下根本凑不齐，她会被门锁死在 stage 1，
+ * 后面的卡永远不出现——长的不是性格，是没机会。
+ *
+ * 所以短周期把这两道门降到 1 次；信任门始终只要 1 条判断。
+ * 长周期不放宽也不收紧：60 天里 2 次仍然做得到，没必要改判据。
+ *
+ * 改 14 天这条分界时，界面上写着「14 天及以下」的几处说明（client.js 的瓶颈说明、
+ * 成长周期的说明、原理页「四阶段与三道瓶颈」）和 README 阶段表下面那句要一起改；
+ * 次数本身界面照 /state 的 gateTimes 写。
+ */
+export function gateNeed(growthDays = 30) {
+  const g = clampInt(growthDays, 7, 180, 30)
+  const short = g <= 14 ? 1 : 2
+  return { trust: 1, autonomy: short, competence: short }
+}
+
 function gatePassed(gate, m) {
   const f = m.facts || {}
+  const need = gateNeed(m.growthDays)
   switch (gate) {
-    case 'trust': return m.beliefCount >= 1
-    // 自主：真的拒绝执行过某件事，至少两次（2026-10-24 收紧）。
+    case 'trust': return m.beliefCount >= need.trust
+    // 自主：真的拒绝执行过某件事。30 天口径仍是两次（2026-10-24 收紧）；
+    // 7 / 14 天降到一次（见 gateNeed）。
     // 只认 refusal 事件与「我 + 拒绝词 + 具体动作」，追问式的「要不要」不算；
     // 原来是 needs.autonomy >= 0.3，那是给关系套一个 0–1 的隐形分。
-    case 'autonomy': return (f.refused ?? 0) >= 2
-    // 主动：她至少两次推翻/修正自己先前的判断（revise 事件，或 corrected 标记）。
-    case 'competence': return (f.revises || 0) + (f.corrected || 0) >= 2
+    case 'autonomy': return (f.refused ?? 0) >= need.autonomy
+    // 主动：她至少推翻/修正自己先前的判断（revise 事件，或 corrected 标记）。
+    // 短周期同样降到一次。
+    case 'competence': return (f.revises || 0) + (f.corrected || 0) >= need.competence
     default: return true
   }
 }

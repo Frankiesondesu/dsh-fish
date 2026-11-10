@@ -20,7 +20,7 @@
  */
 
 import { readEvents, appendEvent, rootDir, readOwner } from './store.js'
-import { loadConfig, dateKey, inWindow } from './settings.js'
+import { loadConfig, dateKey, inWindow, biliOn } from './settings.js'
 import { createClient } from './bili.js'
 import { itemsFromEvents } from './browse.js'
 import { sanitizeForeign } from './guard.js'
@@ -163,7 +163,9 @@ export function seenReplies(events, dk = dateKey()) {
  *
  * 0 = 不主动问（仍然可以在叫醒时捎带、也可以让她用 bili_look 自己去看）。
  */
-export function repliesScanDue(c, now = Date.now()) {
+export function repliesScanDue(c, now = Date.now(), cfg = null) {
+  // issue #62：bili.enabled=false 是「彻底断网」，定时查回复也得停。
+  if (cfg && !biliOn(cfg)) return false
   if (c?.enabled !== true) return false
   const every = Number(c?.scanEveryMin ?? 0)
   if (!(every > 0)) return false
@@ -184,6 +186,9 @@ export async function scanReplies(o = {}) {
   const root = o.root ?? rootDir()
   const client = o.client ?? createClient({})
   const events = o.events ?? (await readEvents(root)).events
+  const { config } = await loadConfig(root)
+  // issue #62：bili.enabled=false 时一条回复都不去查（定时扫、按钮扫、她自己翻都算）。
+  if (!biliOn(config)) return []
   const dk = o.dateKey ?? dateKey()
   const seen = seenReplies(events, dk)
   const mine = await loginMid(root)
@@ -196,16 +201,19 @@ export async function scanReplies(o = {}) {
     if (!aid) continue
     const r = await client.subReplies(aid, c.rpid, { ps: 20 })
     if (!r.ok) continue
+    // issue #63（PR #79 补）：account 没记下、cookie 也读不到时，看楼主（subReplies
+    // 带出来的 root）——查的是她自己的评论楼，楼主就是她。见 selfIn。
+    const self = selfIn(mine, r, c.rpid)
     for (const s of r.data ?? []) {
       if (!s.rpid || !s.text) continue
       if (seen.has(s.rpid)) continue
-      if (mine && Number(s.mid) === mine) continue    // 她自己又补了一句，不算"别人回她"
+      if (self && Number(s.mid) === self) continue    // 她自己又补了一句，不算"别人回她"
       const dirty = sanitizeForeign(s.text)
       if (!dirty.text.trim()) continue               // 整条都是指令味，丢掉
       out.push({
         bvid: c.bvid, aid, rootRpid: c.rpid, rpid: s.rpid, user: s.user,
         text: dirty.text, ctime: s.ctime,
-        fromOwner: owners.has(Number(s.mid) || 0),
+        fromOwner: isHis(self, owners, s.mid),
       })
     }
   }
@@ -213,16 +221,66 @@ export async function scanReplies(o = {}) {
 }
 
 /**
+ * 楼主是哪个号：subReplies 带出来的主评论（`r.root`，见 bili.js）。
+ * 查的是她自己的评论楼，楼主就是她发那条评论用的号。
+ * 回包里没有这一段、或者编号和要查的楼对不上，就是 0（认不出）。
+ */
+function threadAuthor(r, rootRpid) {
+  const top = r?.root
+  if (!top || typeof top !== 'object') return 0
+  const rp = Number(top.rpid) || 0
+  if (rp && rp !== Number(rootRpid)) return 0
+  return Number(top.mid) || 0
+}
+
+/**
+ * 这一楼里「她自己」是哪个号：登录号（loginMid）优先，没有就是楼主。都认不出是 0。
+ *
+ * issue #63：查回复（scanReplies、readMyReplies）和回复（postReply 的自回检查、
+ * isOwnerReply）用同一个判断。原来只有 scanReplies 看楼主，而且读的那个字段真客户端
+ * 从来不带，等于哪儿都没生效。
+ */
+function selfIn(mine, r, rootRpid) {
+  return mine || threadAuthor(r, rootRpid)
+}
+
+/**
+ * 这条是不是他写的：在 ownerMids 里，并且不是她自己（`self`，见 selfIn）。
+ *
+ * issue #63：老数据里领养人那格（owner.mid）存的就是她的登录号——0.5.10 之前存 cookie、
+ * 点「测试」时自动填的，之后没再动过 cookie 的一直是这个形状。不剔掉她自己，她补的话
+ * 会摆进「他在你下面说话了」，回它也算回他、不占额度。认不出她自己（self 为 0）时
+ * 照旧只看 ownerMids。
+ */
+function isHis(self, owners, mid) {
+  const n = Number(mid) || 0
+  if (!n || (self && n === self)) return false
+  return owners.has(n)
+}
+
+/**
+ * 从 cookie 里读登录号（DedeUserID）。读不到就是 0。
+ */
+export function cookieMid(cookie) {
+  const m = /(?:^|[;\s])DedeUserID=(\d+)/i.exec(String(cookie ?? ''))
+  return m ? Number(m[1]) || 0 : 0
+}
+
+/**
  * 「她自己」是哪个 mid。
- * 2026-10-27：优先只读的登录账号（owner.account，跟着 cookie 走），
- * 没有才退回领养人（owner.mid）。拆开之后领养人可以是大号，
- * 拿小号 cookie 说话时，判断「哪条是她自己补的」必须用小号。
+ * 2026-10-27：优先只读的登录账号（owner.account，跟着 cookie 走）。拆开之后
+ * 领养人可以是大号，拿小号 cookie 说话时，判断「哪条是她自己补的」必须用小号。
+ *
+ * 2026-11-08（issue #63）：**不再退回 owner.mid**。那一格是主人（常常是大号），
+ * 退回它等于把主人回她的话当成她自己补的丢掉。account 没记下时从 cookie 的
+ * DedeUserID 取；两处都没有就返回 0——不知道是谁，就别跳过任何一条。
  */
 export async function loginMid(root) {
   try {
     const ow = await readOwner(root)
     const acct = Number(ow?.account?.mid) || 0
-    return acct || Number(ow?.mid) || 0
+    if (acct) return acct
+    return cookieMid(ow?.cookie)
   } catch {
     return 0
   }
@@ -236,8 +294,8 @@ export async function loginMid(root) {
  * 只认 `loginMid`（跟着 cookie 走的登录号），而主人常常是另一个号——
  * 「领养人验证」那一格填的大号。两个都要认。
  *
- * 她自己的号不在这里剔除：调用方另有 `loginMid` 判据，两种口径分开写，
- * 以后改一个不会顺手动到另一个。
+ * 她自己的号不在这里剔除：调用方另有判据（登录号，没有就看楼主，见 selfIn / isHis），
+ * 两种口径分开写，以后改一个不会顺手动到另一个。
  *
  * 只在填了「要 @ 的 B 站 uid」的部署认得出来。没填的话这里只有登录号，
  * 他回的话仍然分不出来——那一格现在同时决定「她 @ 谁」和「认不认得他」。
@@ -267,6 +325,9 @@ export async function readMyReplies(o = {}) {
   const root = o.root ?? rootDir()
   const client = o.client ?? createClient({})
   const events = o.events ?? (await readEvents(root)).events
+  const { config } = await loadConfig(root)
+  // issue #62：断网时也不翻自己的旧评论。
+  if (!biliOn(config)) return []
   const mine = await loginMid(root)
   const owners = await ownerMids(root)
   const wantBvid = String(o.bvid ?? '').trim()
@@ -283,15 +344,16 @@ export async function readMyReplies(o = {}) {
     if (!aid) continue
     const r = await client.subReplies(aid, c.rpid, { ps: 20 })
     if (!r.ok) continue
+    const self = selfIn(mine, r, c.rpid)             // 和 scanReplies 同一个判断
     for (const s of r.data ?? []) {
       if (!s.rpid || !s.text) continue
-      if (mine && Number(s.mid) === mine) continue   // 她自己补的那句不算"别人说的"
+      if (self && Number(s.mid) === self) continue   // 她自己补的那句不算"别人说的"
       const dirty = sanitizeForeign(s.text)
       if (!dirty.text.trim()) continue
       out.push({
         bvid: c.bvid, aid, rootRpid: c.rpid, rpid: s.rpid, user: s.user,
         text: dirty.text, ctime: s.ctime,
-        fromOwner: owners.has(Number(s.mid) || 0),
+        fromOwner: isHis(self, owners, s.mid),
       })
     }
   }
@@ -414,6 +476,7 @@ export async function postComment(o = {}) {
 
   const { config } = await loadConfig(root)
   const c = config.comment ?? {}
+  if (!biliOn(config)) return { ok: false, why: '现在上不了网' }
   if (c.enabled !== true) return { ok: false, why: '没开这个权限' }
   if (!inWindow({ window: c.window ?? config.window }, new Date())) return { ok: false, why: '现在不是说话的时候' }
 
@@ -469,6 +532,7 @@ export async function postReply(o = {}) {
 
   const { config } = await loadConfig(root)
   const c = config.comment ?? {}
+  if (!biliOn(config)) return { ok: false, why: '现在上不了网' }
   if (c.enabled !== true) return { ok: false, why: '没开这个权限' }
   if (c.replyToReplies === false) return { ok: false, why: '没开回评论的权限' }
   if (!inWindow({ window: c.window ?? config.window }, new Date())) return { ok: false, why: '现在不是说话的时候' }
@@ -477,20 +541,84 @@ export async function postReply(o = {}) {
   const ownerName = safeOwnerName(events, o.ownerName)
   const safeText = prefix + redactOwner(text, ownerName)
   const dk = o.dateKey ?? dateKey()
-  const cap = Math.max(0, Number(c.replyPerDay ?? 0))
-  if (replyCountToday(events, dk) >= cap) return { ok: false, why: '今天回够了' }
 
   const bvid = String(o.bvid ?? '').trim()
-  const mineRow = herComments(events, dk).find((x) => x.bvid === bvid || !bvid)
-  if (!mineRow) return { ok: false, why: '你今天还没在那个视频下说过话' }
   const parent = Number(o.parentRpid ?? 0)
   if (!parent) return { ok: false, why: '不知道在回哪一条' }
 
+  // issue #63：主楼要从最近 7 天的评论里找（查回复就是按这个窗口把回复递到她面前的），
+  // 而且必须是被回复那条实际所在的楼——同一个视频下她可能说过好几句，取第一条会把回复
+  // 平铺到别的楼下，被回复的人收不到通知。她点名了 rootRpid 就直接用那一条。
+  const candidates = herCommentsRecent(events, REPLY_LOOKBACK_DAYS).filter((x) => !bvid || x.bvid === bvid)
+  if (!candidates.length) return { ok: false, why: '你这几天还没在那个视频下说过话' }
+  // issue #63（PR #79 补）：两个编号填反时 parentRpid 会是她自己的评论，
+  // 一发出去就成了自己回自己。先拦下来，别把编号错误变成一条真评论。
+  if (candidates.some((x) => Number(x.rpid) === parent)) return { ok: false, why: '那条是你自己的评论，不是别人回给你的' }
+
+  const mine = await loginMid(root)
+  const owners = await ownerMids(root)
+  // issue #63：额度卡的是「回几个陌生人」。回他的那条不占额度，也不该被额度拦住——
+  // 所以额度满了先不拒，探测到被回复那条是不是他写的再说（见下面 isOwnerKnown）。
+  // 但除去她的登录号，一个可能是他的号都没有时，探测完也不可能放行：当场拒，
+  // 不为一个查不出来的答案先打一串 view / subReplies（0.9.3 在这里也是 0 次请求）。
+  const cap = Math.max(0, Number(c.replyPerDay ?? 0))
+  const full = replyCountToday(events, dk) >= cap
+  if (full && ![...owners].some((m) => m !== mine)) return { ok: false, why: '今天回够了' }
+
   const ow = await readOwner(root)
   const client = o.client ?? createClient({ cookie: ow?.cookie })
-  const v = await client.view(mineRow.bvid)
-  const aid = Number(v?.data?.aid) || 0
+  // 同一个视频只问一次 aid：候选大多是同一个 bvid（上面按 bvid 筛过），
+  // 挨个楼都 view 一遍是白打的请求。问不到（0）也记下，不再重试。
+  const aids = new Map()
+  const aidOf = async (bv) => {
+    if (!aids.has(bv)) {
+      const v = await client.view(bv).catch(() => null)
+      aids.set(bv, Number(v?.data?.aid) || 0)
+    }
+    return aids.get(bv)
+  }
+
+  // 她点名的主楼必须是她这几天在这个视频下的评论（candidates 里有）。对不上——编号填错、
+  // 把回复的编号也填了进来——就当没填，照不填时那样按被回复那条逐楼找。不能悄悄换成
+  // 最近那条：那样回复会挂到别的楼下，被回复的人收不到通知，自回检查也落空（issue #63）。
+  const wantRoot = Number(o.rootRpid ?? 0) || 0
+  const named = wantRoot ? candidates.find((x) => Number(x.rpid) === wantRoot) ?? null : null
+  let mineRow = null
+  let parentRow = null
+  let aid = 0
+  let self = mine
+  const probed = new Set()          // 查过、并且回包正常的楼：被回复那条不在里面
+  for (const c of named ? [named] : candidates.slice(0, MAX_SCAN_ROOTS)) {
+    const a = await aidOf(c.bvid)
+    if (!a) continue
+    const r = await client.subReplies(a, c.rpid, { ps: 20 }).catch(() => null)
+    const hit = (r?.ok ? (r.data ?? []) : []).find((s) => Number(s.rpid) === parent)
+    if (r?.ok && !hit) probed.add(c.rpid)
+    if (named || hit) {
+      mineRow = c
+      parentRow = hit ?? null
+      aid = a
+      self = selfIn(mine, r, c.rpid)
+      break
+    }
+  }
+  if (!mineRow) {
+    // 一条楼里都没找到「被回复的那条」（可能沉在 ps=20 之外）：退回旧行为，
+    // 取她最近在这个视频下的第一条，至少不会因为这次探测失败而整条拒掉。
+    mineRow = candidates[0]
+    aid = await aidOf(mineRow.bvid)
+  }
   if (!aid) return { ok: false, why: '找不到这个视频' }
+
+  // issue #63（PR #79 补）：深一点的回复可能不在楼里那 20 条里，拿不到 parentRow；
+  // 拿得到就再确认一次不是她自己——subReplies 里的 mid 更准。「她自己」和查回复时
+  // 同一个判断：登录号，没有就是这一楼的楼主（selfIn）。
+  if (parentRow && self && Number(parentRow.mid) === self) {
+    return { ok: false, why: '那条是你自己的评论，不是别人回给你的' }
+  }
+
+  const isOwnerKnown = Boolean(parentRow && isHis(self, owners, parentRow.mid))
+  if (full && !isOwnerKnown) return { ok: false, why: '今天回够了' }
 
   const r = await client.replyReply(aid, mineRow.rpid, parent, safeText)
   if (!r.ok) return { ok: false, why: describe(r) }
@@ -498,8 +626,14 @@ export async function postReply(o = {}) {
   // 2026-11-07：回的是不是他，记账时标出来（第 5 个字段写 owner）。
   // replyCountToday 靠这个字段把他那一份从 replyPerDay 里摘出去——额度卡的是
   // 「回几个陌生人」，回他不该挤掉额度，更不该因为额度用完而回不了他。
-  // 查不到就按陌生人算（保守），发都发出去了，这里不能反过来把结果改坏。
-  const isOwner = await isOwnerReply(client, aid, mineRow.rpid, parent, root)
+  // 2026-11-08（issue #63）：上面探测主楼时已经拿到了那一条，能省一次请求；
+  // 那一楼刚查过、里面没有被回复那条，再查一次也是一样，直接按陌生人算；
+  // 都没查过再补一次（查不到就按陌生人算——话已经发出去了，这里不能反过来把结果改坏）。
+  const isOwner = parentRow
+    ? isOwnerKnown
+    : probed.has(mineRow.rpid)
+      ? false
+      : await isOwnerReply(client, aid, mineRow.rpid, parent, root)
 
   await appendEvent(
     { type: 'meta', text: `creply:${dk} ${mineRow.bvid} ${mineRow.rpid} ${parent}${isOwner ? ' owner' : ''}` },
@@ -528,7 +662,9 @@ async function isOwnerReply(client, aid, rootRpid, parentRpid, root) {
     const r = await client.subReplies(aid, rootRpid, { ps: 20 })
     if (!r?.ok) return false
     const hit = (r.data ?? []).find((s) => Number(s.rpid) === Number(parentRpid))
-    return owners.has(Number(hit?.mid) || 0)
+    // issue #63：她自己的号不算他（老数据里领养人那格就是她），不然回自己补的那句也不占额度。
+    const self = selfIn(await loginMid(root), r, rootRpid)
+    return isHis(self, owners, hit?.mid)
   } catch {
     return false
   }

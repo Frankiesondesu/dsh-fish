@@ -17,7 +17,7 @@
 
 import { toJsonSchema } from './toolschema.js'
 import { rootDir, readEvents, readOwner } from './store.js'
-import { loadConfig } from './settings.js'
+import { loadConfig, biliOn } from './settings.js'
 import { postComment, postReply } from './comment.js'
 import { screenOutgoing } from './guard.js'
 import { mentionPrefix } from './owner.js'
@@ -55,7 +55,7 @@ export async function speakOnce(o = {}) {
 
     const r =
       kind === 'reply'
-        ? await postReply({ root, bvid: o.bvid, parentRpid: o.parentRpid, text, prefix, client: o.client, dateKey: o.dateKey })
+        ? await postReply({ root, bvid: o.bvid, rootRpid: o.rootRpid, parentRpid: o.parentRpid, text, prefix, client: o.client, dateKey: o.dateKey })
         : await postComment({ root, bvid: o.bvid, text, prefix, client: o.client, dateKey: o.dateKey })
 
     if (!r.ok) return { ok: false, said: '', note: softReason(r.why) }
@@ -105,14 +105,25 @@ function softReason(why) {
  *
  * 为什么要用 getter：`ctx.tools.register` 只在启动时跑一次，而配置随时能改。
  * 存一份「最近一次看到的状态」，宿主每轮序列化工具表时会再取一次 description，
- * 于是开关一翻，下一轮就跟着变。`execute` 里本来就要读配置，顺手同步一次，
- * 兜住「启动之后才被改、她还没调过」的中间态。
+ * 于是开关一翻，下一轮就跟着变。同步这份状态的有三处：启动注册时（index.js）、
+ * 设置页保存配置时（observe.js 的 POST /config，和身份文档同一刻重写）、她每次调用时
+ * （`execute` 里本来就要读配置）。不经设置页、直接改 config.json 的，要等她下一次调用
+ * 或重启才跟上。
  */
 let speakEnabled = false
 
 /** 测试与调用方同步用：告诉这里「开关现在是什么样」。 */
 export function noteSpeakEnabled(on) {
   speakEnabled = on === true
+}
+
+/**
+ * 说明该写哪一版：能上 B 站、又允许说话，两个都开才算开（issue #62）。
+ * 和身份文档「在网上说话」那一节（selfdoc.js 的 speak）同一个判据；
+ * 只看 comment.enabled 的话，断网时说明写「可以留评论」，身份文档却写「这会儿还说不出去」。
+ */
+export function speakOn(config) {
+  return biliOn(config) && config?.comment?.enabled === true
 }
 
 /** 关着时的那一段必须**不含**任何"能发出去"的暗示，也不解释原因。 */
@@ -122,6 +133,9 @@ function speakDescription(on) {
   }
   return (
     '在 B 站说一句话。可以给你今天看过的某个视频留一条评论，或者回一句别人留在你评论下面的话。' +
+    // 2026-11-09（0.9.6 S7，设计 §8.7 g1）：评论区是鱼八股的高发地。
+    // 不写「你可以说：……」（那只是换一套模板），只要求**句子挂在这条视频的具体地方上**。
+    '评论要挂在这条视频的具体地方上——哪一句话、哪个画面、哪个数字。换一条视频也说得通的话，就别发。' +
     '这是会留下来的东西——别人看得见，你也删不掉别人已经看到的。' +
     '不想说就不说，没有人等着你回答。'
   )
@@ -146,6 +160,11 @@ export function registerSpeak(ctx, deps = {}) {
         bvid: { type: 'string', required: true, description: '在哪个视频（形如 BV1xx411c7mD）。' },
         text: { type: 'string', required: true, description: '要说的话。说人话，别超过一两百字。' },
         parentRpid: { type: 'string', required: false, description: 'kind=reply 时，你要回的是哪一条（那条回复的编号）。' },
+        rootRpid: {
+          type: 'string',
+          required: false,
+          description: 'kind=reply 时可选：你要回的那条挂在你哪条评论下面（你那条评论的编号）。不传就自己找。',
+        },
       }),
       output: {
         schema: {
@@ -169,12 +188,19 @@ export function registerSpeak(ctx, deps = {}) {
         if (!who.ok) return { ok: false, said: '', note: who.note }
         const { config } = await loadConfig(root)
         // 顺手同步一次：启动之后才被改的开关，靠这里让下一轮的 description 跟上。
-        noteSpeakEnabled(config?.comment?.enabled === true)
+        noteSpeakEnabled(speakOn(config))
+        // issue #62：断网要断干净。以前只认 comment.enabled，bili.enabled=false 时
+        // 照样能发评论、照样联网。两个开关是「与」：先看能不能上 B 站，再看让不让说话。
+        // 2026-11-09（用户 m00861）：断网也按「这会儿不行」的说法，不出现「现在」这类
+        // 像在宣布环境状态的措辞，和 softReason 的口径一致——她听到的是这一刻不方便，
+        // 不是「网断了」这件事本身。
+        if (!biliOn(config)) return { ok: false, said: '', note: '这会儿不方便说。' }
         if (config?.comment?.enabled !== true) return { ok: false, said: '', note: softReason('没开这个权限') }
         return speakOnce({
           kind: args?.kind,
           bvid: args?.bvid,
           text: args?.text,
+          rootRpid: args?.rootRpid,
           parentRpid: args?.parentRpid,
           root,
           client: deps.client,

@@ -24,16 +24,64 @@
 
 import { promises as fs } from 'node:fs'
 import { join } from 'node:path'
-import { rootDir, paths, readEvents, readJson, writeAtomic, listDiary } from './store.js'
-import { loadConfig } from './settings.js'
+import { rootDir, paths, readEvents, readJson, writeAtomic, listDiary, diaryDatesWritten } from './store.js'
+import { loadConfig, biliOn } from './settings.js'
 import { deriveSelfCached } from './derive.js'
-import { personaLine, toolBrief, RECALL_BRIEF, SPEAK_BRIEF, SPEAK_OFF_BRIEF, LETTER_BRIEF, NOTE_BRIEF, ASK_BRIEF, proactiveBrief, DREAM_BRIEF, SCHEDULE_BRIEF, DIARY_BRIEF, SLEEP_BRIEF } from './persona.js'
+import { personaLine, toolBrief, RECALL_BRIEF, SPEAK_BRIEF, SPEAK_OFF_BRIEF, LETTER_BRIEF, NOTE_BRIEF, APPOINT_BRIEF, ASK_BRIEF, proactiveBrief, DREAM_BRIEF, scheduleBrief, SCHEDULE_NAMES, DIARY_BRIEF, SLEEP_BRIEF } from './persona.js'
 import { resumeLines } from './use.js'
 import { proactiveConfig } from './proactive.js'
 import { LOOK_BRIEF, LOOK_OFF_BRIEF, WATCH_RULE } from './browse.js'
 import { activeCarry } from './home.js'
 import { activeGrants } from './unlock.js'
 import { checkCaller } from './tenant.js'
+import { currentToolSurface, currentAllowTools, currentAllowExtra, HER_TOOLS } from './restrict.js'
+
+/**
+ * 她自己的工具名（插件注册的那些加宿主给的 read_image），固定一份，跟注册记录无关。
+ *
+ * 「还放行了这几样」只念别人的工具：白名单里填了她自己的名字（新启动时 her_say 不在名单里的
+ * 临时绕法、手填的 her_dream），那几样身份文档另有自己的段落（梦那一段跟着开关走），
+ * 再念成「另外还放行了」就跟那几段、跟工具自己的回答对不上。
+ * 用固定的一份而不是按注册记录现算：注册前后不一样的话，同一个进程里那句话会前后改口。
+ * 插件新加工具时这里跟着加一个名字（漏了也只是那个名字被白名单念出来，不影响她能不能用）。
+ */
+const OWN_NAMES = new Set([...HER_TOOLS, 'her_say', 'bring_back'])
+
+/**
+ * 白名单、梦、定时这三段按什么写（issue #64 的后半）。
+ *
+ * 收窄在这个进程里开着时，她手上有什么由**启动时算定的那份名单**说了算：守卫按它放行，
+ * 改了配置要等重启才换。身份文档却是存完设置就当场重写的——按配置写，从存完到重启
+ * 这段时间里，文档说她有、伸手却是「这件事我做不到」。所以这时按运行中的名单写，
+ * 跟上面 `restricted` 看运行中的收窄状态是同一个思路。
+ *
+ * 收窄关着（或这个进程还没注册收窄）时 `currentAllowTools()` 是 null：工具面没被收窄、
+ * 也没有守卫，这时照旧按配置写。
+ *
+ * 「还放行了这几样」念的是启动时白名单里的名字（`currentAllowExtra()`），不是运行中的名单
+ * 减去「她自己的」：她自己的那份按注册记录现算，工具注册前后不一样，同一个进程里
+ * 那句话会前后改口（白名单里填了 her_say 时，注册前念它、注册后又不念）。
+ * 白名单里她自己的名字（见 `OWN_NAMES`）两种情况下都不念。
+ *
+ * @returns {{extra: string[], dream: boolean, schedule: string[]}}
+ */
+export function toolSectionsNow(config) {
+  const cfgAllow = (config?.tools?.allow ?? []).map((n) => String(n).trim()).filter(Boolean)
+  const dreamCfg = config?.dream?.enabled !== false
+  const running = currentAllowTools()
+  const notOwn = (n) => !OWN_NAMES.has(n)
+  if (!running) {
+    return { extra: cfgAllow.filter(notOwn), dream: dreamCfg, schedule: cfgAllow.filter((n) => SCHEDULE_NAMES.includes(n)) }
+  }
+  // 运行中的名单 = 她自己的那几件 + 启动时白名单里额外放行的；念给她听的只是后者里别人的工具。
+  const startExtra = currentAllowExtra() ?? []
+  return {
+    extra: startExtra.filter((n) => notOwn(n) && running.includes(n)),
+    // 关掉梦当场生效（her_dream 自己也会答「梦这一项关着」）；打开要等重启，名单里有了才算。
+    dream: dreamCfg && running.includes('her_dream'),
+    schedule: running.filter((n) => SCHEDULE_NAMES.includes(n)),
+  }
+}
 
 /** 身份文本的落盘副本。名字刻意不叫 `AGENTS.md`——宿主会读那个名字并注入对话。 */
 export function selfDocPath(root = rootDir()) {
@@ -53,8 +101,11 @@ export function legacySelfDocPath(root = rootDir()) {
  * 算好之后当普通数据传下去，promise 层与渲染层就不会互相渗。
  *
  * 全部字段都可能缺：
- *   diaryCount   写过几篇日记（没写过是 0，读不到目录是 undefined）
+ *   diaryCount   写过几篇日记（没写过是 0，读不到目录是 undefined）。按日期数现存文件与
+ *                事件流里 `diary:` 记录的并集：被「日记留多久」删掉的也算写过
  *   diaryFirst   最早一篇的日期；diaryLast 是最近一篇
+ *   diaryKept    只在有篇被删掉时才有：diary/ 里还留着几篇（her_diary 翻得到的就这些）
+ *   diaryKeptFirst 还留着的最早一篇的日期（一篇都没留时是空串）
  *   rotatedDaysAgo  上次换房间是几天前；从没换过是 undefined
  *   rotatedWhen  上次换房间的**钟点说法**（「今天 14:00」「昨天 22:20」「11 月 1 日 12:31」）
  *   lastWords    上一个房间里她自己留的那句话（没留过是空串）
@@ -93,16 +144,29 @@ export function formatSwapTime(at, now = Date.now()) {
   return t.getFullYear() === new Date(n).getFullYear() ? md : `${t.getFullYear()} 年 ${md}`
 }
 
-export async function continuityOf(root = rootDir(), now = Date.now()) {
-  const out = { diaryCount: undefined, diaryFirst: '', diaryLast: '', rotatedDaysAgo: undefined, rotatedWhen: '', lastWords: '' }
+export async function continuityOf(root = rootDir(), now = Date.now(), events) {
+  const out = { diaryCount: undefined, diaryFirst: '', diaryLast: '', diaryKept: undefined, diaryKeptFirst: '', rotatedDaysAgo: undefined, rotatedWhen: '', lastWords: '' }
   try {
-    const dates = await listDiary(root)
+    const files = await listDiary(root)
+    // 「写过几篇」不能只数 diary/ 里现存的文件（issue #67）：「日记留多久」会把超期的删掉，
+    // 文档就从「写过 121 篇」掉成「写过 31 篇」、起始日期也往后挪。每篇写下时事件流里都有一条
+    // `diary:<日期>` meta，删文件不动它；两边按日期取并集（store.js 的 diaryDatesWritten，
+    // her_diary 和记忆页也用它），同一天写两次只算一篇。
+    let evs = events
+    if (!Array.isArray(evs)) evs = (await readEvents(root).catch(() => null))?.events
+    const dates = diaryDatesWritten(files, evs)
     if (Array.isArray(dates)) {
       out.diaryCount = dates.length
       // listDiary 返回的是新→旧；最后一篇是最早的。
       out.diaryLast = String(dates[0] ?? '')
       out.diaryFirst = String(dates[dates.length - 1] ?? '')
       if (!dates.length) { out.diaryFirst = ''; out.diaryLast = '' }
+      // 写过的比还留着的多：起始日期那几天的文件已经删了，她拿 her_diary 去翻只会得到「那一篇已经清掉了」。
+      // 把翻得到的范围也带上，文档里一并说清（her_diary 那边是同样的说法）。
+      if (Array.isArray(files) && files.length < dates.length) {
+        out.diaryKept = files.length
+        out.diaryKeptFirst = String([...files].sort()[0] ?? '')
+      }
     }
   } catch { /* 读不到就当没写过，不当成 0 */ }
   try {
@@ -122,7 +186,11 @@ export async function continuityOf(root = rootDir(), now = Date.now()) {
  * @param {object} model deriveSelf 的结果
  * @returns {string}
  */
-export function renderSelfDoc(model, { sendTools = [], budget, carry, continuity, browse = true, speak = false, grants = [], shown, diary = true, sleepEveryDays = 0, bansMuted = false, extraTools = [], dream = false, schedule = false, proactive = false, resume = '' } = {}) {
+export function renderSelfDoc(model, { sendTools = [], budget, carry, continuity, browse = true, speak = false, grants = [], shown, sleepKeep, diary = true, sleepEveryDays = 0, bansMuted = false, extraTools = [], restricted = true, dream = false, schedule = [], proactive = false, resume = '' } = {}) {
+  // issue #64：schedule 传的是「白名单里真的放行的 schedule_*」。只放一个就只写一个，
+  // 不能告诉她有四个——另外三个会被守卫挡回「这件事我做不到」。
+  // 老调用方传 true/false 也认：true = 四个都有。
+  const scheduleNames = schedule === true ? SCHEDULE_NAMES : (Array.isArray(schedule) ? schedule : [])
   const head = [
     // 这里**故意不写**「由 dsh-fish 自动生成」这类话。
     // 这个文件会被宿主原样渲染进她的会话——她能看见每一行。
@@ -135,7 +203,8 @@ export function renderSelfDoc(model, { sendTools = [], budget, carry, continuity
   // 2026-10-27（用户 m03170）：导进来的这一位，我们那两条提示词禁令不适用。
   // 用户的原话是「尊重别人的想法……直接忽略我们原本规定的你不能做某事」。
   // 只关提示词侧（withBans），物理层那两条根本不在提示词里，仍由工具层拦着。
-  let identity = personaLine(model, { withBans: !bansMuted, budget, shown, continuity })
+  // sleepKeep 要一路传到 buildSections：漏传就等于不限制，设置页改了文档一个字都不变（issue #67）。
+  let identity = personaLine(model, { withBans: !bansMuted, budget, shown, sleepKeep, continuity })
   // 导入的人设不追加「你已经可以了」——那句是我们的成长叙事，对方的人设里没有这一段。
   if (!bansMuted && grants.includes('learn-affection')) {
     identity = identity
@@ -147,7 +216,7 @@ export function renderSelfDoc(model, { sendTools = [], budget, carry, continuity
     identity,
     '',
     '## 我手上有什么',
-    toolBrief(extraTools),
+    toolBrief(extraTools, { restricted }),
     // 履历（2026-11-07，用户 m00493 的「履历式」）：从 use: 账反推「我做过这些事」。
     // 没有账就整节不写——空白比一句「你还没做过什么」好。
     ...(resume ? [resume, ''] : []),
@@ -160,6 +229,10 @@ export function renderSelfDoc(model, { sendTools = [], budget, carry, continuity
     // 桌上的便条（issue #22 乙档，2026-11-04）：和留话一样常驻、不做开关——
     // her_note 是无条件注册的，说明与工具必须同一个判据，否则她会以为有这个工具却伸手落空。
     NOTE_BRIEF,
+    '',
+    // 预约簿（2026-11-09，用户 m00002）：和便条一样常驻注册，说明必须同判据挂上，
+    // 否则她手里有这本簿子、身份文档里却一个字没提。
+    APPOINT_BRIEF,
     '',
     // 请求事件（0.7.6，用户 m01274 / m01292）：唯一一个要等对方点头的工具。
     // 和留话一样不需要配置开关——工具注册了就该知道怎么用；上限写死在代码里。
@@ -174,7 +247,7 @@ export function renderSelfDoc(model, { sendTools = [], budget, carry, continuity
     ...(proactive ? [proactiveBrief(sendTools), ''] : []),
     // 定时提醒（2026-10-30，用户 m04335 / m04504）：默认不放，只有用户把
     // schedule_create 加进白名单才挂——不然就是告诉她「你有这个工具」，伸手却没有。
-    ...(schedule ? [SCHEDULE_BRIEF, ''] : []),
+    ...(scheduleNames.length ? [scheduleBrief(scheduleNames), ''] : []),
   ]
   // 能力说明写在这里、而不是塞进唤醒消息：
   // 唤醒消息会作为一条 user message 留在她的会话里，用户点开就能看见。
@@ -247,21 +320,27 @@ export async function writeSelfDoc(root = rootDir(), { log, exec, tenant } = {})
     const { events } = await readEvents(root)
     const { config } = await loadConfig(root)
     const model = deriveSelfCached(events, { growthDays: config.growthDays })
+    const hand = toolSectionsNow(config)
     const text = renderSelfDoc(model, {
       budget: config?.memory?.docBudget,
       carry: await activeCarry(root),
       // 0.8.7（用户 m00998）：换会话之后人格会「断」——她记得结论，却没有
       // 「那些天是连着过的」这条线索。日记篇数/换房天数/她留给下一个房间的那句话
       // 全部是派生事实，没有任何新开关。
-      continuity: await continuityOf(root, Date.now()),
+      continuity: await continuityOf(root, Date.now(), events),
       // 这两项决定「上网」「在网上说话」两节写哪一版内容（P3，2026-11-07）：
       // 开关关着时这一节仍然在，只是门上的话换成「这会儿」——见 renderSelfDoc。
-      browse: config?.browse?.enabled !== false,
-      speak: config?.comment?.enabled === true,
+      // issue #62：能不能上 B 站只认 bili.enabled 一处，别再拿刷站的 browse.enabled
+      // 顶替——那会让默认配置下的身份文档告诉她「这会儿出不去」，而 bili_look 明明能用。
+      browse: biliOn(config),
+      speak: biliOn(config) && config?.comment?.enabled === true,
       // R3：已经长出来的东西。这里传的是"历史事实"，不是"设置"。
       grants: activeGrants(events, Date.now()),
       // 一轮里摆几条判断；与 /dsh-fish/memory 报的 beliefsShown 同源
       shown: config?.memory?.beliefsShown,
+      // 总共单独留几条（2026-11-08，用户 m00585）：超出的折进「更早以前」，
+      // 原文仍在 events.jsonl 里，她用 her_recall 翻得到。
+      sleepKeep: config?.memory?.sleepKeep,
       // 「平常会做的事」两节按开关出现（2026-10-26）：关掉的日记不该在身份里
       // 留一句「每天我会记一笔」——那等于给了她一件做不了的事。
       diary: config?.diary?.enabled !== false,
@@ -272,15 +351,22 @@ export async function writeSelfDoc(root = rootDir(), { log, exec, tenant } = {})
       bansMuted: model?.persona?.imported === true,
       // 2026-10-27（用户 m01371）：白名单里额外放行的工具要念给她听，
       // 否则「能不能在 QQ 上说话」她只能回一句不知道。
-      extraTools: config?.tools?.allow ?? [],
+      // 收窄开着时念运行中的那份（见 toolSectionsNow）：刚存的名字要重启才到她手上。
+      extraTools: hand.extra,
+      // issue #77：收窄关着时工具面是完整的，不能说「眼下手边就这些」。
+      // 这里看**运行中的**收窄状态，不看 config：收窄要等下次启动才生效，
+      // 拿配置会提前说一句与手上工具不符的话。
+      restricted: currentToolSurface() !== '',
       // 履历：她真做过的事。没有记录就整节不出现。
       resume: resumeLines(events),
-      // 梦（2026-10-30 m02837）与主动说话（m04610）：0.9.0 起公开，两处都恒为真。
-      dream: true,
+      // 梦（2026-10-30 m02837）与主动说话（m04610）：0.9.0 起公开，默认开；
+      // issue #64：关掉「允许她记梦」时，身份文档不能再写着有 her_dream。
+      // 关着梦启动、之后再打开：要等重启 her_dream 才到她手上，这之前也不写。
+      dream: hand.dream,
       proactive: true,
       sendTools: proactiveConfig(config).sendTools,
-      // 定时工具默认不放；用户在白名单里加了 schedule_create 才告诉他这条路通。
-      schedule: (config?.tools?.allow ?? []).some((n) => String(n).trim() === 'schedule_create'),
+      // 定时工具默认不放；白名单里放了哪几个就写哪几个（issue #64）。收窄开着时同样按运行中的名单。
+      schedule: hand.schedule,
     })
 
     let prev = null

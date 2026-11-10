@@ -21,7 +21,19 @@
  * （`answer` 事件，`ask.verdict` 是 approve / reject / later）。
  *
  * 不猜、不抽标签、不编主题——展示的 `subject` 与 `text` 都是她当时自己写的原话。
- * 「手上没有」这件事不用另查：她当初开 `need-tool` 的卡，本身就是因为在手上找不着。
+ *
+ * ## 「手上没有」不能只看事件（issue #58，2026-11-08）
+ *
+ * 这条前提一开始只有半句：她开 `need-tool` 卡就是因为当时找不着。可是 `lib/ask.js`
+ * 文件头第 2 条写明，`need-tool` 的裁决**只记录、不落实任何权限**——他真要给，
+ * 只能在卡外面给（装插件、把她要的名字加进白名单），事件流里一个字都不会记。
+ * 于是卡上答过「可以」、工具也真到手了，桌上照样摆 14 天「他答应了，还没见到」；
+ * 超时那种还会摆 3 天「你问过，还没有答复」。这句话当时就是错的，而且通过
+ * `driveDesk.wish` 给劲儿记一笔，一件已经办完的事还会推她醒。
+ *
+ * 所以 `wishesOf` 现在收一个可选的 `has`：她此刻手上真正放行的工具名。
+ * 对得上的那几条不再摆，也不进劲儿。拿不到这份清单（收窄关着/还没注册）
+ * 就不传——那时她能看见全部工具，宁可不判，也不能把「不知道」当成「没有」。
  *
  * ## 三种结局，三种活法
  *
@@ -55,6 +67,12 @@ export const WISH_PENDING_DAYS = 3
 export const WISH_LATER_DAYS = 30
 /** 他答应了但还没到的摆几天。 */
 export const WISH_APPROVE_DAYS = 14
+
+/**
+ * subject 里认工具名的最短长度（issue #83）。
+ * 短名字（`her`、`bili`）在中文句子里太容易撞上，只认 4 个字以上的。
+ */
+const TOOL_NAME_MIN = 4
 
 const DAY = 86_400_000
 
@@ -90,6 +108,69 @@ function lifeDays(verdict) {
   return WISH_PENDING_DAYS
 }
 
+/**
+ * 这件东西现在是不是已经在她手上了（issue #58）。
+ *
+ * `has` 三种写法都认：函数（按名字判）、Set、名字数组。传空/不传一律当「查不了」，
+ * 返回 false —— 查不了就不剔，宁可多摆一条，也不把已经说出口的事再催一遍。
+ * 判的时候顺手接住异常：一个坏掉的判断不该拖垮一次唤醒。
+ */
+function toolInHand(has, name) {
+  const n = String(name ?? '').trim()
+  if (!n || !has) return false
+  try {
+    if (typeof has === 'function') return has(n) === true
+    if (has instanceof Set) return has.has(n)
+    if (Array.isArray(has)) return has.includes(n)
+  } catch { /* 判不了就当没有 */ }
+  return false
+}
+
+/**
+ * subject 里点到的那个工具名；没有就返回空串（issue #83）。
+ *
+ * 0.9.5 只认「subject 正好等于工具名」。可真实数据里她常写成
+ * 「her_note 的读取：列出还没划掉的那些」——一句描述里带着工具名，
+ * 精确比对就永远对不上，卡照样摆满 14 天（issue #83 实测）。
+ *
+ * 这里再认一种：subject 里出现一个**完整的**工具名。三条边界：
+ *   - 只认 TOOL_NAME_MIN 个字符以上的名字，短名在中文句子里太容易误撞；
+ *   - 名字前后不能紧挨字母/数字/下划线（`her_note` 不该被 `her_notes` 命中）；
+ *   - 命中多个时取最长的那个（`bili_look` 与 `bili_look_at` 同时出现时以后者为准）。
+ * `has` 是函数时列不出名单，只能按整句比——猜不了就不猜，宁可多摆几天。
+ */
+function toolNamedIn(has, subject) {
+  if (!subject) return ''
+  if (toolInHand(has, subject)) return subject
+  if (!(has instanceof Set) && !Array.isArray(has)) return ''
+  const hay = subject.toLowerCase()
+  let hit = ''
+  for (const raw of has instanceof Set ? [...has] : has) {
+    const name = String(raw ?? '').trim().toLowerCase()
+    if (name.length < TOOL_NAME_MIN) continue
+    const at = hay.indexOf(name)
+    if (at < 0) continue
+    if (at > 0 && /[a-z0-9_]/.test(hay[at - 1])) continue
+    if (/[a-z0-9_]/.test(hay[at + name.length] ?? '')) continue
+    if (name.length > hit.length) hit = name
+  }
+  return hit
+}
+
+/**
+ * 这张卡要的东西是不是已经在她手上了（issue #58 / #83）。
+ *
+ * 认两种写法：`subject` 正好是工具名，或 `subject` 里带着一个工具名
+ * （「某工具：做什么」）。剩下的（纯描述、没点名的）猜不准是不是同一样东西，
+ * 宁可多摆几天。查不了（`has` 没传/抛错）也照旧摆。
+ */
+export function toolArrived(e, has) {
+  if (String(e?.type ?? '') !== 'ask') return false
+  if (String(e?.ask?.kind ?? '') !== 'need-tool') return false
+  const subject = String(e?.ask?.subject ?? '').trim()
+  return Boolean(toolNamedIn(has, subject))
+}
+
 /** 她那句话怎么收尾——只陈述结局，不给建议。 */
 export function wishTail(verdict) {
   if (verdict === 'approve') return '他答应了，还没见到'
@@ -105,10 +186,12 @@ export function wishTail(verdict) {
  * @param {object} [o]
  * @param {number|Date} [o.now]
  * @param {number} [o.days] 覆盖窗口（测试用）；不传就按结局各算各的
+ * @param {((name:string)=>boolean)|Set<string>|string[]} [o.has]
+ *   她此刻手上有的工具名。不传就不查（老调用点行为不变）
  * @returns {Array<{id:string, text:string, subject:string, verdict:string, at:number, tail:string}>}
  *   按时间从近到远
  */
-export function wishesOf(events = [], { now = Date.now(), days = 0 } = {}) {
+export function wishesOf(events = [], { now = Date.now(), days = 0, has = null } = {}) {
   const at0 = now instanceof Date ? now.getTime() : Number(now) || Date.now()
   const answers = answersByAsk(events)
   const picked = []
@@ -126,6 +209,9 @@ export function wishesOf(events = [], { now = Date.now(), days = 0 } = {}) {
     if (!raw) continue
     const text = raw.length > WISH_TEXT_MAX ? `${raw.slice(0, WISH_TEXT_MAX - 1)}…` : raw
     const subject = String(e?.ask?.subject ?? '').trim()
+    // 已经到手的不再摆（issue #58 / #83）：卡上答「可以」不发权限，他只能在卡外给，
+    // 事件流里没有这条记录，所以按她此刻的白名单对一遍——整句是工具名、或句子里带着工具名都算。
+    if (toolNamedIn(has, subject)) continue
     // 同一件事反复问过（她开两张卡）：只留最近的那一张，不摆两遍。
     if (picked.some((p) => similarity(p.subject || p.text, subject || text) >= WISH_SIMILARITY)) continue
     picked.push({ id: String(e.id ?? ''), text, subject, verdict, at, tail: wishTail(verdict) })

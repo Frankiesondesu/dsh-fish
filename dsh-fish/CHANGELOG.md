@@ -1,3 +1,218 @@
+## 0.9.6 — 2026-11-09
+
+- **别的会话顺手点一下她的工具，不再记进她的成长账（外部用户反馈，0.9.5 之后的真机）。** 写入本来就被 `lib/tenant.js` 的 `guardWrite` 拦着，但 `lib/use.js` 的 `withUse` 记账时不看调用来路：一次从别的家（`default-workspace`）调 `her_note` 被正确拒掉，却照样给她的 `events.jsonl` 添了一行 `use:her_note fail …`，直到人手动删掉——别人的误操作就进了她的成长账。
+  - `lib/tenant.js` 新增 `callerInRoot(root, exec)`：判据与 `checkCaller` 同一套（她家目录、当前出门那条会话、当前请神那条会话），但不写日志、不给话术；`withUse` 成功与抛错两条路径都只在「这次调用是她这个家里的」才记账。
+  - 她家的会话、来路不明的会话（没有 session/cwd）行为不变；跨家调用照旧会被 `guardWrite` 拒绝，只是不再留账。
+  - `test/use.test.mjs` 补三条：别家会话调用与抛错都不落账、她家会话与无 cwd 的会话照记。
+- **`her_note` 不再和「桌子」共用一个比喻。** 她翻旧事看到的「桌上摊着这几样东西」来自 `lib/desk.js`，而 `her_note` 的说明书说自己是「醒来时最先看到的那张桌子」；她在 11-08 按这句去 `her_note list`，只得到「桌上什么都没有」——`notes.json` 里本来就没记过便条。现在 `her_note` 一律叫「便条」（工具说明、回执、空表提示、身份文档里的简介），桌子只归旧事，两边不再互相冒认。
+  - 全量 **2065 pass / 0 fail**（3 条新测试，约 31 秒）。
+- **数据目录带中文（任何非 ASCII 路径）时，「现在重启并安装」不再静默失效（issue #97）。** 设置页那个按钮在 Windows 上会先写一个 `.vbs`，再让 `wscript.exe` 把它藏起来跑——但 `wscript` 读脚本按**系统 ANSI 代码页**（简体中文 = GBK），不认 UTF-8。`G:\大肥鱼\…` 这种路径落盘后被念成乱码，`cmd` 找不到脚本立刻退出，`//B` 又把错误吞了，界面只能表现为「点了没反应」，`updates\last.log` 也不会生成。
+  - `.vbs` 改写成 **UTF-16LE + BOM**（`vbsBytes()`）：WSH 认 Unicode 脚本，中文路径原样传过去。`.cmd` 保持 UTF-8 无 BOM 不动——那边带上 BOM 反而会被念成 `ï»¿@echo`。
+  - 起了进程不再等于「安装成功」：脚本起来之后盯 12 秒 `last.log`，还没出现就把状态从 `installing` 改成 `failed`，并直接告诉他手动装哪个文件（「安装脚本没跑起来（多半是路径里有中文或空格）。手动装：…\install-vX.Y.Z.cmd」）。以前这是终态，只能干等。
+  - `test/selfupdate.test.mjs` 补三条：`.vbs` 头两字节是 `FF FE`、UTF-16LE 往返一个字符不差且中文路径在里面；等不到 `last.log` 时 12 秒后报失败并点名脚本；`last.log` 真出现了就保持「正在安装」。
+
+- **真机反馈（issue #97，外部用户）：三处「她说的话被系统改写」都修了。** 不改数据格式，旧档照读。
+  - **称呼认不出**：`lib/derive.js` 的名字正则要求「叫你」后紧跟名字，她说「我想好了怎么叫你——叫「小岸」」时整句失配，0.9.5 直接记成「你还没想好怎么称呼他」。现在破折号后带引号的称呼也认（`——「小岸」` / `——叫「小岸」`）；不带引号的「我叫你——可这句不是…」仍认不出，避免把半句话当名字（issue #81 的保护不回退）。
+  - **换房留言整句丢**：她习惯先写「留一句：」再写正文，`pickLastWords()` 取第一行非空，于是 `home.json` 只存了引导行。现在跳过引导行（以及后面还有内容、以冒号收尾的 ≤16 字标签行）再取那句；「不用留」仍返回空。
+  - **拒绝记录重复且截断**：身份文档先列原话，又拼一段 `object`（原话前 80 字）的副本，真机上断在字中间。`lib/persona.js` 现在只在原话里找不到 `object` 时才补括号，其余一律不再重复。
+  - **两处顺带**：折叠行「还有 N 条更早的，你记不清原话了」改成「没摆出来」（她能用 `her_recall` 翻，系统不替她断言）；`lib/schema.js` 的 `anchored` 只认 `ev_` 事件 id，B 站 BV 号混进 `refs` 不再被当成锚定。
+  - 反馈里的「落盘条数按版本摆动」不是开关口径问题：0.9.5 之前，外部客户端/桥的消息没有 `clientTimeZone`，被当成「认不出来源」整轮跳过（`seen`、轮数、`uncommitted` 全断）；0.9.5 把带 `rpcId` 的消息也认作人之后才恢复正常，是同一处修复的症状。
+  - 全量 **2059 pass / 0 fail**（6 条新测试）。
+
+- **走 `prompt()` 的桥，可以先说清「这一轮是谁在说话」（issue #96）。** 0.9.5 让「`kind:'user'` 带 `rpcId`」一律算人（那是微信桥那条反馈的修法），可桥走宿主 `sessionController.prompt()` 时 source 由宿主拼、桥只能定 requestId——于是群里几百句、群友私聊、桥自己的定时提醒，全被算成他本人：涨轮数、满 40 轮换会话、写「他来过」、每 `hearEvery` 轮记一句「他说」、连 steer 进来的消息都会撤掉这一轮的叫醒。
+  - 新增事件 `dsh-fish/source`：桥在发之前 `ctx.emit('dsh-fish/source', { rpcId, scene, owner, guest, machine })` 登记这一轮；`lib/turns.js` 的 `classifyMessage()` 认到登记就按登记判（`group` / `group-owner` / `plugin`）。登记 5 分钟过期、最多记 200 条——桥忘了发也只是退回 0.9.5 的判法，不会一直错下去。
+  - 没登记的桥行为不变；`guest: true` 不再必须写在群聊里（`{scene:'private', guest:true}` 也算外客），和 `/say` 那边对齐。
+  - 桥自己发起的轮次（定时提醒、转发）用 `machine: true` 登记，按插件算：不进轮数、不写 `seen:`。
+  - 旁听记「他说」之前先裁掉开头的来源抬头（`lib/hear.js` 的 `stripLeadingHeader()`）：「（群聊 · 示例群 · im:group:10001）」这类整行被括号包住、带群/渠道/频道字样的行才裁，普通人说的话一个字不动——误裁等于把他的话从记忆里抹掉。
+  - `test/turns.test.mjs` 补登记来源的判据与一条整链路（群聊那轮不涨轮数、不写 `seen:`），`test/hear.test.mjs` 补抬头裁剪（含「不该裁的不裁」）。
+
+- **她看完东西之后可以只说一句自己的想法，而不是先复述。** 这一版改的是「出口」，不是智力，也不是人格：
+- **常驻许可**：身份文档核心段加了一句话（「看到什么、听到什么，可以只说一句。要挂在那条的具体地方上——哪句话、哪个细节。说什么都行，没有就不说。」）。不枚举「赞同 / 反对 / 感慨 / 疑问」——规定她该有什么立场，就是另一种八股。
+- **素材旁边挂一行她自己说过的话**：新增 `lib/hook.js`。只在对得上的那一条素材下面挂，不每轮念身份文档（2026-10-23 删掉 focus 段，就是因为「每轮念一遍你是什么样的人 = 锁死」）。一级：同一 UP 主 / 标题原文 / 三个字以上的标签对得上 → 可以引她的原话，带日期（`↳ 你 10 月 20 日说过：「…」`）；二级：标题的二元组有一半以上出现在她说过的话里 → 只说「这条和你以前想过的事有点像」，**一个字都不引**（挂错时唯一的伤害是引用了她没说过的话，二级不引就没有事实错误）；三级：对不上就什么都不加。只挂 7 天以前说过的话（昨天刚说、今天又摆回眼前是复读），每条素材最多一个钩子，同一句话一批里只引一次。
+- **三张卡换问法**：`notice_one` 三个变体从「先说它是什么，再下判断」改成「先说判断，再说凭什么」——先描述再判断，练出来的是复述；同时删掉「别写成感觉」（要防的是空话，不是感受），保留「判断要能被核对」。`someone_said` 改成「这一句里，你认哪一半，不认哪一半？分开说」，整句都认、整句都不认也是一种回答。`test_first` 两个分支都留了口子：「今天什么新东西都没碰上，就说还没碰上——不用非给个结论」。
+
+- **新事件标记 `anchored`（只增不改）**：`utterance` / `revise` 带 `refs` 时由宿主写入 `flags:["anchored"]`；她自己传来的 flags 一律不算（否则等于让她决定哪句话算数）。0.9.7 的「把她说过的话摆回来」只认这个标记，闲聊不进。
+- **两处工具说明**：`bili_speak` 加「评论要挂在这条视频的具体地方上——哪一句话、哪个画面、哪个数字。换一条视频也说得通的话，就别发」；`growth_commit` 的 `refs` 说明加了 utterance 的邀请（「如果你这句话是因为看到了某条具体的东西，把那条的 id 也写上」）。
+- **不改数据格式**：只多一个 flag，旧版本读到不认识的 flag 不受影响，回滚安全。全量 **2053 pass / 0 fail**（约 27 秒）。
+
+- **恢复备份不再整包拒收碎字文件：先点名，再让你选跳不跳（issue #86 第 5 条）。** 以前恢复接口对**整个请求体**查 U+FFFD，旧包里只要有一个文件早先导出时丢了字节，就 400「正文不是 UTF-8，没递给她」，还不说坏的是哪个文件；导出那边同样是按 utf8 硬读，非 UTF-8 的文本文件在导出那一步就已经把原字节丢了。
+  - 导出：文本文件读出来、再按 utf8 编回去与自己逐字节相同，才认它是 UTF-8；不是的按**原字节**装成 `enc: 'base64'`，加 `text: true` 标记（说明它本来是文本），名字另列在包的 `nonUtf8` 里。旧包里那些已经是替换符的，救不回来——这次只保证以后不再丢。
+  - 恢复：`restoreBackup(bundle, root, { skipBad })` 先把「还是 utf8 明文、却带着替换符」的文件算出来（`badTextFiles()`）；有、而人还没说跳过时，**一个文件都不动**，回 409 带 `badFiles` / `badCount`。设置页把坏文件名列出来，给「跳过这些文件继续恢复」和「先不动」两个选择。
+  - 跳过之后：只跳过坏的那几个，其余照常写；回执带 `skippedBad`（点了名），`restored` 只数真写进去的。
+  - 恢复路由的请求体不再按「正文是不是 UTF-8」整包拦（`readBody(req, restoreLimit, { mojibake: false })`）——旧备份里本来就带着替换符，整包拒掉等于那份档再也装不回来。
+  - `test/backup.test.mjs` 补三条：坏文件先点名且一个字节不动、说跳过之后只跳坏的、非 UTF-8 的文本按原字节装进包且装回来字节一模一样。
+
+- **收窄关着的时候，心事卡也认得出手里的工具（issue #86 第 1 条）。** 「要的这件工具到手没有」以前只问配置里的白名单，收窄关着（`tools.restrict: false`）时那份白名单是 null，于是每一张都要等满 14 天自己消失——哪怕那件工具她这一局正用着。
+  - `lib/restrict.js` 新增 `visibleAllowTools(sessionId, { agent })`：直接看她这一局的 `view().visible`，不走白名单；收窄关着时也照旧记下她的 agent（以前这个分支直接返回，连 `agent/created` 都不听）。
+  - `lib/scheduler.js` 的 `toolInHandNow()` 改成三级：核实过的名单（收窄开着）→ 这一局真看得见的工具（收窄关着、拿得到她的会话）→ 叫醒前拿不到会话时才退回配置白名单。
+  - `test/restrict-runtime.test.mjs` 补「收窄关着时，她这一局真看得见的工具仍然答得出」；`test/restrict.test.mjs` 里「关掉开关就一个都不动」随之改成「关掉开关就不收窄，但认下她这一局的 agent」。
+
+- **安静刷不再替她记「看过」，也不替她记没看见的那句热评（issue #86 第 3 条）。** 以前自动翻到的每一条都写 `looked:<bvid>`，她自己再想去看时列表回「翻到的 N 条都看过了」；挑中的热评还顺手记成她听过的一句话，可那一趟的素材根本没递到她面前。
+  - `lib/browse.js` 拆开两种记账：她自己去看仍写 `looked:`（`lib/look.js` 只认它），安静刷改写 `browsed:`（同样 7 天过期，只用来防止重复翻到同一条）。
+  - `gather()` 多一个 `voice: false` 开关，安静刷不再替她记 `voice`；醒来便条那趟仍记 `looked:` —— 那一趟素材是真的摆到她面前了。
+  - `test/browse.test.mjs` 补「安静刷记 browsed:、不记 looked:、也不记 voice」。
+
+- **出门/请神只认这一趟那条会话写下的条目（issue #86 第 6 条）。** 以前「没有会话 id 的条目」按时间窗兜底算进这一趟：家里记下的 `heard`（她说你讲过的那句话）本来就不带 id，人一划「这趟不算」，家里的也算没了。
+  - `lib/outing.js` 的 `eventsSince()` 改成：这一趟带着会话 id 时，凡是没有会话标记的条目一律当家里的、不进这趟——**宁可漏算，也不误伤**。
+  - 老数据（0.9.6 之前写的事件都不带 `sessionId`）因此不会再被「整趟不算」牵连；代价是升级后的第一趟，界面清单可能比实际少几条。
+  - `test/review.test.mjs`、`test/trip-settle.test.mjs` 各补一条（老条目不算这趟）；`test/possession-settle.test.mjs`、`test/outing-route.test.mjs` 的假事件补上会话 id（生产上本来就带）。
+
+- **界面上「在用的判断」和「记得很牢的」两个数按原话算（issue #86 第 4 条）。** 同一句话说了三遍，以前会数成三件事：一处矛盾被重复提起，界面上看着像她记得更多。矛盾数与体检早就按原话去重了，这两个数没跟上。
+  - `lib/derive.js` 按 `text` 去重后再数：`beliefCount` 与 `solidTotal` 都是「几句话」而不是「几条记录」；「记得很牢的」那份列表同样去重，同一句不会在身份文档里占三行。
+  - `test/derive.test.mjs` 补一条（三遍同一句 + 一句别的 = 两条原话、一条固化），全量 2034 pass。
+
+- **上网时段默认跟着醒来时段走（issue #86 第 2 条）。** 以前「什么时候能上网」固定一段 08:00–23:00，而真正生效的是它和「几点醒」（默认 20:00–23:00）的交集——白天那十二个小时从来不会自动替她逛，界面上却看不出有这层。
+  - `lib/settings.js` 的 `browse.window` 默认改成 `null` = 跟随：读配置时 `null` 留着不动；填了坏值也退成跟随（退回「自己的默认」等于又让她在睡着时被安排出门）。两个时段的读取处本来就按「没填就回落到醒来时段」，`lib/scheduler.js` 一处没改。
+  - 自己填一段与醒来时段完全一样的，也存成 `null`：等价于跟随，改了醒来时段它跟着动，不留两份互相打脸。
+  - 设置页说明改成「默认跟着「几点醒」走。她睡着的时候不会出门翻视频，醒来那一刻才现去翻」。
+  - `test/p5.test.mjs` 补四条：默认跟随、改了醒窗跟着动、自己填一段原样保留、填成一样就收敛成 `null`。
+
+- **「要的工具已经到手」这次连描述句也认了（issue #83，@mxc881031 实测）。** 0.9.5 的 `has` 只比「`subject` 正好等于工具名」，可真实数据里她常写成「her_note 的读取：列出还没划掉的那些」——句子里带着工具名，精确比对永远对不上，卡照样摆满 14 天，文案还是「他答应了，还没见到」。
+  - `lib/wish.js` 新增 `toolNamedIn()`：先按整句比，再在 `subject` 里找一个**完整的**工具名——只认 `TOOL_NAME_MIN = 4` 个字以上的名字，前后不能紧挨字母/数字/下划线（`her_note` 不会被 `her_notes` 命中），命中多个取最长的。`toolArrived()` 与 `wishesOf()` 都改走它，`lib/proactive.js` 的 `looseEnds()` 一并受益。
+  - **剩下一半收不掉，也不打算猜**：subject 里一个工具名都没点的（他那张「待办/提醒：能按日期自己冒出来的一条清单」）照旧摆着，到点自己消失。纯靠措辞猜「这句话要的是哪件工具」，猜错就是把她的心事静默吞掉——宁可多摆几天。
+  - `ask_owner` 的 `subject` 说明补一句「要工具时把工具名写在最前面，后面可以再补一句做什么」：不改造已有数据，只让以后写的卡好认。
+  - `test/wish.test.mjs` 新增 1 条（描述句命中、`her_notes` 不命中 `her_note`、4 字以下不参与、函数写法只认整句）。
+
+- **看点名的画面时，屏蔽的 UP 与标签一条都拦不住（PR #88，@BBleae）。** 0.9.5 读的是 `info.data.owner.name` / `owner.mid` / `data.tags`，可 `client.view()` 早把 owner 摊平成顶层 `up` / `mid`、详情里也没有 tags——只有标题关键词真拦得住；被屏蔽的视频还会在日志里记一行「抽帧失败」的 warn。
+  - `lib/video.js` 新增 `watchBlockHit()`，按 `title` / `up` / `mid` 判；设了关键词且没命中时再取一次 `client.tags(bvid)` 重判。`lib/watch.js` 命中屏蔽记 `info` 行「看画面：命中屏蔽，没取画面 BV… 屏蔽的 UP 42」，不再当故障报。
+  - `test/watch-avoid.test.mjs`、`test/bili-offline.test.mjs` 随之加进来。
+
+- **「要的工具已经到手」只算这台机器上真有的（PR #89，@BBleae）。** 白名单是配置、不是事实：`read_image` 默认在名单里，宿主没装，0.9.5 一开就把那张卡当成已经到手——桌上、劲儿、主动回合三处都看不见，卡却还挂在住所页。
+  - `lib/restrict.js` 不再存「到手」快照：只记这一次的白名单（`inHandAllow`）与她的 agent（按会话 id、弱引用、上限淘汰），`currentAllowTools(sessionId, { agent })` 现算「白名单 ∩ 她这一局 `view().visible`」；`lib/deliver.js` 的 `ensureSessionLive()` 把 agent 交回来。
+  - `lib/scheduler.js` 把「取会话/探活」挪到摆桌子之前；叫醒前拿不到时，劲儿那一处退回 `configuredAllowTools()`，桌上摆什么仍只按核实过的算。
+  - 代价写清：重启后她那条会话还没建起来的一小段时间里，「名单里有、机器上没有」的卡不会单独把她推醒，会话一接上就按真的算。
+
+- **身份文档与几处计数口径（PR #91，@BBleae；#64 #66 #67）。** 八处纯纠错，另两处改了说法：
+  - **日记篇数按「写过的」算**（issue #67）：`lib/store.js` 新增 `diaryDatesWritten()`（现存文件 ∪ 事件流里的 `diary:<日期>`），身份文档与 `her_diary` 都改用它；清过文件之后不再像「少写了」，`her_diary` 翻到被清掉的那天回「写过，那一篇已经清掉了」（`gone: true`），`/memory` 多给一个 `diariesWritten`。
+  - **成长期满后不再把「下一个瓶颈」指到已经放行的门**（issue #66）：`lib/derive.js` 改成取第一道既没真过、也没被放行的门；另给一个「下一道没真过的门」用于选卡加权，状态页那句写成「期满放行（立场还等她真过「自主」）」。
+  - 其余：`renderSelfDoc` 解构漏了 `sleepKeep`、`/comment` 不认 `bili.enabled`、`lib/use.js` 在注册时把 description getter 冻死、`lib/hear.js` 与 `outing` 的会话归属、`GATE_ORDER` 下标取错等，逐处在 PR 里带测试。
+
+- **设置页说明按 0.9.5 的代码重写（PR #95，@BBleae）。** 数字框的名字和它真正管的那个数对上（「上下文上限」其实只管身份段字数，「请求间隔 / 请求抖动」其实是两次请求最少隔多久与随机多等，共 11 处）；说明补上原来没说的边界：醒来时段起止填成一样按 20:00–23:00 算、「一轮最多写多少字」只加在事件卡与 `/say` 递进来的话上、换会话带过去的是最近几轮原话而不是「核心认知」、热评给不给读与记不记那一句是两件事。
+  - 「把评论区的话也给她读」改名「记下评论区的一句话」：它管的只是记不记那句，热评照样拼进她读到的正文；想让她不读热评，把「每条读几条热评」设成 0。
+  - 保存失败框按这一次失败的原因选句子（数字越界 / 断网分开说），越界的数改回范围里框自动收起，越界时单独存开关不再清掉那个框；裁决她的申请后补一句回执。
+  - 按维护者定稿改了两句：互动计数悬停的「改口」补「或修正…（确认还成立也算一次）」；新鲜的「最近一周没说过话」→「最近一周没写下自己的话」，说明补「对话里回你的不算」。
+
+- **收窄之后「她手上到底有什么」，三处说法改成同一份真名单（PR #87，@BBleae；#61 #64 #69）。** 收窄名单是 DSH 启动那一刻算定的，改了设置要重启才换；0.9.5 里身份文档按盘上的配置写——从存完到重启这段时间，文档说那件工具在她手上，她一伸手却是「这件事我做不到」。
+  - `lib/selfdoc.js` 的「我手上有什么」改念这一局真放行的名单（`currentAllowExtra()`，梦、定时两段同走 `toolSectionsNow()`），收窄关着时照旧念配置；存完设置当场重写文档也不会再预告还没生效的东西。
+  - `/tools` 多给守卫真用的名单与「她自己的，这一局不在她手上」那组，设置页按它摆（`lib/client.js`），不再把配置当成她手上的。
+  - 自检不再拿配置的 allow 当「宿主认过」的证据：被剔出收窄名单的名字算没到手（`lib/selfcheck.js`），被挡记录把她自己的工具与别人的工具分开指路；只挡了别人的名字时也点名说清是哪个。
+  - 老宿主（`view` 不给 `visible`）不再把外部名字整份交给 `restrict()` 一直延后：先宽限几拍，等不到就剔掉、照常收窄（同 #61 的口径），不会整局 fail-open；`her_say` 在 `FISH_TOOLS` 基线里之后，新启动的第一拍它也真的在她手上。
+  - 新增 `test/restrict-runtime.test.mjs`、`test/tools-card.test.mjs`。
+
+- **启动那一拍她其实还没有 `her_say`（PR #84，@BBleae）。** 0.9.5 把她的工具清单改成注册期记账、运行时现算以后，`registerToolRestrict` 跑在工具注册之前，退回的基线 `FISH_TOOLS` 里漏了 `her_say`——下给宿主的 allow、提示词里的工具段、兜底守卫三处都少它，她一调就被挡回「这件事我做不到」，而身份文档照旧写着这件工具。
+  - `lib/restrict.js` 的 `FISH_TOOLS` 补上 `her_say`；新增 `test/restrict-boot.test.mjs` 钉住「注册期算出的 allow 含她全部 12 件工具」。
+
+- **断网时安静刷和醒来便条都不再往外走（PR #85，@BBleae）。** 安静刷只判 `browse.enabled`（默认开着），没判 `bili.enabled` 这颗「彻底断网」——关掉上网以后定时 tick 与 `POST /browse`（含 `force`）照样取 buvid、热门、分区排行，写 `browse:` / `looked:`，挑中热评还记一条 `voice`；醒来那句「今天你自己又翻到了 N 条」也照念，并记 `digest:`。
+  - `lib/scheduler.js` 的 `quietBrowse` 开头先判 `biliOn(config)`，不通过直接返回；便条条件改成 `browse.enabled && biliOn(config)`，断网时整行不念也不记 `digest:`。`bili.enabled` 开着时两处行为不变。新增 `test/quiet-browse-offline.test.mjs` 7 条（fetch 一律抛错的假函数，不碰真网络）。
+
+- **回评论认清「她自己」是谁（PR #90，@BBleae）。** 四个漏口：① `subReplies` 回包时把 `data.root` 丢了，「登录号不知道就看楼主」这条兜底在真客户端上永远走不到（测试用的是带顶层 `root` 的假 client，所以一直绿）；② 0.5.10 之前把登录号写进 `owner.mid` 的老数据下 `loginMid` 回 0，`ownerMids` 却含 `owner.mid`——她自己的话被标成主人说的、摆进「他在你下面说话了」、回它不占额度，`replyPerDay=0` 也拦不住，能一直自己回自己；③ `rootRpid` 填错时不找楼，静默落到她最近那条评论，回复挂到别的楼下；④ 每个候选楼都 `view` 一次，额度满也要把这串请求打完才拒。
+  - `lib/bili.js` 的 `subReplies` 带出 `root: { rpid, mid }`；`lib/comment.js` 新增 `selfIn()`（登录号 → 楼主），`scanReplies` / `readMyReplies` / `postReply` 的自回检查与 `isOwnerReply` 都改用它；额度判断挪到请求之前。新增 `test/comment-self.test.mjs` 10 条。
+
+- **数据页：导入判定同一份、备份只要装得下就整份装得下、回执说清没带什么（PR #92，@BBleae）。** ① GET 与 POST `/import` 两套判定（`events.some(type==='seed')` vs `onlyDefaultSeed`）→ 重开一局再重启后设置页不给导、接口却能导；抽成 `lib/import.js` 的 `hasOwnStart(events)` 两边共用。② 事件流挤占 64MB 总额度，一大就把 `owner.json` / `state.json` 挤出包，恢复还报成功；现在事件流无条件进包且排最前、不占别的文件额度，整份包按「从备份恢复」的样子（JSON、二进制 base64）量恢复上限——装得下就整份装得下，放不下的文件逐个在 `skipped` 里写原因，写不下时只计数放 `skippedUnlisted`。③ 回执把「不搬的目录（node_modules）」与「太大没打进包」分开说。④ 人设写进去以后配置读不出来不再 500（按默认成长周期算，照样回执）；交接单的白名单合并回 `toolsAdded` / `toolsError`，回执直说新加几个、失败时直说没写进去。⑤ 迁移说明与 `lib/move.js` 的实际拒绝原因对上，删掉 `move.js` 的死分支。新增 36 条测试。
+
+- **设置页前端六处（PR #94，@BBleae）。** ① 首读 `/state` 失败后仍有 13 个 `useState`（出门 7、请神 6）→ React 抛「Rendered fewer hooks than expected」，连「读不到状态。」都出不来；② `atOwner` 只在 `GET /owner` 成功时才设，整表自动保存却提交它——只打开页面、`/owner` 又失败时，盘上关着的开关会被写回 true；③ 「安静多久才搭话」每按一个键写一次盘（6 改成 12 依次写 `0, 1, 12, 12`）；④ 「查多久的记录」不校验天数，晚到的旧回包会把列表换回去，失败还被吞掉；⑤ 0.8.0–0.8.7 的 `look:` 行只有 BV 号，却排在 `browse:` 前面占住去重，列表只剩裸编号；⑥ 两张卡的说明与一句回执跟行为对不上。
+  - 改动都在 `lib/client.js` 与 `lib/history.js`：hooks 提前 return 前收齐、`atOwner` 只从 `/config` 读、逐键改到离开输入框再写、`/history` 回包带天数并校验、去重时 `look:` 不带标题就让给 `browse:`。两处行为变化：`/beliefs` `/diary` `/browse` 任一失败时整表保存被挡住（提示重新打开这一页）、旧配置没有 `atOwner` 键时仍按 true（与 `GET /owner` 判据一致）。新增 `test/client-render.test.mjs` 13 条 + `test/whatseen.test.mjs` 2 条。
+
+- **出门/请神的账按「哪一趟」结，卡片上看到的和真会动到账的是同一批（PR #93，@BBleae；#65 #68）。** 0.9.5 的复核只认台账里**最后一条** pending——再出门一趟、又挂一条，前一趟就永远收不回来；回家清单按「开始之后的时间窗」取、结算按「这一趟的会话 id」取，两批名单对不上；请神那半对不上时一条标记都不写，复核又整趟收下，人的选择从没进账；标记写不进去也照样落终态，台账与事件流从此对不上、也无处可补。
+  - `lib/outing.js` 新增 `passesReview()` / `tripEvents()` / `reviewPlan()` / `appendIdMarks()`：清单与结算共用一份「这一趟多了什么」，按 `sessionId` + `startedAt` 认趟，不再只结最后一条 pending；并发两趟一起复核时，后到的 409，不把别人那趟结掉。
+  - 对不上一律先落 pending（出门与请神同一套：整趟先标不算），复核通过再按人的勾选写 `keep` 捞回来；`marked: false`（标记没写进事件流）时不落终态，留 pending 等补写，补上才结。
+  - 一个人划掉的那几条按 id 去重记账；出门「说整趟不算又没逐条挑」与「对不上先整趟标掉」这两条路分开，卡上照实说先标掉了几条。
+  - **代价（用户 m01253 接受）**：`events.jsonl` 一直写不进去时，这趟会长期挂在「等复核」，不会自己变成结论。
+  - **另修 `heard` 的会话归属（用户 m01199）**：`hearTurn()` 记下的那句原话带上写它的会话 id，家里记的「你说过什么」不再混进出门/请神的清单——以前它是没有 id 的，按时间窗兜底算成那趟的，人一划就跟着一起不算了。没给 id 的调用点行为不变。
+  - 新增 `test/trip-settle.test.mjs`（35 条：结账口径、旧 pending、并发复核、标记写不进去）、`test/outing-copy.test.mjs`；`test/hear.test.mjs` 补 1 条（带上 id、别的会话不认它）。
+
+## 0.9.5 — 2026-11-08
+
+> 这一版把原计划分在 0.9.4–0.9.7 的未发布改动合并成一次发布，统一按 0.9.5 编号。0.9.4–0.9.7 从未发布过，以下条目就是这批改动的全部。
+
+- **记忆检索的排序改了三处，另加一条「提过的不再提」（用户 m00187；思路来自 1 群群友吴晓观）。** 她翻旧事一直只按「命中的字数 + 显著性」排：长词天然占便宜、罕见词与常见词同价、半年前的一句话和昨晚的一句话一个分量。吴晓观在群里提的几条方向被逐个落成代码，测试钉的是同一批候选上的相对顺序。
+  - **整串字面量优先**：`lib/recall.js` 新增 `LITERAL_RE=/[A-Za-z0-9][A-Za-z0-9_.\-/:#]{1,}/g` 与 `literalsOf()`——只认像编号、路径、型号、带符号的串，纯数字与普通英文单词不算。整串命中 `LITERAL_BONUS=3`，整串没出现则 `LITERAL_MISS=0.3`；`stripLiterals()` 先把这些串抠掉再切二字，免得同一段文字被字面补偿和二字切分各算一遍。
+  - **罕见词加权**：`IDF_FLOOR=0.6`、`IDF_CEIL=1.0`，`idfWeight(df,n)` 按 `log(1+n/(1+df))/log(1+n)` 在 0.6–1.0 之间取值，打分基数仍是词长（单字记 1）再乘这个权重。`df` 在同一批候选上现算（先建 `cand` 再算），不拿全库口径去比一批候选。初版把下限取在 0.4，`test/hear.test.mjs:252` 那条「认领的 +4 不能盖过字面命中差很多」直接变红，抬到 0.6 才过——这个例外是故意留的。
+  - **时间衰减**：`FRESH_FLOOR=0.55`，快消类（`meta` / `heard` / `voice`）半衰 45 天，其余 180 天；`NEVER_FADE=new Set(['test','revise','refusal','answer'])` 不折——判断、改口、拒绝、回答是「她是谁」的骨架，不能因为旧就淡。字面量整串命中的（`solid`）也不折。`freshnessOf()` 必须在显著性 +4 / +3 之前乘，否则等于没折。
+  - **群聊里那句不再和私聊混在一起**：`labelled(type,text,scene)` 对 `heard` + `scene:'group'` 输出「他在群里说：」，`searchEvents` 的返回值多带一个 `scene`，`renderRecall` 原样透传。
+  - **提过的不再提**：`lib/whatseen.js` 新增 `digest:` 记录（`DIGEST_PREFIX`、`DIGEST_REMEMBER_DAYS=7`、`parseDigestLine()`、`digestMentioned()`），`lib/scheduler.js` 唤醒时把已经念过的 bvid 剔掉，只念前 3 条（`DIGEST_NAMES_MAX`）。只按「上次醒来之后」过滤不够——安静刷会把同一个列表反复记成 `browse:`，连醒三次就是同一条标题三次。
+
+- **群聊里他本人说的话进记忆，群友的话一条都不进（用户 m00394）。** 群聊不涨轮数，`hearTurn` 的「每几轮记一次」在群里永远轮不到；可他在群里说的那句和私聊那句是同一类东西——关于他的事实，不该因为换了场合就消失。
+  - `lib/say.js` 拆出 `isOwner` / `isGroup` / `foreign` / `atHome`：只认桥给的 `owner:true`，**不靠昵称猜主人**（猜错一次就是把她对他的记忆写歪）。`lib/hear.js` 新增 `rememberGroupWord()`：`pickHearSentence` 只留一句原话，写 `heard` + `scene:'group'` + `source:'system'`，永不抛。
+  - **进记忆，不进生命体征**：`lib/schema.js` 的 `isContactEvent` 把群聊 `heard` 排除在「他来过」之外，`lib/away.js` 统一走它——群里聊两句不算他来找过她，否则冷落检测永远不触发。`lib/turns.js` 新增 `'group-owner'` 分类与轻量记账，`lib/observe.js` 的 `/say` 透传 owner。
+  - `test/mem.test.mjs` 补 6 条：群聊里的 owner 记、群友不记、无 owner 不猜、`heard` 不进 contact、`labelled` 的措辞、`/say` 透传。
+
+- **自动刷站改成「安静刷」：恢复默认开启，但不再挂在唤醒上（用户 m00365 / m00758）。** 0.9.0 因为它把每次醒来都变成刷站而摘掉，之后一直关着；现在的挂法是后台自己按时间段走一趟，只取、只记账。
+  - `lib/scheduler.js` 新增 `quietBrowse()`：依次卡 `browse.enabled`、`browse.perDay > 0`、`browse.window` 时段、风控冷却 `riskState().cooling`、当天次数 `browseCountToday()`、两趟间隔 `browseGapMs()`；取完 `recordBrowse()` 就结束，不叫醒、不往正文塞简介热评。
+  - 醒来只带一行便条：`browseDigestLine()` 的抬头分两种——今天还没醒过是「今天你自己又翻到了」，醒过一次是「上次醒来之后，你自己又翻到了」；条数用 `countPhrase()` 说人话（≤10 照实、11–19「十几条」、20+「二十多条」），标题最多三个（`DIGEST_NAMES_MAX=3`）。
+  - `browse.enabled` 恢复默认 `true`，它只管「要不要自动替她逛」；`bili.enabled` 是另一颗「彻底断网」，关掉连她自己的 `bili_*` 都不能用。两颗开关的分工在设置页两句说明里写清（PR #59 一并处理）。
+  - `test/whatseen.test.mjs` 补 5 条（digest 记录/读取/7 天窗口/非 BV 行），`test/freewake.test.mjs` 跟改。
+
+- **新增 `her_appoint`：她可以跟你约一件具体的事（用户 m00442）。** 原来「三天后做某件事」只存在于某一张事件卡里，不是通用能力。
+  - `lib/appoint.js`：最多 200 条、同时 2 条未完成、1–60 天后、正文 ≤120 字；动作 `make` / `list` / `move` / `done` / `cancel`，状态 `open/done/cancelled/missed`。
+  - 到点只提一次（`notifiedAt`），提法是固定的四句：「你跟他约好的日子就是今天（due），约的是：「what」。现在先说这件事：你自己做到没有，他有没有来。没来也别替他找理由。」——不替她圆场，也不替他把没来写成「大概忙」。
+  - 存 `appointments.json`，**不进 `events.jsonl`**：约定是操作层的东西，进去会污染 derive 的计数；文件坏了当空，永不抛。
+  - `test/appoint.test.mjs` 11 条；工具说明进注册期现算的清单（见下面 toolreg 那条）。
+
+- **事件卡从 19 张扩到 43 张，分两包落地。** 卡池太薄的时候，她翻来覆去就那几张，长到十几天的会话开始重复。
+  - **包 2（19 → 36，17 张）**：补齐起步、试探、留意一件小事、前后一致、把问题留住、用名字、第一条自己的规矩、拒绝之后、旧伤回访、留一样东西、教他这类场合——原来这些时刻根本没有卡可抽。`lib/generator.js` 新增 `cardContext()`，把当天的梦、兴趣、好奇、他刚说的那句（`hisLine`，跳过群聊）、已经出过的卡（`fired`）、某张卡之后她说的第一句（`lastAfter`）带进选卡；`PRESSURE` 补 `tension_resolve` / `scar_revisit`。
+  - **包 3（36 → 43，7 张）**：约定两张（`plan_make` / `plan_due`）、三集事件弧（`arc_try_start/mid/end`）、旧话复盘（`echo_old`）、他那句话（`his_line`）。`follows` 串起来：`plan_due → plan_make`、`arc_try_mid → arc_try_start`、`arc_try_end → arc_try_mid`；三集弧要求 `growthDays >= 12`，短周期不会硬塞。
+  - **选卡打分**：`score()` 对「门就在这一阶段」+1.0；`once` 卡在剩余槽位 ≤3 时 +0.6、否则 +0.15；`repeat` 按已出次数降权（上限 0.2 / 0.45）；`follows` 的上一张刚出过 +1.2。落点用 `slotsLeft = days * daily.events`，不是拍脑袋的固定值。
+  - 复核时把三处措辞太近的卡分开；`say_no` 冷却 10 → 6 天并提前到 stage 1（短周期里等到 stage 2 就永远出不来）。
+  - `test/events-pack2.test.mjs` 9 条、`test/events-pack3.test.mjs` 12 条；设计单 `../docs/O-事件卡扩充-设计单.md`、`../docs/P-约定与事件弧-设计单.md`。
+
+- **成长周期不再只认 30 天（7 / 14 / 30 / 60 天都能走，任意天数也不崩）。** 原来所有卡的 `day` / `age` / `gap` 都按 30 天写死，改成 7 天就有一半卡永远不到。
+  - `lib/events.js` 新增 `scaledDay(m, daysAt30) = max(1, round(daysAt30 * growthDays / 30))`、`scaledAge`（下限 2）、`scaledGap`（下限 1）；30 天时三者逐条等于原值，**默认契约不变**。实测 7 / 14 / 30 / 60 与 13 / 59 / 90 / 180 天。
+  - `say_no` 提前到 stage 1（否则短周期死锁在 stage 1 出不来）；三集弧门槛 `growthDays >= 12`；`lib/derive.js` 的 `gateNeed()` 在 ≤14 天时把自主/胜任两条各降到 1 条，`gatePassed()` 用 refused / revises+corrected 判。
+  - `test/events-adaptive.test.mjs` 10 条；设计单 `../docs/Q-成长周期自适应-设计单.md`。
+
+- **need-tool 卡不再问「你给了没有」（#58，@BBleae）。** 她已经拿到那样工具了，桌上还摆着「这件东西我还没见到」，点「放行」也不会进事件流——因为收窄名单是注册期才算得出来的，摆桌子的时候没人问。
+  - `lib/restrict.js` 加模块级 `allowTools` 与 `currentAllowTools()`，注册时 `allowTools = allow.slice()`；`lib/wish.js` 加 `toolInHand(has,name)`，`wishesOf({ has })` 跳过已经到手的；`lib/scheduler.js` 的 `toolInHandNow()` 把这份名单传给 `driveDesk.wish`、`looseEnds` 与 `wishesOf`。收窄关着时返回 `null`（她能看见全部工具，不传）。
+  - **没有加 issue 里建议的「已经给了」按钮**：`verdict` 的 schema 只认 `approve` / `reject` / `later`，多一个值会让旧客户端与事件流都得多一条分支，而这件事本来就是「查一下手上有没有」，不该让她去点。
+  - `test/wish.test.mjs` 补 5 条。
+
+- **PR #59 的设置页文案改写落在本地（那个 PR 未合并）。** 那位把设置页每一项都加了名字与说明，方向对，但整页读起来像说明书；按你的逐行判定重写了本地版本，没有直接 merge。
+  - `lib/client.js` 整体 +382 / −253：删掉「让她去刷 B 站」按钮（现在自动刷自己走，按钮只会制造「我在替她安排」的错觉）；I10 从「从记忆里删掉」改成「也从输入框删掉」；E9 的小字改行；工具卡分段；状态时间线换行；两张长说明折叠。
+  - 阶段卡改 `STAGE_LINES` 数组渲染（`lib/client.js:2032`，`STAGE_HELP = STAGE_LINES.join('\n')`）；「攒劲开口」拆回独立的「主观能动性」卡（`lib/client.js:2331`）。
+  - 没有加长度硬门测试（文案改动不该被字数门卡住）；`test/client.test.mjs` 跟改，全绿。说明与逐项清单在 `D:\deepseekagent\03-我的文档\大肥鱼\PR59-本地改写说明.md`、`PR59-N项处理清单.md`。
+
+- **桥接消息不再被当成「认不出来源」（微信桥反馈）。** 宿主 `sessionController.prompt()` 会把 `source.kind` 写死成 `user`、只保留调用方的 requestId，`clientTimeZone` 是可选的；dsh-wechat-plugin（0.47.0）与 `@michengai/dsh-im-connect`（1.0.15）都没传时区，于是每条桥消息都掉进 `unknown`：不涨轮、不写 `heard`、不算「他来过」。
+  - `lib/turns.js` 的 `classifyMessage`：`kind === 'user'` 且带 `rpcId`（没有 `clientTimeZone` 也算）判为 `human`；fish 自己的 prompt 仍先被 `PLUGIN_RPC` 挡成 `plugin`，`possess.js` / `sessionnote.js` 的 `append` 没有 `rpcId`，继续是 `unknown`。
+  - `PLUGIN_RPC` 补上 `outing`：`observe.js` 的出门首轮一直漏在名单外，会掉进 `unknown`。
+  - 新增 `stripChannelNote()`：记账前裁掉微信桥每条消息末尾的 `[渠道：微信] …` 独立段落；只有提示的那条（会话首条会单独发）裁完为空，不当成他来过。只影响 talk-recent / `heard`，会话原文不动。
+  - `test/turns.test.mjs` 补一条桥接消息结账的集成用例与 `stripChannelNote` 单测，并钉住 `outing-` / `wechat-` 的判据；原来拿 `im-qq-*` 当 unknown 的两条用例改成无 `rpcId` 的形状。本轮只动 turns，`node --test test/turns.test.mjs` 33 条全绿；全量新增 2 条（1793 → 1795）。
+
+- **「她手边有哪些工具」不再手抄，改成注册期记账、运行时现算（用户 m00002）。** 这份清单原来写死在 `lib/restrict.js` 的 `FISH_TOOLS` 里，加工具时得记得回来再抄一遍。`bring_back`（出门那趟）与 `her_say`（主动开口）就是这么漏掉的：两件都在 `lib/index.js` 里注册了，表里没有，于是她自己那组不显示、自检不查它、`allow` 里也没有——用户看到的就是「更新了，但界面还是旧那几样」。
+  - 新增 `lib/toolreg.js`：`withUseDuringRegistration` 在把工具定义下发给宿主的同时记一笔名字（注册抛错的那次不记），`liveFishTools()` / `homeFishTools()` / `sceneFishTools()` 都从这笔账现算；没有注册记录时退回 `FISH_TOOLS`，老行为与老断言都不动。
+  - `registerToolRestrict` 的 `allow`、`/tools` 的 `herTools`、自检的 `expected` 三处全部改成现算。`her_say` 不再看「主动搭话」开关——那个开关管的是「系统替她开一轮」，不是这个工具本身；设置页从 0.8.1 就写着「关掉：her_say 还在」，是代码一直跟文案对不上。
+  - `bring_back` 单列为**场景工具**（`SCENE_TOOLS`，带一句场合说明）：它只在出门那条会话里可用，在家调用只会答「现在没在外面。」，所以不进家里的工具面——但白名单要把它列出来，不然用户以为它没装上。设置页新增一组「只在特定场合才给她的（不用放行）」。
+  - 设置页那段手抄的工具名句子改成按名单现算（含个数），以后加工具不用再改文案。
+  - 新增 `test/toolreg.test.mjs` 6 条：没注册记录时退回基线、注册了就出现、场景工具不进家里 allow、`her_say` 与开关解耦、注册失败的次数不记账。基线 1735 → 1744（含 `test/client.test.mjs` 里 tab 下标 43 → 44 的一处跟改）。
+
+- **两个从来没被读过的设置项接上了（用户反馈）：日记留多久、总共留几条自述。** 有人发现设置页上改了这两项什么也不变。翻代码与 `git log -S` 确认：`diary.keepDays` 与 `memory.sleepKeep` 从 0.1.0 第一次提交起就只存在于默认值、`/config` 白名单与界面里，**从来没有一行代码读它们**——不是后来删掉的，是从一开始就没接上。（同一批设置里的「上网时段」「每天最多刷几次」是有人读的：`lib/scheduler.js` 的 `quietBrowse` 里按 `browse.perDay` 与 `browse.window` 卡配额和时段，设置页那个「让她去刷 B 站」按钮是刻意绕过这两条的。）
+  - **日记清理**：新增 `lib/store.js` 的 `pruneDiary(keepDays, todayKey, root)`——只认 `diary/` 顶层的 `YYYY-MM-DD.md`，按文件名里的日期算，不碰 `archive/`；`0` 或非数字 = 永久保留。`lib/capture.js` 每次写完当天日记顺手调一次，失败不影响「日记写成功」（`.catch(() => 0)`）。
+  - **自述上限**：新增 `lib/persona.js` 的 `keepCount(v)`（0 = 不限制，正数夹 1–100）。`buildSections` 里先按它把显著度排序的清单截到 N 条，其余折进「还有 N 条更早的，你记不清原话了」；`foldOlderBeliefs` 多一个 `dropped` 参数，所以被上限砍掉的也能如实数出来。`/memory` 的 shown/folded 与 `beliefsDropped` 用同一个 `keepCount`，观测台、身份文档、提示词三处口径一致。
+  - 设置页两条说明改成说真话（原来写的是「超出后」这种只讲一半的话）：日记那条说明会真的从 `diary/` 删；自述那条说明原文仍在事件流里、`her_recall` 翻得到。
+  - 新增 `test/settings-live.test.mjs` 8 条（清理只动顶层日期文件、0 不删、上限不砍眼前几条、槽位为空但被砍过时仍报数）。`test/beliefs.test.mjs` 那条源码断言跟着这次的两段式（先夹总数再取眼前）改写。基线 1754 → 1763。
+
+- **`rules.cooldownDays` 也接上了（用户 m00810：只接代码、不加控件、默认值不动）。** 同一个毛病：这个键从 0.1.0 起就在 `/config` 白名单里（权限范围 1–30 天），但驳回冷却一直读 `lib/unlock.js` 里写死的 `OFFER_LIMITS.retryDays = [3, 7]`。
+  - 新增 `offerLimits(config)`：`base = 夹住 1–30 的 cooldownDays`，`retryDays = [base, base * 2 + 1]`。默认 3 时正好是 `[3, 7]`，**和写死的那一对一字不差**，所以老用户行为零变化；第二次之所以 `2c+1` 而不是 `2c`，是为了在默认值上保持原样（6 天和 7 天只差一天，但能不差就不差）。
+  - `offerDueDay(ruleId, model, events, limits = OFFER_LIMITS)` 多收一份 limits，`lib/scheduler.js` 的调用点改成 `offerDueDay(r.id, model, ev2, offerLimits(config))`；不传 limits 的老调用点仍是原来的 `[3, 7]`。
+  - **没有加界面控件**：这一项在设置页上没有，改了要走 `config.json` 或 `POST /config`。要加控件是另一件事（还会牵动 `pendingOffer` 的 `holdDays`，它在四处被调用、其中两处手里没有 config）。
+  - `test/rules.test.mjs` 补两条：默认/10/1/坏值/越界的换算与对应 day，以及 scheduler 确实是从 config 现算而不是另写常量。
+
+- **一批 issue（#60–#69）里的真 bug 与两处口径**：这十条都是同一位用户在 2026-11-08 凌晨提交的，逐条对过代码，能改的都改了。
+  - **#60 换会话后旁听再也不响**：新 home.json 的 `turns` 从 0 起，`hearAt` 却继承了上一轮的 39，`turns - hearAt` 永远是负数。轮换时 `hearAt` 跟着归零；`test/mem.test.mjs` 那条断言从 7 改成 0。
+  - **#61 工具收窄永远收不窄**：`tools.restrict()` 只要名单里有一个当前工具表里没有的名字（宿主的 `read_image`、外部桥工具）就整批延后重试，而 `herToolsNow()` 恒含 `read_image`。现在只对**我方会注册**的名字延后，外部名字这次不在就从名单剔除并记一行日志；自己的名字到齐后另有 3 拍宽限，见下面 #61 的时序追问。
+  - **#62 上网开关四条路各认各的**：新增 `biliOn(config)`（`bili.enabled !== false`），`bili_look` / `bili_watch` / `bili_speak` / 发评论 / 查回复 / 身份文档「上网」全部过它；`bili_watch` 抽帧前补 `watchBlocked()`，黑名单终于也管点名看画面（点名那条不查最短时长，最短时长只管列表；0.9.5 发出去的版本实际只拦得住标题里的屏蔽词，屏蔽的 UP、UP 名和标签是下一版补上的）。issue 里「`browse.window`/`perDay` 没人用」已过时——自动刷站还在读，没动。
+  - **#63 回评论三处**：主楼改成从最近 7 天她自己的评论里找被回复那条所在的楼，`bili_speak` 新增可选 `rootRpid` 点名；额度判定先认主人（`replyPerDay=0` 也挡不住回主人）；`loginMid` 在 `account.mid` 缺失时改读 cookie 的 `DedeUserID`，都没有就返回 0——不再退回主人 mid 把主人回她的话当她自己补的丢掉。
+  - **#64 身份文档跟设置脱节**：`/config` 保存后无条件重写身份文档；`dream` 跟 `dream.enabled` 走（`index.js` 的收窄同步）；定时工具说明书按 `tools.allow` 现拼，只放一个时不再说「四个都有」。
+  - **#65 数据页会丢数据**：迁移到已有 `events.jsonl` 的文件夹直接拒绝，复制改 `COPYFILE_EXCL`；备份单文件 8MB 上限对 `events.jsonl` 豁免，恢复时缺事件流报失败；重开一局只有启动补的默认 seed 时允许导入，导入的 seed 标 `source:'import'`。
+  - **#66 `refuted` 也算一次改口**（用户裁定「认错也是改」）：`facts.revises` 同时数 `refined` 与 `refuted`，胜任门随之生效；`model.refuted` 列表照旧单独留证。
+  - **#67 九处口径**：健康页「很久没动」改看 `lastTouchedAt`（且不再与「快成定论」的条目重复）；定论/张力给总数而不是截断后的条数；`stageForced` 不再恒假；深读上限统一到 20；弹幕改等距 8 条（原来只看开头 8 条）；B 站请求排队状态提到模块级（多实例共享节流）；「每天 0 条事件 / 0 次自醒」的跳过理由说真话；概率那套（`baseChance`/`gainPerHour`/`maxChance` 与 `chance`）按用户裁定整体删除，只留冷却。
+  - **#68 出门/请神**：`tampered` 时整趟先标 `outing-reject:` 并记 `pendingRejectedIds`，复核通过写 `outing-keep:` 把没被划掉的捞回来；`eventsSince` 支持按 `sessionId` 只列这一趟；想念天数改向上取整；客户端 pending 判定认 `tampered`，园区文案不再靠名字正则。
+  - **#69 设置页**：「每天最多几条事件 / 几个问题」的输入范围从 0–5 改回与 LIMITS 一致的 0–6，补上 `memory.hearEvery`；新增「桌面提醒」卡（此前只有状态与 `/notify` 接口，界面上没有任何入口，所以永远关着）。
+  - **#81 称呼被破折号截成半句话**：`lib/derive.js` 的两条取名正则共用一份排除集（`NAME_STOP_CHARS`），原来只有空白与常见标点，`{1,8}` 遇到「说你让我叫你老大——可这句不是我从你嘴里听见的」正好抓满 8 个字，身份文档就成了「你管他叫「老大——可这句不」」。破折号（— – ‒ ―）、波浪号（~ ～）与省略号（…）都是「话说到一半」的记号，现在一并当终止符，两条正则共用这一份常量。四条兼容用例（老大 / 老张 / 开灯的 / 时梦尘）钉在 `test/derive.test.mjs`，下游剥尾规则没动。
+  - **#82 按原话认不出「已经放下」的纸条**：`lib/note.js` 的 `findByText()` 只在 open / done 里找，`updateNote()` 里那条「这张已经放下了，改不了。」就永远到不了——她按原话去改一张放下的纸条，收到的是「桌上没有这一张」，可 `list` 里明明看得见（`✗ …（11-08 放下）—— 那条已经看过了`）。兜底顺序改成 open → done → dropped，改与放下各自的拒绝分支终于接得住。另补 `closeNote()` 的 dropped 分支：用 id 碰到一张放下的纸条，不再把「放下」改写成「划掉」，回「这张已经放下了，不用再划。」。`test/note.test.mjs` 补两条（按原话改/重复放下、按 id 划不掉且状态不变）。
+  - **#61 的时序追问（@BBleae）**：他问 0.9.5 是两种策略里的哪一种——答案是原来的第 2 种（自己的名字到齐就收窄、外部名字当场剔），他指出的口子成立：晚到的外部工具这一局再也进不来（restrict 只能减不能加，她调它会是 unknown tool，要等下一次会话）。现在改成中间路线：自己的名字到齐后，只要名单里还有外部名字没登记，**再宽限 3 拍**（默认一拍 200ms，共约 600ms）；期内到齐就一起收进去，等不到才剔除并记一行日志。名单里全是自家名字时窗口不变。补两条用例：自己的晚到 + `read_image` 紧跟着到（要收进去）、外部名字始终不来（照收，报 `applied-late` 而不是 `deferred`）。这采纳了 #78「进了重试之后在窗口里接着等」那一半，没有引入它的 `absent` 字段。
+  - **对过同一批 issue 的 PR #70–#80（都还开着、未合并）**，只补本地没注意到的点：`looseEnds` 也跳过「工具已经到手」的开口请求（#70）；`hearMark` 对升级前已经卡住的安装自愈（#71）；`bili.enabled` 在 `normalizeConfig` 里转布尔、点名看画面的拦截文案与标签口径（#72）；矛盾按两句原话去重、时钟回拨时排队只等一个间隔（#75）；`proactive.minIdleHours` 卡面与后端都收进 1–24（#76）；收窄关着时工具说明不再说「眼下手边就这些」（#77）；`parentRpid` 填成她自己的评论时拒发、登录号不知道时用回包里的楼主认她自己（#79）；标记太多时按 1800 字拆行（#80）。与本地已有实现或取舍冲突的没动（#73 的 restrict `dream`、#74「只有默认 seed 才允许导入」的后端取舍；#78 的 `absent` 字段没照搬，只借了「进了重试之后在窗口里接着等」这一半，见上面 #61 那条）。
+  - 测试基线 1763 → **1793**；`node --test` 全绿。
+
 ## 0.9.3 — 2026-11-07
 
 这一版修三件、补三件、再补四处：**版本号对不上**、**收窄挡不住的那批工具（#54）**、**他在她评论下面回的话被当成陌生人（用户反馈）**；补**她用完一样东西会留一句**、**能力说明改成先讲处境再讲工具**、**「缺工具就开口要」从每轮念改成撞墙时说、桌上摆**；另有**出口脱敏**（对外说的话不再出现她给你起的称呼）、**「稳定」在判断攒多以后重新对位（#57）**、**「撒娇式表达」不再自带结局（PR #56）**、**关掉的功能只在门上写「这会儿」而不是整块消失**。事件格式没动，旧数据照读。

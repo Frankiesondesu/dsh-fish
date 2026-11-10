@@ -18,6 +18,7 @@
 
 import { appendEvent } from './store.js'
 import { hearMark, setHearMark } from './home.js'
+import { loadConfig } from './settings.js'
 
 /** 一句最多多少字（对齐 talkmem 的 TALK_SNIPPET） */
 export const HEAR_SNIPPET = 160
@@ -27,12 +28,41 @@ export const HEAR_MIN_CHARS = 8
 export const HEAR_EVERY = 3
 
 /**
+ * 去掉桥塞在正文**开头**的来源抬头（2026-11-09，issue #96）。
+ *
+ * 桥把群聊原样转进来时，常在正文前加一行「（群聊 · 示例群 · im:group:10001）」。
+ * 这一行往往比人说的话还长，`pickHearSentence` 取最长的一句，记成「他说」的
+ * 就变成抬头。`stripChannelNote` 只管正文末尾的 `[渠道：…]` 段落，够不着开头。
+ *
+ * 只认**整行被括号包住、且带群/渠道/频道/im: 字样**的那种抬头，宁可少裁：
+ * 一句普通的话被误裁掉，就等于把他的话从记忆里抹了。
+ */
+export function stripLeadingHeader(text) {
+  const lines = String(text ?? '').replace(/\r/g, '').split('\n')
+  let i = 0
+  while (i < lines.length) {
+    const line = lines[i].trim()
+    if (!line) {
+      i += 1
+      continue
+    }
+    const wrapped = /^[（(【\[].*[）)】\]]$/.test(line)
+    if (wrapped && /(群|渠道|频道|im:|chat)/i.test(line)) {
+      i += 1
+      continue
+    }
+    break
+  }
+  return lines.slice(i).join('\n').trim()
+}
+
+/**
  * 从一段话里挑出最值得留的一句。
  * 按句号/问号/叹号/分号/换行切；取最长的一句；截到 HEAR_SNIPPET。
  * 纯函数，永不抛。
  */
 export function pickHearSentence(text) {
-  const s = String(text ?? '').replace(/\r/g, '').trim()
+  const s = stripLeadingHeader(text)
   if (!s) return ''
   const parts = s
     .split(/[。！？!?；;\n]+/)
@@ -51,6 +81,51 @@ export function pickHearSentence(text) {
  * @param {string} root
  * @param {{text?:string, day?:number, stage?:number, turns?:number, config?:object, log?:Function}} o
  */
+/**
+ * 群聊里**他本人**说的那一句（2026-11-08，用户 m00394）。
+ *
+ * 为什么要单独一条：群聊不涨轮数，`hearTurn` 的「每几轮记一次」在这里永远轮不到；
+ * 而群里他说的话与私聊那句是同一类东西——「关于他的事实」，不该因为换了场合就消失。
+ *
+ * 边界（用户 m00394 定死）：
+ *   - 只记他说的，**群友的话一条都不进**。调用方必须先拿到桥给的 `owner:true`，
+ *     不靠昵称猜主人——猜错一次，就是把她对他的记忆写歪。
+ *   - 进记忆、**不进生命体征**：事件带 `scene:'group'`，`isContactEvent` 会把它
+ *     排除在「他来过」之外。群里聊两句不算他来找过她，否则冷落检测永远不触发。
+ *   - 仍然只留一句原话（`pickHearSentence`），不解释、不写摘要。
+ *   - 「记你原话的间隔」设成 0 时群里也不记（0.9.5 新加的群聊旁听原来不读这个设置）。
+ *     设置页写的是「0 为不记」，私聊停了、群里照记就和那句话对不上。群聊不涨轮数，
+ *     所以只认 0 这一档，不按间隔跳（设置说明里也写了群聊不按间隔）。
+ *     调用方没带 config 时自己读一份。
+ *
+ * 永不抛：记账失败只 log，不能连累对话。
+ */
+export async function rememberGroupWord(root, o = {}) {
+  const log = o.log ?? (() => {})
+  let config = o.config
+  if (config === undefined) config = await loadConfig(root).then((r) => r?.config).catch(() => null)
+  const every = Number(config?.memory?.hearEvery ?? HEAR_EVERY)
+  if (!(every > 0)) return { written: false, why: 'off' }
+  const sentence = pickHearSentence(o.text)
+  if (!sentence) return { written: false, why: 'nothing-to-keep' }
+  try {
+    const ev = await appendEvent(
+      {
+        type: 'heard',
+        text: sentence,
+        scene: 'group',
+        ...(o.sessionId ? { sessionId: String(o.sessionId) } : {}),
+      },
+      { day: Number(o.day ?? 0), stage: Number(o.stage ?? 1), source: 'system' },
+      root,
+    )
+    return { written: true, id: ev.id, text: sentence }
+  } catch (err) {
+    log('hear · 群里那句没记下', err?.message ?? err)
+    return { written: false, why: 'failed' }
+  }
+}
+
 export async function hearTurn(root, o = {}) {
   const log = o.log ?? (() => {})
   const every = Number(o.config?.memory?.hearEvery ?? HEAR_EVERY)
@@ -60,15 +135,19 @@ export async function hearTurn(root, o = {}) {
   // 「离上次记过去了几轮」而不是「turns 能不能被 every 整除」：
   // 后者从装插件那天开始算，旁听后装上的话要等很久才轮到一次（本机实测 0.8.0
   // 装上时 turns 已经 4，下一次整除是 6，中间看着像功能没生效）。2026-10-31。
-  const last = await hearMark(root)
+  const last = await hearMark(root, { turns })
   if (turns - last < every) return { written: false, why: 'not-this-turn' }
 
   const sentence = pickHearSentence(o.text)
   if (!sentence) return { written: false, why: 'nothing-to-keep' }
 
   try {
+    // 带上这条会话的 id（2026-11-08，用户 m01199）：出门/请神结束时算「这一趟多了什么」，
+    // 是按「开始时间 + 这一趟的会话 id」取的；没有 id 的条目一律当时间窗内的，
+    // 于是家里记下的这句原话会混进那趟的清单，被人一划就当成那趟的东西标掉。
+    // 家里这条也是「他说过什么」，不该跟着别人的一趟一起不算。
     const ev = await appendEvent(
-      { type: 'heard', text: sentence },
+      { type: 'heard', text: sentence, ...(o.sessionId ? { sessionId: String(o.sessionId) } : {}) },
       { day: Number(o.day ?? 0), stage: Number(o.stage ?? 1), source: 'system' },
       root,
     )

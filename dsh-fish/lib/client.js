@@ -27,6 +27,24 @@ window.__ModuleLoader__.load({
     const API = '/dsh-fish'
     const NS = 'fish'
 
+    // 「查多久的记录」的选项与本地存键（2026-11-07，用户反馈）。
+    // 选项必须与服务端 /history 的夹值一致：以前这里给到 365，而 observe.js 与
+    // history.js 都 `Math.min(180, …)`——选「一年」实际只拿到半年。现在两边都到 366。
+    const HIST_DAYS_OPTIONS = [1, 7, 14, 30, 90, 180, 365]
+    const HIST_DAYS_KEY = `${NS}.histDays`
+    // 存/取「查多久的记录」（2026-11-07，用户反馈）：以前它只是组件里的 useState(14)，
+    // 关掉设置页再打开就回到 14，看起来像配置丢了。浏览器里存 localStorage；
+    // 宿主测试环境没有它（或隐私模式不让写），退回去也不影响别处。
+    const readHistDays = () => {
+      try {
+        const n = Number(globalThis.localStorage?.getItem?.(HIST_DAYS_KEY))
+        return HIST_DAYS_OPTIONS.includes(n) ? n : 14
+      } catch { return 14 }
+    }
+    const storeHistDays = (n) => {
+      try { globalThis.localStorage?.setItem?.(HIST_DAYS_KEY, String(n)) } catch { /* 存不下就算了 */ }
+    }
+
     // ------------------------------------------------- 工具名白名单（2026-10-24）
     // 客户端就地实现一份，规则与 lib/settings.js 的 validateToolNames 一致
     // （那份是 node 模块，这边只能 require('react')，拿不到）。
@@ -75,6 +93,13 @@ window.__ModuleLoader__.load({
       '.dfish h2{margin:0;font-size:16px;font-weight:500;line-height:24px}',
       '.dfish .sub{color:var(--dsw-alias-label-tertiary);font-size:12.5px;line-height:19px;margin:0}',
       '.dfish .card{border:.5px solid var(--dsw-alias-border-l2);border-radius:10px;padding:12px 14px}',
+      '.dfish details.adv{grid-column:1/-1;margin-top:6px}',
+      '.dfish details.adv>summary{cursor:pointer;font-size:12.5px;color:var(--dsw-alias-label-tertiary);list-style:none}',
+      '.dfish details.adv>summary::-webkit-details-marker{display:none}',
+      '.dfish details.adv>summary::before{content:"▸ ";}',
+      '.dfish details.adv[open]>summary::before{content:"▾ ";}',
+      '.dfish details.adv>summary:hover{color:var(--dsw-alias-label-primary)}',
+      '.dfish details.adv .advbody{margin-top:8px;display:flex;flex-direction:column;gap:8px}',
       '.dfish .card>h3{margin:0 0 8px;font-size:12px;font-weight:600;letter-spacing:.06em;color:var(--dsw-alias-label-tertiary);text-transform:uppercase}',
       '.dfish .kv{display:grid;grid-template-columns:auto 1fr;gap:5px 14px;font-size:13px;line-height:19px}',
       '.dfish .kv b{color:var(--dsw-alias-label-tertiary);font-weight:400}',
@@ -143,7 +168,8 @@ window.__ModuleLoader__.load({
       '.dfish .fld{display:flex;flex-direction:column;gap:5px;min-width:0}',
       '.dfish .fl{display:flex;flex-direction:column;gap:2px}',
       '.dfish .flabel{font-size:13px;line-height:19px}',
-      '.dfish .fhint{font-size:11.5px;line-height:16px;color:var(--dsw-alias-label-tertiary)}',
+      // 2026-11-08：hint 里可以用换行分段（E9 那行挑评论的规则要单独一行）。
+      '.dfish .fhint{font-size:11.5px;line-height:16px;color:var(--dsw-alias-label-tertiary);white-space:pre-line}',
       '.dfish .hint{font-size:11.5px;line-height:17px;color:var(--dsw-alias-label-tertiary);margin:0}',
       '.dfish .warn{font-size:12px;line-height:18px;color:#b8860b;margin:6px 0}',
       // 下拉框（2026-10-25 用户真机反馈：暗色下「只有一个白条」，字全看不见）。
@@ -270,7 +296,7 @@ window.__ModuleLoader__.load({
       if (!v) return '—'
       const recent = Number(v.recent ?? 0)
       const older = Number(v.older ?? 0)
-      if (!recent) return '最近一周没说过话'
+      if (!recent) return '最近一周没写下自己的话'
       if (!older) return '还没有七天前的老话可比'
       const n = Number(v.score)
       return Number.isFinite(n) ? n.toFixed(2) : '—'
@@ -293,8 +319,42 @@ window.__ModuleLoader__.load({
         body: JSON.stringify(body == null ? {} : body),
       })
       const j = await r.json().catch(() => ({}))
-      if (!r.ok) throw new Error(j.error || `HTTP ${r.status}`)
+      if (!r.ok) {
+        // 有些失败要带着后端给的名单再决定下一步（恢复撞上碎字文件，issue #65）。
+        const err = new Error(j.error || `HTTP ${r.status}`)
+        err.payload = j
+        err.status = r.status
+        throw err
+      }
       return j
+    }
+
+    // 给人看的大小：和 lib/backup.js 的 sizeText 同一个写法（1MB 以上写 MB，十进制，
+    // 留一位小数、往上取，刚过上限的包不会显示成和上限一样大）。
+    function mbText(bytes) {
+      const n = Math.max(0, Number(bytes) || 0)
+      if (n >= 1000000) return `${Math.ceil(n / 100000) / 10}MB`
+      return `${Math.max(1, Math.ceil(n / 1000))}KB`
+    }
+
+    // 回执里的名单：最多列前 10 条，剩下的报个数。total 是真实条数（恢复接口只带前 200 条）。
+    // 一下列几千条，一句回执就成了一大段；顺序由后端排好（丢了找不回来的 owner.json、日记这类在前）。
+    function someOf(list, total) {
+      const all = Array.isArray(list) ? list : []
+      const n = Math.max(Number(total) || 0, all.length)
+      const shown = all.slice(0, 10)
+      return shown.join('、') + (n > shown.length ? `，还有 ${n - shown.length} 个没列出来，完整名单在备份文件的 skipped 里` : '')
+    }
+
+    // 没打进包的文件怎么说：有名字的照 someOf 列；事件流顶到恢复上限附近时，
+    // 包里连说明行都写不下，后端只记了个数（skippedUnlisted），这几个单独说一句。
+    // named 是有名字的真实条数（恢复接口的名单只带前 200 条）。
+    function missingText(list, named, unlisted) {
+      const listed = someOf(list, named)
+      const n = Math.max(0, Number(unlisted) || 0)
+      if (!n) return listed
+      const why = '（再写就超过「从备份恢复」一次能收的大小）'
+      return listed ? `${listed}；另有 ${n} 个连名字都写不进包里${why}` : `包里连它们的名字都写不下${why}`
     }
 
     // ---------------------------------------------------------------- 组件
@@ -339,6 +399,9 @@ window.__ModuleLoader__.load({
       const [toolsBlocked, setToolsBlocked] = useState([])
       // 她自己本来就有的那几件（服务端给的真名单，不是界面硬编码）。
       const [toolsHerTools, setToolsHerTools] = useState([])
+      // 只在特定场合才交给她的那几件（比如出门才用得上的 bring_back）。
+      // 它们也是她的工具，只是不在家里的工具面里——单列一组，别让它们看起来像丢了。
+      const [toolsHerScene, setToolsHerScene] = useState([])
       // 工具分组的展开状态（2026-11-04，用户反馈）：真机上一百多个名字全摊开，
       // 等于没有界面。默认全收起来，点哪个前缀才展开哪一组。
       const [toolsOpenFams, setToolsOpenFams] = useState({})
@@ -364,6 +427,22 @@ window.__ModuleLoader__.load({
       const [note, setNote] = useState('')
       // 设置界面重做（2026-10-23）：当前页 + 新增的几个环境项
       const [tab, setTab] = useState('now')
+      // 恢复撞上碎字文件时，后端回的「要你拿主意」那张清单（issue #65）：{ obj, files, count }。
+      // 放在 tab 后面（上面的规矩）：测试按下标找 tab，别把它挤走。
+      const [restoreBad, setRestoreBad] = useState(null)
+      // 这几个放在 tab 后面：测试按下标找 tab（test/client.test.mjs），别把它挤走。
+      // 这一局收窄真在管的那两份（/tools 的 allowNow / effective，issue #69 第 9 条）。
+      // 她自己的工具按它分成「在手上」和「这一局不在手上」；null = 不知道，或收窄这一局没在管。
+      const [toolsAllowNow, setToolsAllowNow] = useState(null)
+      const [toolsEffective, setToolsEffective] = useState(null)
+      // /tools 读没读成：'' 还没回来、'ok' 读到了、'fail' 没读成。
+      // 拿不到名单要照实说，不能说成「她还没开过会话」。
+      const [toolsLoad, setToolsLoad] = useState('')
+      // /tools 回没回 allowNow 这一栏（回 null 也算回了）：没回就不知道这一局收窄在不在管，
+      // 工具卡只能按开关说。skippedSure 跟自检同一个判据：false 时没下给 restrict 的名字
+      // 说不准在不在她手上（宿主没给 visible），null = 还没真下过。
+      const [toolsRunKnown, setToolsRunKnown] = useState(false)
+      const [toolsSkippedSure, setToolsSkippedSure] = useState(null)
       const [growthDaysUi, setGrowthDaysUi] = useState(30)
       const [diaryKeep, setDiaryKeep] = useState(0)
       const [browseDeepRead, setBrowseDeepRead] = useState(6)
@@ -390,6 +469,9 @@ window.__ModuleLoader__.load({
       const [proactiveOn, setProactiveOn] = useState(false)
       const [proactiveMax, setProactiveMax] = useState(2)
       const [proactiveIdle, setProactiveIdle] = useState(6)
+      // 「安静多久才搭话」停手 700ms 再存（issue #69）：等待中的那次，和盘上现在的值
+      const proactiveIdleTimer = useRef(null)
+      const proactiveIdleSaved = useRef(null)
       const [proactiveTools, setProactiveTools] = useState('')
       const proactiveToolsTimer = useRef(null)
       const [proactiveCompact, setProactiveCompact] = useState(true)
@@ -406,6 +488,10 @@ window.__ModuleLoader__.load({
       const [worldCity, setWorldCity] = useState('')
       // 刷站（全是环境参数：她今天能不能出门、一次看见几条，不是她爱看什么）
       const [browseOn, setBrowseOn] = useState(true)
+      // 2026-11-07（用户 m00365）：两颗开关是两件事——
+      //   biliOn  = 她能不能自己出门看 B 站（bili_look / bili_watch / bili_speak）
+      //   browseOn = 家里要不要按时间替她逛（安静刷，只记账不叫醒）
+      const [biliOn, setBiliOn] = useState(true)
       const [browsePerDay, setBrowsePerDay] = useState(1)
       const [browseTopN, setBrowseTopN] = useState(4)
       const [browseDanmaku, setBrowseDanmaku] = useState(6)
@@ -427,7 +513,8 @@ window.__ModuleLoader__.load({
       // 时段（2026-10-23 加）：醒来 / 上网 / 说话，三段各自可调
       const [wakeFrom, setWakeFrom] = useState('20:00')
       const [wakeTo, setWakeTo] = useState('23:00')
-      const [browseFrom, setBrowseFrom] = useState('08:00')
+      // 上网时段没单独配 = 跟着醒来时段（issue #86 第 2 条），所以初值就是醒来那两个数
+      const [browseFrom, setBrowseFrom] = useState('20:00')
       const [browseTo, setBrowseTo] = useState('23:00')
       const [commentFrom, setCommentFrom] = useState('20:00')
       const [commentTo, setCommentTo] = useState('23:00')
@@ -442,7 +529,16 @@ window.__ModuleLoader__.load({
       const [importNote, setImportNote] = useState('')
       // 看过什么 / 自检 / 风控（2026-10-23 加）
       const [hist, setHist] = useState({ groups: [], total: 0 })
-      const [histDays, setHistDays] = useState(14)
+      // 2026-11-07（用户反馈）：初值从 localStorage 读回来，别再写死 14。
+      const [histDays, setHistDays] = useState(readHistDays)
+      // load() 的依赖是空数组，闭包里永远只有挂载时那个 histDays——凡是「现在这个天数」
+      // 都得走 ref，不能直接读 state（改了也读不到）。
+      const histDaysRef = useRef(histDays)
+      // 当前选的天数没读到时的原因（issue #69）。这时列表里留着的要么是别的天数的、
+      // 要么什么都没有，都不能当成「共 0 天」「还没有记录」摆出来。
+      const [histErr, setHistErr] = useState('')
+      // 列表里现在摆的是哪个天数的（读到才记）。已经摆着当前天数的，重读失败一次不收起来。
+      const histShown = useRef(null)
       const [checks, setChecks] = useState(null)
       const [checking, setChecking] = useState(false)
       const [risk, setRisk] = useState(null)
@@ -488,6 +584,11 @@ window.__ModuleLoader__.load({
       // 失败是一个要处理的状态，放在页签栏上方，一句人话 + 一行技术信息，自己点掉。
       // 尤其不能让失败去占「改完就生效」那条说明的位置——两句摆在一起自相矛盾。
       const [saveFail, setSaveFail] = useState('')
+      // 这次失败是不是数字越界。失败框按这一次失败的原因选那句人话，不在渲染时现查输入框：
+      // 越界的数还停在框里时，开关那几条单独提交也可能因为断网失败，那时说「数超出范围」就说错了原因。
+      const [saveFailRange, setSaveFailRange] = useState(false)
+      const failSave = (msg, range = false) => { setSaveFailRange(range); setSaveFail(msg) }
+      const failRange = (bad) => failSave(`「${bad}」这个数不在允许范围里，所以没有写进去。`, true)
       // 保存时被跳过的工具名（2026-10-31，issue #14 @ming-fish）。
       // 服务端不再因为一个「这台机器上没有的名字」把整张表拒掉，而是丢掉它、其余照存。
       // 丢掉的东西必须说出来——否则用户以为自己设的还在，实际悄悄少了一个。
@@ -500,7 +601,11 @@ window.__ModuleLoader__.load({
       const savedTimer = useRef(null)
       const flashSaved = () => {
         setAutoNote(`已保存 ${new Date().toTimeString().slice(0, 8)}`)
-        setSaveFail('')
+        // 开关、日记这几项是单独提交的：它们存上了，不等于框里那个越界的数也存上了。
+        // 越界的数还在，失败框就接着说它（自动保存那边 cfgSig 没变，不会再查一次）。
+        const bad = badNumber()
+        if (bad) failRange(bad)
+        else setSaveFail('')
         clearTimeout(savedTimer.current)
         savedTimer.current = setTimeout(() => setAutoNote(''), 2500)
       }
@@ -594,10 +699,75 @@ window.__ModuleLoader__.load({
         return () => clearInterval(id)
       }, [qr?.key, qr?.expiresAt])
 
+      // 出门（用户 m07453）与请神（2026-10-28）两页的 state。
+      // 必须写在这里：下面「读不到状态」会提前 return，return 之后再调 hook，
+      // 第一次读 /state 失败时第二次渲染就少了这十几个 hook，React 直接抛错，
+      // 整节连「读不到状态。」都显示不出来（issue #69）。
+      const [outing, setOuting] = useState(null)
+      const [outingBusy, setOutingBusy] = useState(false)
+      const [outingMsg, setOutingMsg] = useState('')
+      const [outingPick, setOutingPick] = useState('')
+      const [outingEndAsk, setOutingEndAsk] = useState(false)
+      // 回家卡上被取消勾选的条目 id（默认全勾 = 空数组）
+      const [outingDrop, setOutingDrop] = useState([])
+      // 复用同一趟（0.6.16，用户 m01613）：接着这个工作区上次那条会话。
+      const [outingReuse, setOutingReuse] = useState(false)
+      const [possess, setPossess] = useState(null)
+      const [possessBusy, setPossessBusy] = useState(false)
+      const [possessMsg, setPossessMsg] = useState('')
+      const [possessPick, setPossessPick] = useState('')
+      // 回家审查（m02241 第⑤条）：结束请神前先把这趟多出来的条目摆出来。
+      // 默认全收下；取消勾选的会写成 possess-reject: 标记，之后派生时跳过。
+      const [possessEndAsk, setPossessEndAsk] = useState(false)
+      const [possessDrop, setPossessDrop] = useState([])
+
+      // /config 灌进界面一次就加一。自动保存靠它在「盘上的值刚灌进来」那一帧重记基线：
+      // /state 先回来、/config 后到，只在 /state 那一帧记基线的话，/config 一到界面就和基线不同，
+      // 什么都没动也会整表回写一遍（issue #69）。值没变时 cfgSig 不变、effect 不跑，所以要单独一个数。
+      const [cfgLoads, setCfgLoads] = useState(0)
+      // cfgLoads 还是 0（/config 一次都没灌进来：打开页面时 /beliefs、/diary、/config、/browse
+      // 有一个失败，Promise.all 整个拒掉）时，界面上除了 /state 带的那几项都还是初值，
+      // 整表写下去会把盘上的 atOwner 写回 true、屏蔽词和工具白名单清空。这时不整表保存，用这句说清楚。
+      const CFG_MISSING = '设置还没从盘上读全，这次不整表保存，免得拿界面上的初值盖掉盘上的设置。重新打开这一页再改。'
+
+      // 读一次「看过的视频」（issue #69）。回来时天数已经换了（在路上时用户又选了别的）就丢掉，
+      // 别盖住新选的列表；当前这个天数没读到、列表里也不是这个天数的，就记下原因。
+      const readHist = async (days) => {
+        try {
+          const r = await jget(`/history?days=${days}`)
+          if (histDaysRef.current !== days) return
+          histShown.current = days
+          setHist(r)
+          setHistErr('')
+        } catch (e) {
+          if (histDaysRef.current === days && histShown.current !== days) setHistErr(e.message)
+        }
+      }
+
       const load = useCallback(async () => {
         setErr('')
         // 重新读盘之后要重新记基线（撤销 / 刷新都走这里）。
         baselinePending.current = true
+        // 工具名单（2026-11-04，issue #20）：以前只在点「保存设置」时才拉一次，
+        // 于是页面一打开，分组清单永远是空的——用户看不出这台机器上到底有哪些工具，
+        // 也看不出哪几个真被挡过。这里跟其它只读卡片一样静默失败，不影响别处。
+        // 放在最前面单独发：排在 /state、Promise.all 后面时，前面哪一个失败它就不发，
+        // 工具卡会一直停在「读取中」。
+        const markToolsFail = () => setToolsLoad((v) => (v === 'ok' ? v : 'fail'))
+        jget('/tools').then((r) => {
+          // 回了个空体也算没读到（之前读到过就留着那份）。
+          if (!r) return markToolsFail()
+          setToolsKnown(Array.isArray(r.known) ? r.known : null)
+          setToolsOwnLayer(Array.isArray(r.ownLayer) ? r.ownLayer : [])
+          setToolsHerTools(Array.isArray(r.herTools) ? r.herTools : [])
+          setToolsHerScene(Array.isArray(r.herSceneTools) ? r.herSceneTools : [])
+          setToolsBlocked(Array.isArray(r.blocked) ? r.blocked : [])
+          setToolsAllowNow(Array.isArray(r.allowNow) ? r.allowNow : null)
+          setToolsEffective(Array.isArray(r.effective) ? r.effective : null)
+          setToolsRunKnown(Object.prototype.hasOwnProperty.call(r, 'allowNow'))
+          setToolsSkippedSure(typeof r.skippedSure === 'boolean' ? r.skippedSure : null)
+          setToolsLoad('ok')
+        }).catch(markToolsFail)
         try {
           const s = await jget('/state')
           setState(s)
@@ -619,6 +789,7 @@ window.__ModuleLoader__.load({
             setProactiveOn(pr.enabled === true)
             setProactiveMax(Number(pr.maxPerDay ?? 2))
             setProactiveIdle(Number(pr.minIdleHours ?? 6))
+            proactiveIdleSaved.current = Number(pr.minIdleHours ?? 6)
             setProactiveTools(Array.isArray(pr.sendTools) ? pr.sendTools.join(', ') : '')
             setProactiveCompact(pr.foldSilent !== false)
             setProactiveSeen(pr.idleCountsSeen === true)
@@ -666,23 +837,15 @@ window.__ModuleLoader__.load({
           // 上下文与记忆：单独取，失败不影响其它卡片
           jget('/memory').then(setMem).catch(() => {})
           // 她以前看过什么 / 风控状态：都是只读，失败不影响其它卡片
-          jget(`/history?days=${histDays}`).then(setHist).catch(() => {})
+          // 天数走 ref：load() 的依赖是空数组，读 state 只会读到挂载时那个值。
+          // 晚到、失败怎么处理见 readHist（issue #69）。
+          readHist(histDaysRef.current)
           jget('/risk').then(setRisk).catch(() => {})
           jget('/away').then(setAway).catch(() => {})
           // 头像元信息（有没有、多大）。没有就是空圈，不回落任何内置图。
           jget('/avatar/info').then((r) => {
             setAvatarPresent(Boolean(r && r.present))
             setAvatarBytes(Number(r && r.bytes) || 0)
-          }).catch(() => {})
-          // 工具名单（2026-11-04，issue #20）：以前只在点「保存设置」时才拉一次，
-          // 于是页面一打开，分组清单永远是空的——用户看不出这台机器上到底有哪些工具，
-          // 也看不出哪几个真被挡过。这里跟其它只读卡片一样静默失败，不影响别处。
-          jget('/tools').then((r) => {
-            if (!r) return
-            setToolsKnown(Array.isArray(r.known) ? r.known : null)
-            setToolsOwnLayer(Array.isArray(r.ownLayer) ? r.ownLayer : [])
-            setToolsHerTools(Array.isArray(r.herTools) ? r.herTools : [])
-            setToolsBlocked(Array.isArray(r.blocked) ? r.blocked : [])
           }).catch(() => {})
           // 规则与解禁（R3）：失败不影响其它卡片
           jget('/rules').then(setRules).catch(() => {})
@@ -701,6 +864,10 @@ window.__ModuleLoader__.load({
           setQuestionsPerDay(Number(cfg.daily?.questions ?? 1))
           setAvoidText(((cfg.avoid?.keywords) || []).join('，'))
           setWorldCity(String(cfg.world?.city ?? ''))
+          // 2026-11-07（用户反馈 + m00365）：拆成两颗开关，各读各的闸门。
+          // bili.enabled 管「她自己能不能出门看」；browse.enabled 管「家里会不会按时间替她逛」。
+          // 以前合成一颗，关掉之后她照样能翻（甚至能看画面），用户看到的就是一颗假开关。
+          setBiliOn(cfg.bili?.enabled !== false)
           setBrowseOn(cfg.browse?.enabled !== false)
           setBrowsePerDay(Number(cfg.browse?.perDay ?? 1))
           setBrowseTopN(Number(cfg.browse?.topN ?? 4))
@@ -716,6 +883,10 @@ window.__ModuleLoader__.load({
           setCommentPerDay(Number(cfg.comment?.perDay ?? 1))
           setCommentReplyPerDay(Number(cfg.comment?.replyPerDay ?? 2))
           setCommentReplyTo(cfg.comment?.replyToReplies !== false)
+          // 「评论开头 @ 你」也随整表提交，就得和别的项一样从 /config 读（issue #69）。
+          // 以前只在下面 /owner 成功时才设，/owner 一失败，界面停在初值 true，
+          // 下一次自动保存就把盘上关着的它写回 true。判据和 GET /owner 同一个。
+          setAtOwner(cfg.comment?.atOwner !== false)
           setCommentScanMin(Number(cfg.comment?.scanEveryMin ?? 30))
           setRotateAfter(Number(cfg.chat?.rotateAfter ?? 40))
           setRotateWhenKB(Number(cfg.chat?.rotateWhenKB ?? 1024))
@@ -747,22 +918,29 @@ window.__ModuleLoader__.load({
           // 时段：醒来 / 上网 / 说话。坏值由服务端兜底，这里只做展示。
           const w0 = Array.isArray(cfg.window) ? cfg.window : ['20:00', '23:00']
           setWakeFrom(w0[0]); setWakeTo(w0[1])
-          const b0 = Array.isArray(cfg.browse?.window) ? cfg.browse.window : ['08:00', '23:00']
+          // 上网时段：没单独配（null）就是跟着醒来时段，界面上直接显示醒来那两个数。
+          const b0 = Array.isArray(cfg.browse?.window) ? cfg.browse.window : w0
           setBrowseFrom(b0[0]); setBrowseTo(b0[1])
           const c0 = Array.isArray(cfg.comment?.window) ? cfg.comment.window : ['20:00', '23:00']
           setCommentFrom(c0[0]); setCommentTo(c0[1])
           // 走到这里说明配置的每一项都灌进表单了。上面任何一行抛异常，
           // 这个标记就留 false —— save() 会拒绝整表提交（见 cfgLoaded 的注释）。
           cfgLoaded.current = true
+          // 盘上的值刚灌进界面：这一帧重记基线，不当成「改过了」再写回去（见 cfgLoads）。
+          baselinePending.current = true
+          setCfgLoads((n) => n + 1)
+          // 读全了：之前那句「还没从盘上读全」不再成立，收起来（别的失败原因照留）
+          setSaveFail((m) => (m === CFG_MISSING ? '' : m))
           // 说话状态：单独取，失败不影响其它卡片
           jget('/comment').then(setCm).catch(() => {})
           jget('/reset').then(setResetInfo).catch(() => {})
           // 主人是谁（uid / 昵称 / 有没有 cookie）。cookie 原文永远不下发。
+          // 「评论开头 @ 你」只从上面的 /config 取，这里不再设：/owner 晚回来时带的是发请求
+          // 那一刻盘上的值，会把用户刚拨过的开关翻回去，自动保存再把旧值写回盘（issue #69）。
           jget('/owner').then((o) => {
             setOw(o)
             setOwMid(String(o?.mid ?? ''))
             setOwName(String(o?.name ?? ''))
-            setAtOwner(o?.atOwner !== false)
           }).catch(() => {})
         } catch (e) {
           setErr(e.message)
@@ -770,6 +948,22 @@ window.__ModuleLoader__.load({
       }, [])
 
       useEffect(() => { load() }, [load])
+
+      // 「查多久的记录」改了立刻重列（2026-11-07，用户反馈）。
+      // 以前只 setHistDays，列表要等下一次整页刷新才可能变——而整页刷新又把这个值
+      // 重置回 14，于是「改了没反应、关掉再开还是 14」两件事一起发生。
+      const pickHistDays = useCallback(async (v) => {
+        const n = Number(v)
+        const days = HIST_DAYS_OPTIONS.includes(n) ? n : 14
+        histDaysRef.current = days
+        setHistDays(days)
+        setHistPage(0)
+        setHistErr('')
+        storeHistDays(days)
+        // 先选 90 再选 7，90 那次晚到时下拉框是 7、列表却是 90 天的：readHist 对不上就丢掉（issue #69）。
+        // 只读卡片，失败不打断别处，只在这张卡里说没读到。
+        await readHist(days)
+      }, [])
 
       // 在线状态每 30 秒刷一次；页面在后台就不轮询（省电，也不制造无谓请求）。
       // 2026-10-23 加：他要能看见「醒了但没做什么」这种状态，而不是只有结果。
@@ -850,9 +1044,12 @@ window.__ModuleLoader__.load({
         // 外面：一个坐标，不是身份。空着只是查不了天气，date 不受影响。
         world: { city: worldCity.trim() },
         window: [wakeFrom, wakeTo],
+        // 2026-11-07（用户反馈）：能上网这颗开关要写到两个地方——
+        // bili.enabled 是 0.9.x 下 bili_look / bili_watch 真正认的闸门；
+        // browse.enabled 留着给老参数（以及以后要不要恢复自动刷的那个决定）。
         browse: { enabled: browseOn, perDay: Number(browsePerDay), topN: Number(browseTopN), deepRead: Number(browseDeepRead), danmaku: Number(browseDanmaku), voices: Boolean(browseVoices), window: [browseFrom, browseTo] },
         video: { enabled: videoOn, perDay: Number(videoPerDay), offPeakPerDay: Number(videoOffPeak) },
-        bili: { minIntervalMs: Number(biliMinGap), jitterMs: Number(biliJitter) },
+        bili: { enabled: biliOn, minIntervalMs: Number(biliMinGap), jitterMs: Number(biliJitter) },
         notify: { enabled: notifyOn },
         chat: { rotateAfter: Number(rotateAfter), rotateWhenKB: Number(rotateWhenKB), replyChars: Number(replyChars) },
         tools: { restrict: Boolean(toolsRestrict), allow: toolsAllowSaved },
@@ -871,31 +1068,33 @@ window.__ModuleLoader__.load({
       // 数字框可能停在半截（清空、只打了一个「1」）。这种值不写盘，
       // 否则服务端 clamp 会静默改成下限，用户以为自己输的就是生效值。
       const NUM_BOUNDS = [
-        ['缺席判定天数', absent, 1, 30],
+        ['冷落天数', absent, 1, 30],
         ['每天醒几次', wakes, 0, 4],
-        ['每天最多几条事件', eventsPerDay, 0, 5],
-        ['每天最多几个问题', questionsPerDay, 0, 5],
-        ['成长天数', growthDaysUi, 7, 180],
+        ['每天最多几条事件', eventsPerDay, 0, 6],
+        ['每天最多几个问题', questionsPerDay, 0, 6],
+        ['成长周期', growthDaysUi, 7, 180],
         // 日记三项不在这里：它们由 patchDiary 单独提交（整表保存会把开关写回旧值）。
-        ['最短屏蔽时长', avoidMinDur, 0, 3600],
-        ['每天看几次', browsePerDay, 0, 4],
-        ['每次几条', browseTopN, 1, 20],
-        ['深读几条评论', browseDeepRead, 0, 40],
-        ['弹幕几条', browseDanmaku, 0, 30],
-        ['请求间隔', biliMinGap, 200, 120000],
-        ['请求抖动', biliJitter, 0, 60000],
-        ['高峰时段每天看几条', videoPerDay, 0, 6],
-        ['空闲时段每天看几条', videoOffPeak, 0, 12],
-        ['多少轮换会话', rotateAfter, 0, 500],
-        ['会话多大换新（KB）', rotateWhenKB, 0, 5000],
-        ['每轮最多写多少字', replyChars, 0, 2000],
-        ['上下文上限', docBudget, 600, 4000],
-        ['一次看见几条', beliefsShown, 1, 8],
-        ['几天想一次', sleepEvery, 0, 60],
-        ['留几条自述', sleepKeep, 0, 100],
-        ['每天几条评论', commentPerDay, 0, 5],
-        ['每天回几条', commentReplyPerDay, 0, 10],
-        ['隔几分钟扫', commentScanMin, 5, 720],
+        ['最短时长', avoidMinDur, 0, 3600],
+        ['每天最多刷几次', browsePerDay, 0, 4],
+        ['每次翻几条', browseTopN, 1, 20],
+        // issue #67：服务端夹值就是 0–20，表里别再说能到 40。
+        ['每条读几条热评', browseDeepRead, 0, 20],
+        ['每条读几条弹幕', browseDanmaku, 0, 30],
+        ['两次请求最少隔多久', biliMinGap, 200, 120000],
+        ['随机多等', biliJitter, 0, 60000],
+        ['高峰时段每天最多几条', videoPerDay, 0, 6],
+        ['空闲时段每天最多几条', videoOffPeak, 0, 12],
+        ['聊满多少轮换新会话', rotateAfter, 0, 500],
+        ['会话内容多大换新', rotateWhenKB, 0, 5000],
+        ['她一轮最多写多少字', replyChars, 0, 2000],
+        ['身份段字数', docBudget, 600, 4000],
+        ['眼前的判断条数', beliefsShown, 1, 8],
+        ['回头想间隔', sleepEvery, 0, 60],
+        ['总共留几条自述', sleepKeep, 0, 100],
+        ['记你原话的间隔', hearEvery, 0, 50],
+        ['每天评论几条', commentPerDay, 0, 5],
+        ['每天回复几条', commentReplyPerDay, 0, 10],
+        ['查回复间隔', commentScanMin, 5, 720],
       ]
       const badNumber = () => {
         for (const [label, value, lo, hi] of NUM_BOUNDS) {
@@ -918,7 +1117,7 @@ window.__ModuleLoader__.load({
           if (silent) flashSaved()
           else { setNote('已保存。下一轮 tick 生效。'); await load() }
         } catch (e) {
-          if (silent) setSaveFail(e.message)
+          if (silent) failSave(e.message)
           else setErr(e.message)
         } finally { if (!silent) setBusy('') }
       }
@@ -933,7 +1132,7 @@ window.__ModuleLoader__.load({
         try {
           await jpost('/config', { diary: patch })
           flashSaved()
-        } catch (e) { setSaveFail(e.message) } finally { diaryPending.current -= 1 }
+        } catch (e) { failSave(e.message) } finally { diaryPending.current -= 1 }
       }
 
       // 主动说话（0.8.1 本机实验）：同样只提交改了的那一项，别把别的开关写回旧值。
@@ -941,7 +1140,31 @@ window.__ModuleLoader__.load({
         try {
           await jpost('/config', { proactive: patch })
           flashSaved()
-        } catch (e) { setSaveFail(e.message) }
+          return true
+        } catch (e) { failSave(e.message); return false }
+      }
+
+      // 「安静多久才搭话」（issue #69）：以前每按一个键就单独 POST 一次，离开输入框再写一次；
+      // 从 6 改成 12 会依次写 0、1、12、12，清空那一下服务端夹成 1，停在半截时生效的就是 1 小时。
+      // 现在和「发话工具」一样停手 700ms 再存；清空、不在范围里的不写，
+      // 小数照服务端写盘时的取整先取整，框里也换成那个数；和盘上一样就不再写。
+      const IDLE_HOURS = [1, 24]
+      const pickProactiveIdle = (v) => {
+        setProactiveIdle(v)
+        clearTimeout(proactiveIdleTimer.current)
+        const raw = String(v ?? '').trim()
+        const n = Number(raw)
+        if (!raw || !Number.isFinite(n) || n < IDLE_HOURS[0] || n > IDLE_HOURS[1]) return
+        const hours = Math.round(n)
+        proactiveIdleTimer.current = setTimeout(async () => {
+          // 框里换成要存的那个数：小数取了整，中间有过重读（load）把框改回旧值的，也对回来
+          setProactiveIdle(hours)
+          if (hours === proactiveIdleSaved.current) return
+          proactiveIdleSaved.current = hours
+          const ok = await patchProactive({ minIdleHours: hours })
+          // 没存上：不知道盘上现在是几，下次不管填几都再写
+          if (!ok && proactiveIdleSaved.current === hours) proactiveIdleSaved.current = null
+        }, 700)
       }
 
       // 顶层那三个开关（梦 / 主动性 / 兴趣）：各写各的组，互不覆盖。
@@ -949,20 +1172,22 @@ window.__ModuleLoader__.load({
         try {
           await jpost('/config', { [key]: patch })
           flashSaved()
-        } catch (e) { setSaveFail(e.message) }
+        } catch (e) { failSave(e.message) }
       }
 
       // 改完就生效：任何一项变了，停手 700ms 就写盘（连点加减号也只写一次）。
       const cfgSig = JSON.stringify(buildConfig())
       useEffect(() => {
         if (!state) return
-        // 配置没读成功就绝不自动保存：表单里是默认值，一存就等于把它写进 config.json
-        // （2026-11-03：`setVideoSubs is not defined` 让他的唤醒时段从 18:00 变成 20:00）。
-        if (!cfgLoaded.current) return
+        const bad = badNumber()
+        // 越界的数改回范围里了，失败框就收起来：改回的正好是盘上的值时，下面那句会直接返回、不再写盘，
+        // 框就一直挂着说「超出了允许的范围」。别的原因的失败不在这里收。
+        if (saveFailRange && !bad) failSave('')
         if (baselinePending.current) { baselinePending.current = false; lastSaved.current = cfgSig; return }
         if (cfgSig === lastSaved.current) return
-        const bad = badNumber()
-        if (bad) { setSaveFail(`「${bad}」这个数不在允许范围里，所以没有写进去。`); return }
+        // 越界是眼前的错，先说这个；「还没读全」只是拦着不写盘，别盖过它（issue #95 的用例）。
+        if (bad) { failRange(bad); return }
+        if (!cfgLoads) { failSave(CFG_MISSING); return }
         const t = setTimeout(async () => {
           try {
             const r = await jpost('/config', buildConfig())
@@ -978,10 +1203,10 @@ window.__ModuleLoader__.load({
               setDroppedTools(gone)
             }
             flashSaved()
-          } catch (e) { setSaveFail(e.message) }
+          } catch (e) { failSave(e.message) }
         }, 700)
         return () => clearTimeout(t)
-      }, [cfgSig, state])
+      }, [cfgSig, state, cfgLoads])
 
       const saveTools = async () => {
         setBusy('tools'); setToolsSaveNote(''); setToolsSaveErr('')
@@ -997,6 +1222,12 @@ window.__ModuleLoader__.load({
             own = Array.isArray(r?.ownLayer) ? r.ownLayer : []
             setToolsOwnLayer(own)
             setToolsBlocked(Array.isArray(r?.blocked) ? r.blocked : [])
+            if (Array.isArray(r?.herTools)) setToolsHerTools(r.herTools)
+            setToolsAllowNow(Array.isArray(r?.allowNow) ? r.allowNow : null)
+            setToolsEffective(Array.isArray(r?.effective) ? r.effective : null)
+            setToolsRunKnown(Boolean(r) && Object.prototype.hasOwnProperty.call(r, 'allowNow'))
+            setToolsSkippedSure(typeof r?.skippedSure === 'boolean' ? r.skippedSure : null)
+            setToolsLoad('ok')
           } catch { /* 拿不到就沿用旧名单，只查拼写 */ }
           const check = checkToolNames(toolsAllowText, known)
           if (!check.ok) {
@@ -1014,9 +1245,16 @@ window.__ModuleLoader__.load({
           setToolsAllowSaved(check.names)
           await load()
           const delta = check.names.length - before
-          if (!check.names.length) setToolsSaveNote('存好了。重启之后她只剩自己那几件工具。')
-          else if (delta > 0) setToolsSaveNote(`存好了。重启之后她会多看见 ${delta} 个工具（名单一共 ${check.names.length} 个）。`)
-          else if (delta < 0) setToolsSaveNote(`存好了。重启之后她会少看见 ${-delta} 个工具（名单一共 ${check.names.length} 个）。`)
+          // 回执按收窄开没开分两支（0.9.5 只看名单是不是空的，两头都说反了）：
+          // 收窄关着时白名单不限制她，多填少填都不会让她「多看见」「少看见」什么；
+          // 收窄开着时名单清空，重启之后她只剩自己那几件。
+          if (!toolsRestrict) {
+            setToolsSaveNote(check.names.length
+              ? `存好了。收窄关着，白名单现在不限制她：重启 DSH 后她照样能用全部工具。名单一共 ${check.names.length} 个，打开收窄才按它来。`
+              : '存好了。收窄关着，白名单现在不限制她：重启 DSH 后她照样能用全部工具；打开收窄才按名单来。')
+          } else if (!check.names.length) setToolsSaveNote('存好了。白名单是空的：重启 DSH 之后她只剩自己那几件工具。')
+          else if (delta > 0) setToolsSaveNote(`存好了。重启 DSH 之后她会多看见 ${delta} 个工具（名单一共 ${check.names.length} 个）。`)
+          else if (delta < 0) setToolsSaveNote(`存好了。重启 DSH 之后她会少看见 ${-delta} 个工具（名单一共 ${check.names.length} 个）。`)
           else setToolsSaveNote(`存好了。名单没变，还是 ${check.names.length} 个。`)
           const ownPicked = check.names.filter((n) => own.includes(n))
           if (ownPicked.length) {
@@ -1161,25 +1399,11 @@ window.__ModuleLoader__.load({
         } catch (e) { setOwNote(e.message) } finally { setBusy('') }
       }
 
-      // 本机测试版专用（2026-10-26，用户 m00928）：绕过「今天该不该醒」，直接叫她去刷 B 站。
-      // 存在意义就是验证「她到底能不能刷」——所以不做配额判断、也不看上网时段。
-      // 正式版不渲染这个按钮（服务端 /state 的 dev 由 `.dev` 文件决定）。
-      const browseNow = async () => {
-        setBusy('wake-browse'); setNote('')
-        try {
-          const r = await jpost('/wake?focus=browse')
-          setNote(r.ok ? '叫醒她了，这一轮她会去看 B 站首页。刷新一下能看到她的新会话。' : `没叫：${r.why || ''}`)
-          await load()
-        } catch (e) {
-          setErr(e.message)
-        } finally { setBusy('') }
-      }
-
       const wake = async () => {
         setBusy('wake'); setNote('')
         try {
           const r = await jpost('/wake')
-          setNote(r.ok ? `已叫醒（${r.template}）` : `没叫：${r.why || ''}`)
+          setNote(r.ok ? '已叫醒。' : `没叫：${r.why || ''}`)
           await load()
         } catch (e) {
           setErr(e.message)
@@ -1202,14 +1426,30 @@ window.__ModuleLoader__.load({
         } finally { setBusy('') }
       }
 
+      // 一条规则被驳回几次之后就不再自动提：unlock.js 的 offerLimits 永远给两档冷却（retryDays 两个数），
+      // offerDueDay 在驳回次数到了档数时回 null。cooldownDays 只改天数，不改档数。
+      const RULE_REJECT_MAX = 2
+      const rejectsOf = (ruleId) => (rules?.history || [])
+        .filter((x) => x && x.rule === ruleId && x.verdict === 'reject').length
+
       // ---- R3：裁决她提上来的那张申请 ----
       // 批准会立刻重写身份文档，她下一次开口就看得见"这件事现在可以了"。
       const decide = async (verdict) => {
         setBusy('decide')
         setErr('')
+        // 点之前先记下这条规则已经被驳回过几次：回执要说清这一次是不是最后一次。
+        const rule = rules?.pending?.rule || ''
+        const left = RULE_REJECT_MAX - rejectsOf(rule) - 1
         try {
           const r = await jpost('/decide', { verdict })
           if (r && r.error) throw new Error(r.error)
+          setNote(verdict === 'approve'
+            ? '答应了，下一次开口她就知道这件事现在可以了。'
+            : rules?.offersOn === false
+              ? '记下了「这次不行」。申请通道现在关着，她不会再自动提。'
+              : left > 0
+                ? `记下了「这次不行」。条件还够的话，过几天她可能再提一次；再驳回 ${left} 次就不再自动提。`
+                : '记下了「这次不行」。这条已经驳回到上限，以后她不会再自动提了。')
           await load()
         } catch (e) {
           setErr(e.message || String(e))
@@ -1256,7 +1496,15 @@ window.__ModuleLoader__.load({
           // note 用 <pre class="ok"> 渲染，单行说完；细节放 importNote
           const bits = []
           if (r.name) bits.push(`她现在管你叫「${r.name}」`)
-          if (r.tools?.length) bits.push(`工具白名单 ${r.tools.length} 个`)
+          // 「这次新放行几个」和「名单现在共几个」分开说：只报总数时，原来放行 3 个、
+          // 交接单带 2 个（1 个重复）会写成「工具白名单 4 个」，像是这次带进来 4 个。
+          if (r.toolsError) {
+            // 写配置失败：tools 是交接单里写的那几个，一个都没放行。不能写成「这次新加 0 个」。
+            bits.push(`工具白名单没写进去（${r.toolsError}），交接单里的 ${r.tools?.length ?? 0} 个工具这次都没放行，要的话到「插件」页的「她能用的工具」里自己加`)
+          } else if (r.tools?.length) {
+            const added = Array.isArray(r.toolsAdded) ? r.toolsAdded.length : 0
+            bits.push(`工具白名单这次新加 ${added} 个，现在一共 ${r.tools.length} 个`)
+          }
           setNote(`人设接过来了。${bits.length ? bits.join('，') + '。' : ''}从第 ${r.day} 天开始。`)
           setImportNote('她的人设下一轮就生效（身份是每轮现读的）。工具白名单要重启 DSH 才生效——那是在启动时注册的。')
           await load()
@@ -1294,7 +1542,12 @@ window.__ModuleLoader__.load({
         try {
           const r = await jpost('/reset', { confirm: 'reset' })
           setResetAsk(false)
-          const head = r.movedTo ? `已重开。旧的都在：${r.movedTo}` : (r.note || '已重开。')
+          // issue #65：重开一局之后「能不能接别人养过的」要重新问服务器，
+          // 不然界面还挂着重置前的 canImport:false。
+          setImportInfo(null)
+          // 没搬东西（movedTo 为空）只有一种情况：本来就没有档。不拿服务端的 note 当开头——
+          // 它自己也说了一遍去哪叫醒，和下面那句叠在一起，按钮名字还是旧的。
+          const head = r.movedTo ? `已重开。旧的都在：${r.movedTo}` : '已重开。本来就没有旧档，没有东西要搬。'
           // 单行：这个 note 用 <pre class="ok"> 渲染，换行会撑出一块绿色告示，不如一句话说清。
           // 2026-10-26（m01426 真机反馈）：重置会把新会话建出来，也会顺手叫一声，但**侧栏仍然看不见**——
           // 宿主的 sessionVisible 规则是「空白会话只有成为当前会话才显示」，而插件用 API 建的会话永远
@@ -1303,8 +1556,8 @@ window.__ModuleLoader__.load({
           const tail = r.freshError
             ? ` 新会话没建出来：${r.freshError}`
             : (r.retiredError
-              ? ` 旧会话没收干净：${r.retiredError}。点一下「叫醒大肥鱼」，她开一次口，侧栏里才看得见新会话。`
-              : ' 侧栏这会儿还看不到她——点一下上面的「叫醒大肥鱼」，她开一次口，「跟大肥鱼说话」才会出现在侧栏里。')
+              ? ` 旧会话没收干净：${r.retiredError}。到「状态」页点一下「现在叫醒大肥鱼」，她开一次口，侧栏里才看得见新会话。`
+              : ' 侧栏这会儿还看不到她——到「状态」页点一下「现在叫醒大肥鱼」，她开一次口，「跟大肥鱼说话」才会出现在侧栏里。')
           setNote(`${head}${tail}`)
         } catch (e) {
           setErr(e.message)
@@ -1319,7 +1572,7 @@ window.__ModuleLoader__.load({
           const r = await jpost('/home/rebuild', { confirm: 'rebuild' })
           if (!r.ok) setNote(`没搭成：${r.error || r.note || ''}`)
           else if (r.woke) setNote('搭好了，也叫了她一声——侧栏里等她说出第一句就会出现。')
-          else setNote('搭好了。点一下上面的「现在叫醒大肥鱼」，她开一次口，侧栏里才看得见这条会话。')
+          else setNote('搭好了。到「状态」页点一下「现在叫醒大肥鱼」，她开一次口，侧栏里才看得见这条会话。')
           await load()
         } catch (e) {
           setErr(e.message)
@@ -1448,9 +1701,40 @@ window.__ModuleLoader__.load({
         setToolsSaveErr('')
       }
       const herList = Array.isArray(toolsHerTools) ? toolsHerTools : []
-      const herSet = new Set(herList)
+      // 只在特定场合才交给她的那几件（服务端现算：这一版注册了哪些 + 各自的场合说明）。
+      // 它们不进「她自己本来就有的」那组（那组说的是家里随时能用的），也不能掉进
+      // 「装了但没放行」——用户会以为得在这里点一下才给得了她。
+      const herSceneList = (Array.isArray(toolsHerScene) ? toolsHerScene : [])
+        .map((t) => (typeof t === 'string' ? { name: t, why: '' } : t))
+        .filter((t) => t && t.name)
+      const sceneWhy = new Map(herSceneList.map((t) => [t.name, t.why]))
+      const herSet = new Set([...herList, ...herSceneList.map((t) => t.name)])
       const ownSet = new Set(toolsOwnLayer ?? [])
-      const blockedList = (toolsBlocked ?? []).map((b) => (typeof b === 'string' ? { name: b } : b)).filter((b) => b && b.name)
+      // 她自己的工具这一局在不在她手上（issue #69 第 9 条）：herTools 只说「哪些是她的」，
+      // 守卫放行的是启动时算定的 allowNow，真下给宿主的是 effective。不在这两份里的，
+      // 摆进「不用放行」就是在替守卫撒谎——关着梦启动时的 her_dream、宿主这次没有的 read_image。
+      // 服务端没给 allowNow（收窄这一局没在管，或老版本）时照旧全算在手上。
+      const allowNowList = Array.isArray(toolsAllowNow) ? toolsAllowNow : null
+      const effNowList = Array.isArray(toolsEffective) && toolsEffective.length ? toolsEffective : null
+      const inHandNow = (n) => !allowNowList || (allowNowList.includes(n) && (!effNowList || effNowList.includes(n) || ownSet.has(n)))
+      // 宿主没给 visible（skippedSure 为 false）时，守卫放行、没下给 restrict 的名字分不清是这次没注册，
+      // 还是在她自己那一层（那样她照样看得见）。跟自检「手上的工具」同一个口径：单列一组，不说定论。
+      const unsureNow = (n) => toolsSkippedSure === false && Boolean(allowNowList) && allowNowList.includes(n) &&
+        Boolean(effNowList) && !effNowList.includes(n) && !ownSet.has(n)
+      const herHere = herList.filter(inHandNow)
+      const herUnsure = herList.filter((n) => !inHandNow(n) && unsureNow(n))
+      const herAway = herList.filter((n) => !inHandNow(n) && !unsureNow(n))
+      const herAwaySet = new Set([...herAway, ...herUnsure])
+      // 这一局守卫没放行 her_dream（关着梦启动的）。
+      const dreamHeld = Boolean(allowNowList) && !allowNowList.includes('her_dream')
+      // 这一局收窄在不在管：按 /tools 的 allowNow 说（守卫启动时就定了），不按盘上的开关——
+      // 拨了开关、还没重启的那段时间两者不一样。名单没读到是 null，只能按开关说。
+      const runRestrict = toolsLoad === 'ok' && toolsRunKnown ? Array.isArray(toolsAllowNow) : null
+      const blockedAll = (toolsBlocked ?? []).map((b) => (typeof b === 'string' ? { name: b } : b)).filter((b) => b && b.name)
+      // 她自己的、这一局不在手上的那几件单列一组，被挡的次数挂在那边：
+      // 同一个名字摆两次，一边说「不用放行」一边说「被挡下来过」，用户分不清该信哪个。
+      const blockedCount = new Map(blockedAll.map((b) => [b.name, b.count]))
+      const blockedList = blockedAll.filter((b) => !herAwaySet.has(b.name))
       const blockedSet = new Set(blockedList.map((b) => b.name))
       const knownList = Array.isArray(toolsKnown) ? toolsKnown : []
       // 她自己那几件和 own 层都单独摆，剩下的才是「装了但没放行」的全量名单。
@@ -1496,16 +1780,41 @@ window.__ModuleLoader__.load({
           return next
         })
       }
+      // away：她自己的、这一局没交到她手上的。分三种：
+      //   · 守卫没放行的（allowNow 里没有：新启动时的 her_say 之类）——白名单里填上它，
+      //     存好、重启后守卫就放行，所以能点；
+      //   · her_dream 例外：#64 定下收窄里的梦跟着「允许她记梦」走。点进白名单的话守卫就一直放行它，
+      //     关掉梦也挡不住，身份文档、工具自己的回答又对不上（「梦这一项关着」）。所以只读，提示指到那颗开关；
+      //   · 守卫放行、只是宿主这次没给的（effective 里没有，比如没挂附件服务时的 read_image）——
+      //     白名单帮不上，只读。
+      // unsure：见 unsureNow，只读。
+      const awayFixable = (name) => name !== 'her_dream' && Boolean(allowNowList) && !allowNowList.includes(name)
+      const lockedKind = (kind, name) => kind === 'her' || kind === 'scene' || kind === 'unsure' || (kind === 'away' && !awayFixable(name))
+      const blockedNote = (count) => (count ? `（伸手被挡过 ${count} 次）` : '')
       const toolChip = (name, kind, count) => h('button', {
         key: `${kind}:${name}`,
-        className: `chip${kind === 'her' ? ' on her' : ''}${allowList.includes(name) && kind !== 'her' ? ' on' : ''}${kind === 'blk' ? ' blk' : ''}`,
+        className: `chip${kind === 'her' || kind === 'scene' ? ' on her' : ''}${kind === 'away' || kind === 'unsure' ? ' her' : ''}${allowList.includes(name) && !lockedKind(kind, name) ? ' on' : ''}${kind === 'blk' ? ' blk' : ''}`,
         title: kind === 'her'
           ? '她自己本来就有的，不用放行'
-          : kind === 'blk'
-            ? `这一局被兜底守卫挡下来过${count ? ` ${count} 次` : ''}——她当时答的就是「这件事我做不到」`
-            : '点一下加进/移出白名单',
-        disabled: kind === 'her',
-        onClick: kind === 'her' ? undefined : () => toggleTool(name),
+          : kind === 'away'
+            ? (awayFixable(name)
+                ? `她自己的工具，这一局守卫没放行它${blockedNote(count)}。点一下填进白名单，按「保存设置」并重启 DSH 后放开。`
+                : name === 'her_dream' && dreamHeld
+                  ? (dreamEnabled
+                      ? `她自己的工具，跟着「允许她记梦」走，不走白名单${blockedNote(count)}。这一局 DSH 启动时梦是关着的；现在开着，重启 DSH 就回到她手上，不用填白名单。`
+                      : `她自己的工具，跟着「允许她记梦」走，不走白名单${blockedNote(count)}。「允许她记梦」关着，它本来就不在她手上；想让她记梦，打开那颗开关再重启 DSH。`)
+                  : '她自己的工具，宿主这一局没交给她；白名单里加它也没用。为什么不在，见这组上面那句。')
+          : kind === 'unsure'
+            ? '她自己的工具，守卫放行它；宿主没告诉插件她看得见哪些工具，说不准这一局在不在她手上：可能这次没注册，也可能在她自己那一层（那样她照样看得见）。让她用一次就知道；白名单帮不上。'
+          : kind === 'scene'
+            // 场合说明是服务端给的（lib/toolreg.js 的 SCENE_TOOLS）——工具加进来时
+            // 写一次，界面这里不用再抄一遍，免得两边说的不是一回事。
+            ? `${sceneWhy.get(name) || '只在那种场合才用得上'}所以它只在那种场合交给她，家里没有；不用放行，点也点不进白名单。`
+            : kind === 'blk'
+              ? `这一局被兜底守卫挡下来过${count ? ` ${count} 次` : ''}——她当时答的就是「这件事我做不到」`
+              : '点一下加进/移出白名单',
+        disabled: lockedKind(kind, name),
+        onClick: lockedKind(kind, name) ? undefined : () => toggleTool(name),
       }, kind === 'blk' && count > 1 ? `${name} ×${count}` : name)
       const groupOf = (title, hint, nodes) => (nodes && nodes.length
         ? [h('div', { className: 'grouphd' }, title),
@@ -1543,19 +1852,50 @@ window.__ModuleLoader__.load({
               : null,
           ]
         : []
-      const chipSection = (herList.length || knownList.length || blockedList.length)
+      const chipSection = (herList.length || herSceneList.length || knownList.length || blockedList.length)
         ? h('div', { style: { marginTop: '10px' } },
             // 用户明确要求写在明面上：点名字只是起草，不按保存不生效。
             h('div', { className: 'chipsnote' },
-              '点名字 = 把那个工具名写进下面的白名单输入框，这时还没生效；要再按一次「保存设置」才写盘，重启 DSH 之后才真的放开。'),
-            ...groupOf('她自己本来就有的（不用放行）', null, herList.map((n) => toolChip(n, 'her'))),
+              '点名字只是填进下面的框，还没生效；按「保存设置」再重启 DSH 才生效。'),
+            ...groupOf('她自己本来就有的（不用放行）', null, herHere.map((n) => toolChip(n, 'her'))),
+            ...groupOf(
+              '她自己的，这一局不在她手上',
+              // 按这组里真有的几种说，不摆用不上的话。
+              [
+                '守卫放行的名单在 DSH 启动那一刻就算定了。',
+                dreamHeld && herAway.includes('her_dream')
+                  ? 'her_dream 跟着「允许她记梦」走，不走白名单：梦关着时启动就没有它，开着梦重启 DSH 才回到她手上。'
+                  : '',
+                herAway.some((n) => !awayFixable(n) && !(n === 'her_dream' && dreamHeld))
+                  ? '宿主这次没给的（比如没挂附件服务时的 read_image）交不到她手上，白名单也帮不上。'
+                  : '',
+                herAway.some(awayFixable)
+                  ? '能点的是守卫没放行的，点进白名单、按「保存设置」再重启 DSH 就回到她手上。'
+                  : '',
+              ].join(''),
+              herAway.map((n) => toolChip(n, 'away', blockedCount.get(n))),
+            ),
+            ...groupOf(
+              '她自己的，说不准这一局在不在她手上',
+              '守卫放行这几件，但宿主没告诉插件她看得见哪些工具，分不清：可能这次没注册（比如没挂附件服务时的 read_image），也可能在她自己那一层（那样她照样看得见）。让她用一次就知道；白名单帮不上。',
+              herUnsure.map((n) => toolChip(n, 'unsure')),
+            ),
+            // 只在出门那趟才给她的那几件（2026-11-08，用户 m00002）。
+            // 以前它们连名字都不出现——用户以为新工具没装上。
+            ...groupOf(
+              '只在特定场合才给她的（不用放行）',
+              herSceneList.length
+                ? '这几件不属于「家里随时能用」，所以不在她平时的工具面里；到了那种场合才会交到她手上。'
+                : null,
+              herSceneList.map((t) => toolChip(t.name, 'scene')),
+            ),
             otherList.length
               ? [
-                  famRow('fam:__other', '这台机器上还有这些（装了但没放行）', otherList.length, otherOpen, () => toggleFam('__other')),
+                  famRow('fam:__other', '这台机器上还有这些', otherList.length, otherOpen, () => toggleFam('__other')),
                   h('div', { key: 'famhint', className: 'grouphd', style: { marginTop: '2px' } },
                     otherOpen
-                      ? '按名字前缀分了几族，点哪族开哪族。加进来之后她下一轮就能用，代价是工具定义会占掉一部分上下文。'
-                      : '装了但没放行就是这些。点一下展开，按前缀分族挑。'),
+                      ? '按名字前缀分组，点开挑；加得越多，工具定义占的上下文越多。'
+                      : '点一下展开，按名字前缀分组挑。'),
                   ...otherGroups,
                 ]
               : [],
@@ -1566,53 +1906,88 @@ window.__ModuleLoader__.load({
             ),
             ...groupOf(
               `这一局被挡下来过（${blockedList.length} 个，虚线）`,
-              '她答「这件事我做不到」很可能就是因为它们。点一下加进白名单，重启后才算放开。',
+              '她伸手被挡过的工具；点名字填进下面的框，按「保存设置」并重启 DSH 后放开。',
               blockedList.map((b) => toolChip(b.name, 'blk', b.count)),
             ),
             h('div', { className: 'dim', style: { marginTop: '8px' } },
+              // 「工具面收窄」那颗开关在 buildConfig 里，拨一下就跟着页面自动保存走；
+              // 只有白名单输入框要按「保存设置」。两样都要重启才对她生效。
+              // 开关关了、这一局还在收窄时，不能说「现在关着」：守卫还在按启动时的名单拦。
               toolsRestrict
-                ? '改动都要先按「保存设置」写盘，再重启 DSH 才生效。'
-                : '收窄现在是关着的，这些名字加不加都不影响她——关着的时候宿主给的工具她全看得见。'))
+                ? '白名单要按「保存设置」才写盘；「工具面收窄」那颗开关拨了就自动保存。两样都要重启 DSH 才对她生效。'
+                : runRestrict === true
+                  ? '「工具面收窄」已经关掉，重启 DSH 之后这些名字加不加都不影响她（那时 DSH 和别的插件给的工具她全看得见）；这一局守卫还按启动时的名单拦。'
+                  : runRestrict === false
+                    ? '收窄这一局是关着的，这些名字加不加都不影响她——关着的时候 DSH 和别的插件给的工具她全看得见。'
+                    : '「工具面收窄」关着，这些名字加不加都不影响她——关着的时候 DSH 和别的插件给的工具她全看得见（刚拨过开关的话，重启 DSH 之后才按新的来）。'))
         : h('div', { className: 'dim', style: { marginTop: '8px' } },
-            '她还没在这台机器上开过会话，宿主那边暂时给不出工具名单。等她和你说过话再回来看这里，就有一份可点的清单了。')
+            toolsLoad === 'fail'
+              ? '工具名单这次没读到（设置页向插件要名单失败了），这里摆不出来。刷新页面再看一次；白名单照样能在下面手填。'
+              : toolsLoad === ''
+                ? '工具名单读取中…'
+                : '她还没在这台机器上开过会话，宿主那边暂时给不出工具名单。等她和你说过话再回来看这里，就有一份可点的清单了。')
+
+      // 「允许她记梦」那颗开关多久生效（issue #64 的取舍带出来的时差）：
+      // 收窄这一局在管、启动时梦是关着的（allowNow 里没有 her_dream）——关掉当场生效，
+      // 打开要重启才交到她手上。收窄关着、或开着梦启动的，her_dream 本来就在她手上，开关当场生效。
+      // 名单还没读到时只能把条件说出来。
+      const dreamSwitchNote = toolsLoad === 'ok'
+        ? (Array.isArray(toolsAllowNow) && !toolsAllowNow.includes('her_dream')
+            ? '关掉马上生效；这一局 DSH 启动时梦是关着的，打开之后要重启 DSH，她手上才有记梦的工具。'
+            : '关掉、打开都马上生效。')
+        : '关掉马上生效；收窄开着、DSH 启动时梦又是关着的话，打开之后要重启 DSH，她手上才有记梦的工具。'
 
       const toolsCard = h('div', { className: 'card' },
-        h('h3', null, '手上能用什么'),
+        h('h3', null, '她能用的工具'),
         h('div', { className: 'dim' },
           // 本机实验（m02837）：.dev 下多一个 her_dream。
           // 0.8.5（用户 m02004）：原来写「只有九个/八个」，把此刻的家当说成了她的上限。
           // 白名单是会长的——界面上不该替她画死天花板，所以只说来路，不数死数字。
-          `大肥鱼自己的工具是从她的白名单现算的：${state?.dev === true ? '记录想法、翻自己的旧事、翻自己的日记、留一句话、刷 B 站、看视频画面、在评论区说话、有事问你同不同意、醒来记一句梦' : '记录想法、翻自己的旧事、翻自己的日记、留一句话、刷 B 站、看视频画面、在评论区说话、有事问你同不同意'}。另外宿主给的 read_image 也留着——她看画面要靠它。你在白名单里加了什么，下一轮就跟着进她手边，不用重装。`,
-          // 定时工具默认不放（m04504）：放行才说「能」，没放行就说怎么开。
-          scheduleOn
-            ? '你还在白名单里放了 schedule_create，所以她现在能自己定定时提醒——你说一遍时间与要做的事，她自己建任务，到点宿主把提醒投回她这条会话。'
-            : '想让她能自己定定时提醒（比如「每天中午去看邮箱」），在下面的白名单里填 schedule_create；要让她能改、删任务，连 schedule_list、schedule_update、schedule_delete 一起填。默认不放，工具数不变。',
-          '别的插件和技能启用，DSH会把它们的工具定义也塞进上下文——大肥鱼会看到一堆能做各种操作的工具，占用上下文的同时有可能真的尝试调用这些工具。',
-          '为了保证大肥鱼不会被插件能力污染，保持原生状态健康成长，禁用了其他能力（只影响和大肥鱼对话框的能力调用，不影响其他对话框的正常工具调用）。'),
+          // 2026-11-08（用户 m00002）：这几句原来是手抄的工具名清单，加一个工具就得
+          // 回来再抄一遍，忘了就两边说的不是一回事。现在按上方的真名单现算。
+          // 2026-11-08：下面每句各占一段。React 不会给相邻文字节点加间距，全塞进一个 div
+          // 会粘成一大段（用户 m00561 点名要「工具数不变」之后另起一段）。
+          ...[
+            // 按这一局真在管的说（/tools 的 allowNow），开关跟它不一样时说清要重启；
+            // 名单没读到才按开关说（0.9.5 看的是 herTools 拉没拉到——拉不到时收窄开着也说成关着）。
+            runRestrict === true && !toolsRestrict
+              ? '「工具面收窄」已经关掉、存好了，可这一局还在收窄，守卫也还在拦：重启 DSH 之后才不收窄也不挂守卫，DSH 和别的插件给的工具她才全看得见。'
+              : runRestrict === false && toolsRestrict
+                ? '「工具面收窄」已经打开、存好了，可这一局没在收窄：重启 DSH 之后，她在家里的会话才只能用自己的工具和白名单里的；不影响你别的对话。'
+                : runRestrict === false
+                  ? '收窄这一局是关着的：不收窄也不挂守卫，DSH 和别的插件给的工具她全看得见，白名单不额外限制。'
+                  : toolsRestrict
+                    ? '收窄开着时，她在家里的会话只能用自己的工具和白名单里的；不影响你别的对话。'
+                    : '「工具面收窄」关着：不收窄也不挂守卫，DSH 和别的插件给的工具她全看得见，白名单不额外限制。刚拨过开关的话，重启 DSH 之后才按新的来。',
+            herSceneList.length
+              ? `另外 ${herSceneList.map((t) => t.name).join('、')} 只在特定场合才交给她，家里没有这一只——所以不在上面那组里，也不用放行。`
+              : '',
+            // 定时工具默认不放（m04504）：放行才说「能」，没放行就说怎么开。
+            scheduleOn
+              ? '白名单里有 schedule_create：重启 DSH 后，她能自己定提醒。'
+              : '想让她自己定提醒，把 schedule_create、schedule_list、schedule_update、schedule_delete 加进白名单。默认不放，工具数不变。',
+            '别的插件和技能启用，DSH会把它们的工具定义也塞进上下文——大肥鱼会看到一堆能做各种操作的工具，占用上下文的同时有可能真的尝试调用这些工具。',
+            '为了保证大肥鱼不会被插件能力污染，保持原生状态健康成长，禁用了其他能力（只影响和大肥鱼对话框的能力调用，不影响其他对话框的正常工具调用）。',
+          ].filter(Boolean).map((line, i) =>
+            h('div', { key: 'tools-line-' + i, style: { marginTop: i ? '8px' : '0' } }, line))),
         h('div', null, Toggle({
           label: '工具面收窄',
-          hint: '关掉之后能看到 DSH 给的全部标准工具，工具定义会占掉每轮的一部分上下文。改动要重启才生效。',
+          // 关掉时既不收窄也不挂守卫（lib/restrict.js 的 enabled:false 分支）：放开的不只是 DSH 的标准工具。
+          hint: '关掉之后不收窄也不挂守卫：DSH 给的标准工具和别的插件的工具她全看得见，工具定义会占掉每轮的一部分上下文。拨了就自动保存，重启 DSH 才生效。',
           on: toolsRestrict,
           onChange: setToolsRestrict,
         })),
         chipSection,
         h('div', { className: 'dim', style: { marginTop: '8px' } },
-          '插件能力白名单（逗号分隔，留空 = 不额外给）。填的是工具名称，不是插件名称，也不是技能名称。',
-          '想要技能生效就得填 skill——代价是 DSH 会把所有技能的说明一次性塞进她的上下文，暂不支持只启用某几个技能。',
-          '名字必须和宿主里的完全一致：拼错的名字不让保存。有些工具是插件按会话注册进她自己那一层的（ops_*、team_* 之类），她本来就看得见、收窄也挡不住——把名字加进来只是让兜底守卫放行它。',
-          // 2026-10-27（用户 m01371）：把 QQ 桥接写进说明——不写，用户只能对着「白名单」
-          // 三个字干猜该填什么；它本来就是个跨插件用法，不是本插件自己的开关。
-          h('div', { style: { marginTop: '10px' } },
-            // 小标题带「（其他渠道同理）」（用户 m05411）：正文只讲 QQ，标题提示这条路对别的平台一样成立。
-            h('div', { style: { fontWeight: 600, marginBottom: '4px' } }, 'QQ 接入（其他渠道同理）'),
-            '想让她在 QQ 上说话，装一个社区现成的 QQ 桥接插件（比如 qq-bridge），然后在上面填：qq_send_message, qq_get_unread_messages, qq_reply。',
-            '本插件不直接提供 QQ 桥接功能——社区已经有很多成熟的项目，两个一起装、在这里放行就可以。',
-            '如果你不知道装的那个 QQ 插件实际工具名是什么，可以先问一问你的大肥鱼；有哪些项目可以桥接 QQ，也可以问她。')),
+          // 存完之后身份文档仍按这一局在用的名单写，守卫也一样（issue #64 的后半）：要重启才对她生效。
+          '白名单填工具名，不是插件名，逗号分隔；按「保存设置」存好，重启 DSH 之后才对她生效。',
+          '填 skill 会让 DSH 把全部技能的说明一起给她。',
+          '接了 QQ 等聊天插件，从上面的清单里把它发消息的工具点进来；本插件不自带 QQ 桥接。'),
         h('div', { className: 'row', style: { gap: '8px', marginTop: '6px' } },
           h('input', {
             type: 'text',
             value: toolsAllowText,
-            placeholder: '例如：skill, web_search, read_image；接了 QQ 桥就填 qq_send_message, qq_get_unread_messages, qq_reply',
+            placeholder: '例如：web_search, schedule_create',
             onChange: (e) => { setToolsAllowText(e.target.value); setToolsSaveNote(''); setToolsSaveErr('') },
           }),
           h('button', {
@@ -1627,22 +2002,31 @@ window.__ModuleLoader__.load({
           ? h('div', { className: 'dim', style: { marginTop: '6px' } }, toolsSaveNote)
           : null)
 
+      // 折叠区（2026-11-08，PR #59）：不常用的设置与长说明收进 <details>，默认收起。
+      // 不占 React 状态，切页签回来会重新收着——这些项本来就很少改。
+      // 定义必须早于下面所有页面：导入卡在「数据」页，位置比原来的定义点更靠前。
+      const adv = (summary, ...items) => h('details', { className: 'adv' },
+        h('summary', null, summary),
+        h('div', { className: 'advbody' }, ...items))
+
       // 导入卡（2026-10-27）：谁都能把自己的大肥鱼交出去，别人也能接手。
       // 这张卡的每一句话都在说「什么过来了、什么没过来」——用户 m03201 明确要求写清楚。
       const importCard = h('div', { className: 'card full' },
         h('h3', null, '接一只别人养过的大肥鱼'),
         h('div', { className: 'dim' },
           '默认她是一张白纸，从「你刚开始存在」长起。这一格给另一种玩法：把别人养的那一位接过来，从她的性格继续养。'),
-        h('div', { className: 'dim', style: { marginTop: '6px' } },
-          '过来的：她是谁（人设正文）、她怎么称呼你、她原本能用的工具。'),
-        h('div', { className: 'dim' },
-          '不过来的：过了多少天（本插件按时间推进事件，非本插件原生的大肥鱼要从第一天开始算事件）、长出了哪些判断（计数为 0；如果原提示词里规定了一些认知，你的大肥鱼依然铭记，但后续在本插件的事件循环里可能会更新、优化、忘记一部分）、身上的疤（同上）、拒绝过什么（同上）、日记、B 站登录 cookie。这些只属于原来那一局——接过来的人从第 1 天重新长，判断和疤要自己重新攒。'),
-        h('div', { className: 'dim' },
-          '此外，根据本插件的规则，如果你的大肥鱼有好感度等数值设定，进入本插件环境后她将看不到自己的好感度多少，并且本插件不允许你通过命令去修改大肥鱼的人设等信息，这意味着你原本可以对大肥鱼为所欲为，但是到了本插件之后，关系的推进不再靠好感度，而是靠真实交互。你也不再能随便命令大肥鱼换一种人设。'),
-        h('div', { className: 'dim' },
-          '还有一条：接过来的人不再受这个插件那两条提示词禁令约束，按她原来的设定来。这个豁免只认「从这里接过来」这一个动作——用「备份与恢复」把你自己的档搬回来，一分豁免都不会有，她仍然是你那只守着原规矩的鱼。'),
-        h('div', { className: 'dim' },
-          '人设正文控制在 1200～1500 字。超过 2000 字插件会直接拒收、整份贴不进去；就算没超，写得太长也会把「判断、疤、立场」这些会长出来的段落挤掉——她醒来时只剩一副骨架。点下面的「下载交接单模板」，里面写明了怎么给对面那个 AI 交代这件事。'),
+        adv('点开详细了解',
+          h('div', { className: 'dim', style: { marginTop: '6px' } },
+            '过来的：她是谁（人设正文）、她怎么称呼你、她原本能用的工具。'),
+          h('div', { className: 'dim' },
+            '不过来的：过了多少天（本插件按时间推进事件，非本插件原生的大肥鱼要从第一天开始算事件）、长出了哪些判断（计数为 0；如果原提示词里规定了一些认知，你的大肥鱼依然铭记，但后续在本插件的事件循环里可能会更新、优化、忘记一部分）、身上的疤（同上）、拒绝过什么（同上）、日记、B 站登录 cookie。这些只属于原来那一局——接过来的人从第 1 天重新长，判断和疤要自己重新攒。'),
+          h('div', { className: 'dim' },
+            '此外，根据本插件的规则，如果你的大肥鱼有好感度等数值设定，进入本插件环境后她将看不到自己的好感度多少，并且本插件不允许你通过命令去修改大肥鱼的人设等信息，这意味着你原本可以对大肥鱼为所欲为，但是到了本插件之后，关系的推进不再靠好感度，而是靠真实交互。你也不再能随便命令大肥鱼换一种人设。'),
+          h('div', { className: 'dim' },
+            '还有一条：接过来的人不再受这个插件那两条提示词禁令约束，按她原来的设定来。这个豁免只认「从这里接过来」这一个动作——用「备份与恢复」把你自己的档搬回来，一分豁免都不会有，她仍然是你那只守着原规矩的鱼。'),
+          h('div', { className: 'dim' },
+            '人设正文控制在 1200～1500 字。超过 2000 字插件会直接拒收、整份贴不进去；就算没超，写得太长也会把「判断、疤、立场」这些会长出来的段落挤掉——她醒来时只剩一副骨架。点下面的「下载交接单模板」，里面写明了怎么给对面那个 AI 交代这件事。')),
+
         // 下载模板跟「这一局能不能接」是两件事：已经有起点的人也可能想把模板
         // 先拿去看、或者交给别人去养。所以这个按钮永远在上面，不进任何分支。
         // （2026-10-27 修：原来它只在「能导入且没展开」那一支里，用户养着鱼就永远看不到。）
@@ -1715,17 +2099,27 @@ window.__ModuleLoader__.load({
       // 升级自检（2026-10-29）：正在跑的这一份跟 profile 里那条 `file:` 源目录版本对不上。
       // 典型画面：robocopy 覆盖了源目录、重启了，界面还是老样子——因为加载的是 node_modules 里的副本。
       const upgradeCard = state?.upgrade?.stale === true
-        ? h('div', { className: 'card full' },
-            h('h3', null, state.upgrade.older ? '源目录里那份比正在跑的旧' : '升级没有真正装进去'),
-            h('div', { className: 'dim' }, state.upgrade.why || '版本对不上。'),
-            h('div', { className: 'dim' },
-              'DSH 加载的是 node_modules\\dsh-fish 里的副本，不是 profile 里写的那条源目录。'
-              + '只覆盖源目录，跑起来的还是旧的：没有报错、也没有日志，因为新代码根本没执行。'),
-            h('div', { className: 'dim' },
-              '修法：关掉 DSH → 在 profile 目录跑 pnpm install --force（或者删掉 node_modules\\dsh-fish）→ 再启动。'),
-            state.upgrade.sourcePath
-              ? h('div', { className: 'dim' }, `源目录：${state.upgrade.sourcePath}`)
-              : null)
+        ? (state.upgrade.older
+            // 2026-11-08（PR #59 G15）：源目录那份更旧时，正在跑的反而是新版；
+            // 原来不分青红皂白教人重装，等于把人装回旧版。
+            ? h('div', { className: 'card full' },
+                h('h3', null, '源目录里那份比正在跑的旧'),
+                h('div', { className: 'dim' }, state.upgrade.why || '版本对不上。'),
+                h('div', { className: 'dim' }, '正在跑的已经是新版，不用处理；在 profile 目录重装会装回源目录里的旧版。'),
+                state.upgrade.sourcePath
+                  ? h('div', { className: 'dim' }, `源目录：${state.upgrade.sourcePath}`)
+                  : null)
+            : h('div', { className: 'card full' },
+                h('h3', null, '升级没有真正装进去'),
+                h('div', { className: 'dim' }, state.upgrade.why || '版本对不上。'),
+                h('div', { className: 'dim' },
+                  'DSH 加载的是 node_modules 里的副本（node_modules\\@ssamurias\\dsh-fish；老装法是 node_modules\\dsh-fish），不是 profile 里写的那条源目录。'
+                  + '只覆盖源目录，跑起来的还是旧的：没有报错、也没有日志，因为新代码根本没执行。'),
+                h('div', { className: 'dim' },
+                  '修法：关掉 DSH → 在 profile 目录跑 pnpm install --force（或者删掉 node_modules 里那份副本）→ 再启动。'),
+                state.upgrade.sourcePath
+                  ? h('div', { className: 'dim' }, `源目录：${state.upgrade.sourcePath}`)
+                  : null))
         : null
 
       // 宿主兼容（2026-10-30 m02961）：宿主没提供 userQuestions 服务时降级，不报错。
@@ -1736,7 +2130,7 @@ window.__ModuleLoader__.load({
             h('h3', null, '这个宿主没提供「会话里问你」'),
             h('div', { className: 'dim' },
               '当前宿主里没有 userQuestions 这个服务：可能是版本旧，也可能是它没被装上。'
-              + '插件照常跑，其它功能不受影响；只有她想在对话里直接问你（要不要带东西回家、解锁申请）时问不出去，她会改用留言。'),
+              + '插件照常跑，其它功能不受影响；只有她在会话里问你（要不要带东西回家、解锁申请）时弹不出卡，问题会留在这个设置页里等你答。'),
             h('div', { className: 'dim' },
               '想恢复这条路：把 DSH 升到最新版再试。升级 DSH 不会动插件的数据目录，也不会动 cordis.patch.yml 里给插件配的 root。'))
         : null
@@ -1757,13 +2151,13 @@ window.__ModuleLoader__.load({
       const resetCard = h('div', { className: 'card full' },
         h('h3', null, '重置大肥鱼'),
         h('div', { className: 'dim' },
-          '这跟上面那张「重新搭一间」不是一回事：那个只换一条对话，数据一条不动；这个是真的重开一局。'),
+          '这是真的重开一局；只想换一条对话、数据不动的话，用会话被归档时出现的「重新搭一间」。'),
         h('div', { className: 'dim' },
           '旧的一切不会删——整个状态库会被改名搬到同级的 dsh-fish-backups 里，想找回来整包搬回去就行。',
-          '重开后是第一天，会重新从「你刚开始存在」开始。',
-          '侧栏「大肥鱼的家」里那些旧对话会被移进「已归档」，工作区留着；点完会开一条新会话，但要再点一下「叫醒大肥鱼」，她开一次口，侧栏里才看得见（文件同样不删）。'),
+          '重开后是第一天，会重新从「你刚开始存在」开始；设置和 B 站登录保留，头像不留。',
+          '侧栏「大肥鱼的家」里那些旧对话会被移进「已归档」，工作区留着；点完会开一条新会话，但要再到「状态」页点一下「现在叫醒大肥鱼」，她开一次口，侧栏里才看得见（文件同样不删）。'),
         resetInfo ? h('div', { className: 'dim' },
-          `现在有：事件 ${resetInfo.events} 条、日记 ${resetInfo.diaries} 天、报告 ${resetInfo.reports} 天。`) : null,
+          `现在有：账本 ${resetInfo.events} 行（含系统记账）、日记 ${resetInfo.diaries} 天、报告 ${resetInfo.reports} 天。`) : null,
         h('div', { className: 'row' },
           !resetAsk
             ? h('button', { onClick: askReset, disabled: !!busy },
@@ -1782,22 +2176,12 @@ window.__ModuleLoader__.load({
       // 既容易误触，也不符合那一栏的语义。左边说状态、右边说「叫醒」，
       // 位置本身就说明了它是针对「现在这个状态」的操作。
       const phaseColor = { asleep: '#8a8a8a', waiting: '#b8860b', 'awake-idle': '#d97706', browsing: '#2563eb', talking: '#16a34a', writing: '#7c3aed', offline: '#9ca3af' }
-      // 只有本机测试版（`.dev` 文件）才出现。判据来自服务端 /state 的 dev，
-      // 不是前端猜的——正式版里这个字段恒为 false，按钮连节点都不生成。
-      const browseBtn = state?.dev
-        ? h('button', {
-            className: 'ghost',
-            onClick: browseNow,
-            disabled: busy === 'wake-browse',
-            style: { flex: '0 0 auto' },
-            title: '测试用：绕过「今天该不该醒」，直接叫她去看一眼 B 站首页。',
-          }, busy === 'wake-browse' ? '送出门…' : '让她去刷 B 站')
-        : null
       const wakeBtn = h('button', {
         className: 'ghost',
         onClick: wake,
         disabled: busy === 'wake',
         style: { flex: '0 0 auto' },
+        title: '马上叫醒她；不到 45 分钟、她在外面，或醒几次、事件数设成 0 时，叫不醒。',
       }, busy === 'wake' ? '叫醒中…' : '现在叫醒大肥鱼')
       // 2026-10-24：这张卡**始终渲染**。之前整块挂在 `st ? … : null` 上，状态还没读到时
       // 连「叫醒」按钮一起消失——一旦读取失败就没有入口，等于把人锁在门外。
@@ -1899,12 +2283,11 @@ window.__ModuleLoader__.load({
               h('b', null, st ? st.label : '状态读取中…'),
               st && st.detail ? h('span', { className: 'dim' }, st.detail) : null),
             avatarCtl),
-          browseBtn,
           wakeBtn),
         st
           ? (Array.isArray(st.timeline) && st.timeline.length
-              ? h('div', { className: 'dim', style: { marginTop: '6px', fontSize: '12px', lineHeight: '1.75' } },
-                  ...st.timeline.map((t, i) => h('div', { key: 'tl' + i }, t.text)))
+              ? h('div', { className: 'dim', style: { marginTop: '6px', fontSize: '12px', lineHeight: '1.75', whiteSpace: 'pre-line' } },
+                  ...st.timeline.map((t, i) => h('div', { key: 'tl' + i, style: { marginTop: i ? '6px' : '0' } }, t.text)))
               : h('div', { className: 'dim', style: { marginTop: '6px' } }, '今天还没有动静。'))
           : null,
         // 此刻在外面（0.6.16，用户 m01613）：一行话，在哪、多久。请神单独标出来，
@@ -1957,16 +2340,16 @@ window.__ModuleLoader__.load({
       const AUTO_SAVE_TABS = new Set(['grow', 'bili', 'memory'])
 
       const TAB_HELP = {
-        now: '现在是什么状态、走了多远、在守什么规矩，以及你不在的时候发生了什么。',
-        grow: '怎么长大：时间尺度、每天经历多少、日记、隔几天回头想一次。改这些只会让她变快变慢，不会改变她是什么样。',
-        home: '住在哪：工作区、会话、身份文件、日记、她留下的小纸条，以及一键自检。',
-        bili: '上网：能不能刷 B 站、看多少、要不要看画面、避开哪些内容，以及在评论区说话和登录。',
-        memory: '记忆：一次能背多少、多少条判断被挤出视野。',
-        env: '插件：别的插件能往她上下文里塞什么工具，以及为什么默认只放她自己那几个。',
-        principle: '原理：两张图讲清她怎么长大、记忆怎么被筛；每条设计从哪条理论来，以及这一套能用在什么场景。',
-        data: '数据：都存在哪、每日报告、运行日志，以及重置（有破坏性的操作放在这一页最下面）。',
-        feedback: '反馈：找开发者、进交流群。插件有问题、有想要的功能，都可以说。',
-        outing: '出门：让她去别的工作区干活，回来时由你决定这趟行程学到的东西、写下的记录算不算数。出门期间，家里的日程、日记、刷 B 站都会停。',
+        now: '状态：她现在的状态、阶段、规矩，和你不在时的事。',
+        grow: '成长：成长周期、定时醒来、主动搭话、日记和梦。',
+        home: '住所：她的工作区与会话、请求、日记、梦、小纸条和自检。',
+        bili: '上网：她翻视频、看画面、发评论，以及 B 站登录。',
+        memory: '记忆：会话多久换新、身份段多长、记忆概况与体检。',
+        env: '插件：她能用哪些工具，以及版本与更新。',
+        principle: '原理：她怎么长大、记忆怎么筛、理论出处。',
+        data: '数据：位置、备份迁移、报告日志、导入与重置。',
+        feedback: '反馈：常见问题、找开发者、交流群。',
+        outing: '出门：送她去别的工作区或对话干活；在外时家里的定时日程暂停。',
       }
 
       // 出门页顶部的说明卡（2026-10-30，用户 m00650 / m01100）：文字是用户自己写的，
@@ -1974,35 +2357,55 @@ window.__ModuleLoader__.load({
       const OUTING_INTRO = [
         '本功能为想要让大肥鱼拥有完整权限和工具干活的用户设计，且附带了一些偏娱乐（但也有些危险）的功能。',
         '偏实验性，虽然做了人格防护，但是如果你担心可以暂时不用。具体的可以看下面各节。',
-        '工作园区等于一个全新的沙箱全工具无文件记录环境，如果只是想让大肥鱼可以干活，建议选这个。',
+        '工作园区是一个固定目录的工作区，工具和权限按这个工作区的设置给。第一次去时不带项目记录；用过以后，这个工作区自己攒下的记录（交接文档、记忆插件的总结）和文件都会留着，目录不会自动清空，也可以接着上次那条对话做。如果只是想让大肥鱼可以干活，建议选这个。',
         '想要体验让大肥鱼去别的工作区串门会带来什么戏剧性效果，可以选择送她出门（真身出门）和请神（灵魂出窍）。',
-        '送她出门：开发者本人测试，在人格较为弱小的情况下，选择让大肥鱼去你已经有很多工作性质内容的对话框去接班，会导致大肥鱼的人格几乎被消弭，最终沦为一个助手性质的输出（因为上下文很多都是说你是一个助手），并且会读取到该工作区的记忆插件、交接文档、工作记录，可能会知道很多不该知道的内容（有些东西是全工作区可见，非单条对话框可见）。不确定人格强大之后能不能维持住人格。为了防止意外情况，给了整趟记忆都忘掉的功能（整趟不算），如果你认为她在工作中确实学到了一些东西，可以勾选想要她记住的内容。',
-        '请神：开发者本人测试，人格保留和表现较为完整，会在自身认知的基础上，调用工具帮你完成工作。没有读取过多上下文，但是如果你的工作任务是需要她读取上下文，她依然会读很多内容，可能会知道一些不该知道的内容（有些东西是全工作区可见，非单条对话框可见）。同样有整趟忘记和保留记录的功能。',
+        '送她出门：开发者本人测试，在人格较为弱小的情况下，选择让大肥鱼去你已经有很多工作性质内容的对话框去接班，会导致大肥鱼的人格几乎被消弭，最终沦为一个助手性质的输出（因为上下文很多都是说你是一个助手），并且会读取到该工作区的记忆插件、交接文档、工作记录，可能会知道很多不该知道的内容（有些东西是全工作区可见，非单条对话框可见）。不确定人格强大之后能不能维持住人格。为了防止意外情况，给了「整趟不算」：这趟她写下的不再算进她的成长，但原话还留在记录里，她自己翻记录时还翻得到。如果你认为她在工作中确实学到了一些东西，可以只划掉不想要的，其余的照常算。',
+        '请神：开发者本人测试，人格保留和表现较为完整，会在自身认知的基础上，调用工具帮你完成工作。没有读取过多上下文，但是如果你的工作任务是需要她读取上下文，她依然会读很多内容，可能会知道一些不该知道的内容（有些东西是全工作区可见，非单条对话框可见）。同样可以整趟不算，或者只划掉其中几条。',
       ]
 
       // 阶段与门：写清楚，因为「下一个成长瓶颈」这几个字原来没人看得懂。
       // 四行措辞是用户在设置页上亲手写的（2026-10-24），已固化进源码，别再改回短的。
-      const STAGE_HELP = [
-        '四个阶段按天推进，但每个瓶颈要自己突破。',
+      // 成长周期 14 天及以下时，自主、主动两道瓶颈各只要一次（derive.js 的 gateNeed，由 /state 的 gateTimes 给出）。
+      // 用户定的「两次」那两行原样留着，只在一次就够时换成「一次」的说法；没读到状态时按两次写。
+      const onceFor = { autonomy: 'refuse', competence: 'revise' }
+      const needOnce = (gate) => Number(s?.gateTimes?.[onceFor[gate]]) === 1
+      const STAGE_LINES = [
+        '四个阶段按天推进。前三个阶段各有一道瓶颈要她自己突破，成长期满后没过的自动放行；整合没有瓶颈，三道都过了就按天数进入。',
         '1 信任 · 根据所见所闻形成一条自己的判断/认知',
-        '2 自主 · 说过至少两次「不要」，反抗意识的觉醒',
-        '3 主动 · 两次推翻自己之前的判断/认知，形成新的正确认知',
+        needOnce('autonomy')
+          ? '2 自主 · 说过至少一次「不要」，反抗意识的觉醒'
+          : '2 自主 · 说过至少两次「不要」，反抗意识的觉醒',
+        needOnce('competence')
+          ? '3 主动 · 推翻过一次自己之前的判断/认知，形成新的正确认知'
+          : '3 主动 · 两次推翻自己之前的判断/认知，形成新的正确认知',
         '4 整合 · 回顾过去经历，有意识地发现自己的改变',
-      ].join('\n')
+      ]
+      const STAGE_HELP = STAGE_LINES.join('\n')
       const GATE_HELP = {
         trust: '信任：先从所见所闻里形成一条自己的判断——一条愿意被推翻的「我猜…」。',
-        autonomy: '自主：得真的拒绝过两次——不是嘴上说不要，是明确不执行某件事。',
-        competence: '主动：得两次推翻自己先前的判断，形成新的正确认知，不是光换个说法。',
+        autonomy: needOnce('autonomy')
+          ? '自主：得真的拒绝过一次——不是嘴上说不要，是明确不执行某件事。成长周期 14 天及以下时一次就够。'
+          : '自主：得真的拒绝过两次——不是嘴上说不要，是明确不执行某件事。',
+        competence: needOnce('competence')
+          ? '主动：得推翻一次自己先前的判断，形成新的正确认知，不是光换个说法。成长周期 14 天及以下时一次就够。'
+          : '主动：得两次推翻自己先前的判断，形成新的正确认知，不是光换个说法。',
       }
       // 「下一个成长瓶颈」原来直接印 stageGate.pending —— 那是 trust / autonomy / competence，
       // 用户看见的是英文（2026-10-24：「competence 是什么」）。宿主给的是技术名，
       // 显示层必须翻成人话；没收录的名字原样显示，绝不显示 undefined。
       const GATE_NAME = { trust: '信任', autonomy: '自主', competence: '主动' }
+      // 成长期满以后「下一个成长瓶颈」写「期满放行」，可立场清单只认她真过的瓶颈（stance.js 的 gatesDone）。
+      // /state 的 forcedGates 是按时间放行、还没真过的那几道（键同 gateTimes），翻回门名，
+      // 写进那一格和「立场」的提示里，不然用户看不出立场还在等哪一道。
+      const forcedOpen = (Array.isArray(s?.forcedGates) ? s.forcedGates : [])
+        .map((k) => ({ belief: 'trust', refuse: 'autonomy', revise: 'competence' })[k])
+        .filter(Boolean)
+      const forcedNames = forcedOpen.map((g) => `「${GATE_NAME[g]}」`).join('、')
       // 2026-10-26 改（用户 m05785 / m05868）：原来这里写「越接近 1 越好」，那是错的。
       // 这三个数不是考卷分数，是体检值，各有各的两端：
       //   稳定 = 抽掉几条她还在拿着的判断，她还是不是她。太低说明那些判断只是记账，
       //          太高说明她整个人都压在少数几条上，少一条就是另一个人。
-      //   一致 = 前后说法打不打架。高到 1.00 也可能是她一直没长新东西。
+      //   一致 = 不同阶段说的话字面上像不像（只比字面，不懂意思）。高到 1.00 也可能是她一直没长新东西。
       //   新鲜 = 有没有一直在长新东西。
       // 2026-10-27 改（用户 m06107「这三个参数分成三行显示，现在排成一行有点拥挤」）：
       // 原来三个值挤在一条 rowTip 的值里，界面上是一长串；拆成三行，各自带自己的说明。
@@ -2027,9 +2430,9 @@ window.__ModuleLoader__.load({
         return `${STABILITY_HELP}这次每次抽掉 ${k} 条，`
           + `共 ${all} 条判断（${where}），跑了 ${Number((v && v.sample) || 0)} 次。`
       }
-      const CONSISTENCY_HELP = '她前后说法打不打架。跨阶段的话越多这个数越可信；'
+      const CONSISTENCY_HELP = '她在不同阶段说的话，字面上有多像：两两比相似度再取平均。只比字面、不懂意思，「我喜欢下雨天」和「我不喜欢下雨天」也算很像。跨阶段的话越多这个数越可信；'
         + '一句都没得比的时候会写「还没有跨阶段的话可比」。'
-      const NOVELTY_HELP = '有没有一直在长新东西：最近七天说的话里，有多少句是以前没出现过的。'
+      const NOVELTY_HELP = '有没有一直在长新东西：最近七天她自己写下的话里（对话里回你的不算），有多少句是以前没出现过的。'
 
       // 页签栏**只放页签**（2026-10-24）。
       // 原来这一行还挂着「现在叫醒大肥鱼」和「保存」两个按钮，都被挪走了：
@@ -2055,7 +2458,6 @@ window.__ModuleLoader__.load({
         h('h3', null, title),
         note ? h('p', { className: 'hint', style: { marginBottom: '10px' } }, note) : null,
         ...items)
-
       // 一行「名称 — 值」，tip 存在时在值后面挂一个可悬停的 ⓘ。
       // 用它代替纯 kv：那一版用户看到「下一道门」和「稳定 0.87」都不知道在说什么。
       const rowTip = (k, v, tip) => h('div', {
@@ -2089,7 +2491,7 @@ window.__ModuleLoader__.load({
       // 导出报告：纯前端拼一个 markdown 文件下载，不新开任何服务端路由。
       const downloadReport = () => {
         const md = reports?.md || ''
-        if (!md) { setNote('还没有报告正文可导出。先点「每日报告」取一份。'); return }
+        if (!md) { setNote('这一天的报告正文还没取到，没有可导出的。点一下上面那天的日期再取一次。'); return }
         if (typeof document === 'undefined' || typeof Blob === 'undefined') { setNote('这个环境不支持下载。'); return }
         try {
           const blob = new Blob([md], { type: 'text/markdown;charset=utf-8' })
@@ -2108,7 +2510,7 @@ window.__ModuleLoader__.load({
         ? h('div', { className: 'card', style: { borderColor: 'var(--dsw-alias-border-l2)' } },
           h('h3', null, '还没存 B 站登录'),
           h('div', { className: 'dim' },
-            '看视频画面、读评论、回评都要用到它。存好之后这张卡会自己消失——不想存就点「不用了」，以后不再提示。'),
+            '发评论和回复要用到它；读热评、读回复不用它；看画面没有它也会试着取，但不一定取得到，有它更稳。存好之后这张卡会自己消失——不想存就点「不用了」，以后不再提示。'),
           h('div', { className: 'row', style: { gap: '8px', marginTop: '6px' } },
             // issue #12（TulleyT，2026-10-29）：这里原写 showTab('bili')，而 showTab 是
             // 「现在是不是这个页」的判据（返回布尔），真正的切换是 setTab。返回值被丢弃，
@@ -2130,11 +2532,23 @@ window.__ModuleLoader__.load({
         statusStrip,
         ownerHintCard,
         s ? group('状态',
-          '这些数字都是宿主从她的事件流里算出来的，她看不见自己这些数。',
-          rowTip('已成长天数', `${s.day} / ${s.growthDays} 天`, '从第一天算起的自然日。成长天数调大会让她走得更慢。'),
+          '从她的事件流算出来；阶段、瓶颈和计数她看不见，天数和冷落她知道。',
+          rowTip('已成长天数', `${s.day} / ${s.growthDays} 天`, '从开局那一刻起，每满 24 小时加一天。'),
           rowTip('当前阶段', `${s.stage} · ${s.stageName}${s.stageForced ? '（时间兜底）' : ''}`, STAGE_HELP),
-          rowTip('下一个成长瓶颈', s.pendingGate ? (GATE_NAME[s.pendingGate] || s.pendingGate) : '已走完', GATE_HELP[s.pendingGate] || '四个瓶颈都过了。'),
-          rowTip('最近的判断', `${s.beliefCount} 条${s.solidCount ? `（其中 ${s.solidCount} 条记得很牢）` : ''}`, '她还在拿着的判断条数。更早的没丢，折进「更早以前」。记得很牢的是被反复提起或被反复检验过的。'),
+          // 成长期满、有瓶颈是按时间放行的：值也不能写「已走完」，那读起来像她自己都走完了。
+          // 放行的门立场不认，所以后面跟上立场还在等哪几道。
+          rowTip('下一个成长瓶颈',
+            s.pendingGate
+              ? (GATE_NAME[s.pendingGate] || s.pendingGate)
+              : s.stageForced
+                ? (forcedNames ? `期满放行（立场还等她真过${forcedNames}）` : '期满放行')
+                : '已走完',
+            GATE_HELP[s.pendingGate] || (s.stageForced
+              ? ['成长期满了，没过的瓶颈按时间放行了。',
+                  forcedNames ? `立场清单只认她真过的瓶颈，还在等${forcedNames}：` : '',
+                  ...forcedOpen.map((g) => GATE_HELP[g])].filter(Boolean).join('\n')
+              : '三道瓶颈都过了。')),
+          rowTip('在用的判断', `${s.beliefCount} 条${s.solidCount ? `（其中 ${s.solidCount} 条记得很牢）` : ''}`, '还算数的判断条数；记得很牢的是被反复提起或检验过的。更早的判断也没丢。'),
           // 2026-10-24（P0）：她认知矛盾的两句话。只报事实，不给裁决按钮——
           // 哪句对她得她自己定；这里放个"选哪句"，就变成用户在替她长人格。
           s.tension
@@ -2144,18 +2558,19 @@ window.__ModuleLoader__.load({
           // 只报"几件没想通"，不给"愈合"按钮——想通是她自己写一条 revise 的事。
           s.scarCount
             // 用「那个人」而不是「他」：用她的人可能是女性（2026-10-31 用户确认）。
-            ? rowTip('没想通的事', `${s.scarCount} 件`, '那个人顶回来、或者因此难过之后，你后来还是让了的那几次。她没有忘，也没算成"已经过去了"。')
+            ? rowTip('没想通的事', `${s.scarCount} 件`, '她拒绝过、你坚持或因此难过之后，她又让了步的那几次。她没有忘，也没算成「已经过去了」。')
             : rowTip('没想通的事', '没有', '还没有哪次拒绝让她事后反悔。'),
           (s.stanceCount ?? 0) > 0
             ? rowTip('立场', `${s.stanceCount} 条`, '立场是在四个阶段都走完之后才开始产生的：喜欢什么、绝不做哪几件事。每条都有代价——要么栽过一次，要么同一件事她反复提起过。')
             : s.stanceReady
               ? rowTip('立场', '0 条', '完成整合，但暂未形成自己的立场。')
-              : rowTip('立场', '还没开始', '要等四个阶段（信任 / 自主 / 主动 / 整合）都走完，立场才开始产生。'),
+              : rowTip('立场', '还没开始', '要等四个阶段（信任 / 自主 / 主动 / 整合）都走完，立场才开始产生。'
+                + (forcedNames ? `按时间放行的瓶颈不算走完，还差${forcedNames}。` : '')),
           rowTip('最近的称呼', s.name ? s.name : '还没想好', '她自己决定怎么称呼你。这个不是设置项，改不了。'),
-          rowTip('冷落', s.absenceDays > 0 ? `${s.absenceDays} 天` : '没有', '你多久没说话了。超过门槛她会记下「你不在」。'),
+          rowTip('冷落', s.absenceDays > 0 ? `${s.absenceDays} 天` : '没有', '离你上次来已经几天；没到「冷落天数」显示没有，你一来就清零。'),
           // issue #32：`counts.utterance` 含对话行（flags 带 uncommitted），把它们减掉之后
           // 才是「她自己写下、不是答他的话」的句数；那些行单列成「聊天」。
-          rowTip('互动计数', `说 ${Math.max(0, (s.counts.utterance ?? 0) - (s.counts.chat ?? 0))} · 改口 ${s.counts.revise} · 拒绝 ${s.counts.refusal} · 重聚 ${s.counts.reunion}${s.counts.chat ? ` · 聊天 ${s.counts.chat}` : ''}`, '说=她写过几句自己的判断（含留话）；改口=按照规则推翻历史认知并指明改的是哪条；拒绝=她明确登记拒绝过什么；重聚=久别之后她自己写下的感受。聊天=对话里她回你的话，单列，不算进「说」。'),
+          rowTip('互动计数', `说 ${Math.max(0, (s.counts.utterance ?? 0) - (s.counts.chat ?? 0))} · 改口 ${s.counts.revise} · 拒绝 ${s.counts.refusal} · 重聚 ${s.counts.reunion}${s.counts.chat ? ` · 聊天 ${s.counts.chat}` : ''}`, '说=她写过几句自己的判断（含留话）；改口=按照规则推翻或修正历史认知并指明改的是哪条（确认还成立也算一次）；拒绝=她明确登记拒绝过什么；重聚=久别之后她自己写下的感受。聊天=对话里她回你的话，单列，不算进「说」。'),
           s.quality ? h('div', { style: { marginTop: '4px', marginBottom: '2px' } },
             h('div', {
               style: { display: 'flex', gap: '8px', alignItems: 'baseline', fontSize: '13px', marginBottom: '5px' },
@@ -2197,8 +2612,15 @@ window.__ModuleLoader__.load({
             ...L.rules.map((r) => {
               const st2 = (rules.status || []).find((x) => x.id === r.id)
               // 状态只放这里，标题里不写「还不会」：解锁后两句会连在一起。不可解锁的规则没有 st2，不显示状态。
-              const tail = !st2 ? '' : st2.active ? ' · 已经可以了' : (st2.ready ? ' · 条件够了，等她开口' : ' · 还不会')
-              return h('div', { style: { fontSize: '12px', marginTop: '4px' } },
+              const tail = !st2 ? '' : st2.active ? ' · 已经可以了' : (st2.ready ? ' · 条件够了' : ' · 还不会')
+              // 条件够了不等于一定会提：申请通道关着、或者驳回到上限之后（unlock.js 的 offerDueDay 回 null），就不会再自动提。
+              // 已经提了、挂在上面等答的，也别再说「过几天会提」。
+              const readyTip = !(st2 && !st2.active && st2.ready) ? undefined
+                : st2.pending ? '她已经为这条提了申请，在上面等你答。'
+                : rules.offersOn === false ? '条件够了，但申请通道现在关着，她不会自动提。'
+                : rejectsOf(r.id) >= RULE_REJECT_MAX ? '条件够了，但这条已经驳回到上限，她不会再自动提。'
+                : `条件够了，她之后醒来时会提一次申请；驳回到上限（${RULE_REJECT_MAX} 次）之后就不会再自动提。`
+              return h('div', { style: { fontSize: '12px', marginTop: '4px' }, title: readyTip },
                 `· ${r.title}${r.inPrompt ? '' : '（不进提示词）'}${tail}`)
             }),
           ))) : null,
@@ -2206,7 +2628,7 @@ window.__ModuleLoader__.load({
         // ---- 你不在的时候 ----
         away && away.days >= 1 && !away.quiet
           ? group('你不在的时候',
-              '不推送，回来了就在这里告诉你错过了什么。',
+              '你上次来之后她做了什么；隔了一天以上才显示。',
               h('div', { className: 'kv' },
                 h('b', null, '醒了'), h('span', null, `${away.wakes} 次`),
                 // 2026-10-30：原来这里只有「看了 N 条」，数的是刷站记账——
@@ -2220,53 +2642,50 @@ window.__ModuleLoader__.load({
 
       // ---------------------------- 生长 ----------------------------
       const growPage = h('div', { className: 'page' },
-        groupFull('四个阶段与三道瓶颈',
-          '按天推进的部分只是时间尺度；真正决定走到哪一步的，是自己做过的事。',
-          h('div', { style: { fontSize: '13px', lineHeight: '1.9', opacity: 0.85 } },
-            ...STAGE_HELP.split('\n').map((line, i) => h('div', { key: 'sh' + i }, line)))),
-        group('成长节奏设置',
-          '这几个数决定「她用多少天走完四个阶段」。调大只是把速度变慢，不影响流程。',
+        group('成长',
+          null,
           h('div', { className: 'grid2' },
-            Num({ label: '成长到最后阶段所需时间', value: growthDaysUi, onChange: setGrowthDaysUi, min: 7, max: 180, unit: '天',
-              hint: '7 天很快、180 天很慢。她自己的经历决定每个阶段的早晚，这个数只是上限。' }),
-            Sel({ label: '每天最多主动醒来', value: wakes, onChange: setWakes, options: [0, 1, 2, 3, 4],
-              fmt: (v) => (Number(v) === 0 ? '0 次 · 只有你找她时才在' : `${v} 次`),
-              hint: '醒来 = 自己启动过一段时间。次数多不等于成长速度快和效果好，次数过多每次唤醒时间会变短' }),
+            Num({ label: '成长周期', value: growthDaysUi, onChange: setGrowthDaysUi, min: 7, max: 180, unit: '天',
+              hint: '四个阶段按这个天数分段；期满后没过的瓶颈自动放行。14 天及以下时，自主、主动两道瓶颈各只要一次。' }),
+            Num({ label: '冷落天数', value: absent, onChange: setAbsent, min: 1, max: 30, unit: '天',
+              hint: '你连着这么多天没来，就记下一次冷落。' }))),
+        group('定时醒来',
+          '醒来通常带一张事件卡；醒几次取「每天醒几次」和「每天事件数」里小的。',
+          h('div', { className: 'grid2' },
+            Sel({ label: '每天醒几次', value: wakes, onChange: setWakes, options: [0, 1, 2, 3, 4],
+              fmt: (v) => (Number(v) === 0 ? '0 次 · 关掉定时醒来' : `${v} 次`),
+              hint: '定时醒来的上限，手动叫醒也算；0 为关掉，手动也叫不醒。' }),
+            Sel({ label: '每天事件数', value: eventsPerDay, onChange: setEventsPerDay, options: [0, 1, 2, 3, 4, 5, 6],
+              fmt: (v) => (Number(v) === 0 ? '0 张 · 关掉定时醒来' : `${v} 张`),
+              hint: '每天最多几张事件卡，手动叫醒也算；0 为关掉，手动也叫不醒。' }),
+            Sel({ label: '每天问题卡数', value: questionsPerDay, onChange: setQuestionsPerDay, options: [0, 1, 2, 3, 4, 5, 6],
+              fmt: (v) => (Number(v) === 0 ? '0 张 · 不出问题卡' : `${v} 张`),
+              hint: '每天最多几张问答类事件卡；她向你提请求的卡不归它管。' }),
             TimeRange({ label: '每天几点醒', from: wakeFrom, to: wakeTo, onFrom: setWakeFrom, onTo: setWakeTo,
-              hint: '只在这个时段里自己醒。跨零点也可以（比如 22:00 到 02:00）。' }),
+              hint: '只在这个时段里自己醒。跨零点也可以（比如 22:00 到 02:00）；起止不能是同一时刻，填成一样会按 20:00–23:00 算。' }),
             Num({ label: '她一轮最多写多少字', value: replyChars, onChange: setReplyChars, min: 0, max: 2000, unit: '字',
-              hint: '0 = 不限，提示词里完全不提长度，长短由她自己决定。填了就对随后的对话生效。' }))),
-        group('每日事件设置',
-          '系统自动随机触发的事件，会让她启动进行思考。太少醒来后主要是自闭和自言自语，太多会流水账',
-          h('div', { className: 'grid2' },
-            Sel({ label: '每天最多推几条成长事件', value: eventsPerDay, onChange: setEventsPerDay, options: [0, 1, 2, 3, 4, 5, 6],
-              fmt: (v) => (Number(v) === 0 ? '0 条 · 不主动推' : `${v} 条`),
-              hint: '事件会促进成长。0 条不会变傻，只是那天什么都没经历' }),
-            Sel({ label: '会向你进行几次提问', value: questionsPerDay, onChange: setQuestionsPerDay, options: [0, 1, 2, 3, 4, 5, 6],
-              fmt: (v) => (Number(v) === 0 ? '0 条 · 从不主动问' : `${v} 条`),
-              hint: '问多了会退化成问答机器。建议不超过成长事件数的一半。' }),
-            Num({ label: '你多久不出现算冷落', value: absent, onChange: setAbsent, min: 1, max: 30, unit: '天',
-              hint: '超过这么多天没说话，她会记下「你不在」。' }))),
+              hint: '0 = 不限，提示词里完全不提长度，长短由她自己决定。填了只加在事件卡和经 /say 递进来的话上；会话里直接聊、她主动搭话那一轮不带。' }))),
         // 主动说话（0.8.1 本机实验）：只有 .dev 下才出现。频率是上限，不是任务——
         // 开关开着也不代表她每天都会说，说不说由她自己判断（见 lib/proactive.js）。
         // 主动搭话（0.8.1 起，0.9.0 公开）：只留跟「开口」直接有关的事。
         // 劲儿与兴趣是另一套东西，各自一张卡——混在一张卡里，用户分不清哪一项在管什么。
         group('主动搭话',
-          '她可以自己找你说话，不用你先开口。这里调的是上限：开着也可能好几天不说，那是她的判断，不是坏了。',
+          '她可以自己找你说话，不用你先开口。这里调的是上限：开着也可能好几天不说，不是坏了。开不开一轮看下一张卡的劲儿和桌上有没有东西；开了之后说不说，由她。',
           h('div', { className: 'grid2' },
             Toggle({ label: '允许她主动开口', on: proactiveOn,
               onChange: (v) => { setProactiveOn(v); patchProactive({ enabled: v }) },
-              hint: '关掉：她不会自己开一轮来找你。her_say 这个工具还在，她想说时仍可以用，只是不再由系统替她开这一轮。' }),
-            Sel({ label: '一天最多几次', value: proactiveMax,
+              hint: '还要下一张卡里的「攒劲」也开着，她才会自己开一轮。' }),
+            Sel({ label: '每天最多搭话', value: proactiveMax,
               onChange: (v) => { setProactiveMax(v); patchProactive({ maxPerDay: Number(v) }) },
               options: [0, 1, 2, 3, 4, 5, 6],
-              fmt: (v) => (Number(v) === 0 ? '0 次 · 不主动' : `最多 ${v} 次`),
-              hint: '上限，不是任务。到了上限只是今天不再多开一轮，第二天照常。' }),
-            Num({ label: '你多久没说话，她才可能开口', value: proactiveIdle,
-              onChange: (v) => { setProactiveIdle(v); patchProactive({ minIdleHours: Number(v) }) },
-              min: 1, max: 24, unit: '小时',
-              hint: '越久没说话，她越可能开口（有上限）。刚聊完不会马上又来找你。' }),
-            Text({ label: '她靠哪些工具把话发出去', value: proactiveTools, wide: true,
+              fmt: (v) => (Number(v) === 0 ? '0 次 · 不主动' : `${v} 次`),
+              hint: '上限不是任务，只数她真开口的几次；0 为不开。' }),
+            Num({ label: '安静多久才搭话', value: proactiveIdle,
+              onChange: pickProactiveIdle,
+              min: IDLE_HOURS[0], max: IDLE_HOURS[1], unit: '小时',
+              hint: '离上一句话（你的或她的）不到这么久，她不会开口。' })),
+          adv('高级',
+            Text({ label: '发话工具', value: proactiveTools, wide: true,
               placeholder: '工具名，逗号分隔；不填就只认正文',
               // 打字时不逐键保存：停手 700ms 再存，和这一页别的自动保存一样
               onChange: (v) => {
@@ -2274,23 +2693,51 @@ window.__ModuleLoader__.load({
                 clearTimeout(proactiveToolsTimer.current)
                 proactiveToolsTimer.current = setTimeout(() => patchProactive({ sendTools: v.split(/[,，\s]+/).filter(Boolean) }), 700)
               },
-              hint: '她写的字不会被插件自动发出去、要调工具才发得出去时才填，并且要放进下面的插件能力白名单。填了之后只有工具调成功才算她开了口。' }),
-            Toggle({ label: '没开口的那一轮折起来', on: proactiveCompact,
+              hint: '她的正文到不了你那边、要靠工具发时才填；还要在「插件」页放行。' }),
+            Toggle({ label: '折叠没开口的轮', on: proactiveCompact,
               onChange: (v) => { setProactiveCompact(v); patchProactive({ foldSilent: v }) },
-              hint: '省上下文。上下文很大、靠缓存省钱时可以关：改历史会让缓存失效。' }),
+              hint: '没开口的那轮在她的历史里折成一行；会让缓存失效。' }),
             Toggle({ label: '你来过也算打断安静', on: proactiveSeen,
               onChange: (v) => { setProactiveSeen(v); patchProactive({ idleCountsSeen: v }) },
-              hint: '你只从聊天软件找她、她又不写正文时才开，不然你刚聊完她也觉得安静了很久。代价是你在这台机器上和别的 agent 说话也算。' }))),
-        // 主观能动性：不是「定时叫她说话」，而是她心里慢慢攒的一股劲。
+              hint: '她靠工具回话时才开；你在本机跟别的 agent 说话也算。' }))),
+        // 主观能动性（2026-11-08，用户 m00460 追问后拆回独立一张卡）：
+        // 它和「主动搭话」不是一件事——搭话管「能不能开口、一天几次」，这一项管「什么时候自己开一轮」。
+        // 代码里 drive 只在 maybeProactive 一处被判：先过 proactive 的闸门，再看劲攒够没有。
         group('主观能动性',
-          '她心里会慢慢攒一股想动的劲：越久没自己动过、桌上越有值得看的东西，攒得越快。攒够了才会自己醒一次——不按钟点，也不是每天必须。',
+          '她心里会慢慢攒一股想动的劲：离上次自己开一轮越久攒得越多，阶段越往后攒得越快，上次开口没人接时慢一些；桌上有可说的东西会再添一点。只在「每天几点醒」的时段里、最多半小时看一次：攒够了、桌上也有东西，才自己开一轮。那一轮她也可能什么都不说。',
           h('div', { className: 'grid2' },
             Toggle({ label: '让她自己攒这股劲', on: driveOn,
               onChange: (v) => { setDriveOn(v); patchGroup('drive', { enabled: v }) },
-              hint: '关掉：她不会自己开一轮，只在你叫她、或者日程到点时才醒。已经发生的事不受影响。' }))),
+              hint: '关掉：她不会自己开一轮，只在你叫她、或者日程到点时才醒。要「允许她主动开口」也开着才起作用。' }))),
+        // 桌面提醒（issue #69）：开关与接口早已有，界面上一直没有入口，
+        // config.notify.enabled 就永远是 false——页面上那圈轮询等于白跑。
+        // 判据是 notify.js 的 lastUtteranceToday：当天她说过的任何一句都算，
+        // 定时醒来、你叫醒她、聊天里留下的话都会弹，不只是主动搭话（issue #69）。
+        group('桌面提醒',
+          '页面开着的时候，她当天说过话就会弹一条系统通知：定时醒来、你叫醒她、她自己找你，都算。一天最多一次；页面关着就不提醒——第二天打开观测台，她说过的话都还在。',
+          h('div', { className: 'grid2' },
+            Toggle({ label: '她说话时在系统里提醒我', on: notifyOn,
+              onChange: async (v) => {
+                setNotifyOn(v)
+                try {
+                  const r = await jpost('/notify', { enabled: v })
+                  setNotifyOn(Boolean(r?.enabled))
+                  setNote(r?.enabled
+                    ? '提醒开着：她说话时会弹系统通知（一天最多一次）。'
+                    // 关着时服务端一律回 due:false，页面顶上的气泡也跟着不出了（issue #69）
+                    : '提醒关掉了：系统通知和页面顶上的气泡都不会再出。她说过的话照样在观测台里。')
+                } catch (e) {
+                  setNotifyOn(!v)
+                  setErr(e.message)
+                }
+              },
+              hint: '默认关。开着也要浏览器先给通知权限，没有权限时退成页面顶上的气泡。' }),
+            (notifyPerm === 'granted'
+              ? h('p', { className: 'hint' }, '浏览器通知权限已经有了。')
+              : h('button', { className: 'btn', onClick: allowNotify }, '允许浏览器通知')))),
         // 兴趣与惦记：她醒来时桌上摆的那几样东西。
         group('兴趣',
-          '她醒来的时候，桌上会摆几样她自己的东西：她反复问起过的事、翻到过的旧句子、你回没回她留的那句话、最近总说到的那件事。这些只给她看，不会变成待办。关掉之后连旧句子也不再摆，她只会按时被叫醒。',
+          '她醒来的时候，桌上会摆几样她自己的东西：她反复问起过的事、翻到过的旧句子、她提过想要或试过才发现手上没有的东西、最近总说到的那件事，还有她留的那句话之后你来没来过。这些只给她看，不会变成待办。关掉之后这些连同旧句子都不摆；主动搭话开不开一轮不看这个开关。',
           h('div', { className: 'grid2' },
             Toggle({ label: '醒来时把这些摆出来', on: interestOn,
               onChange: (v) => { setInterestOn(v); patchGroup('interest', { enabled: v }) },
@@ -2298,35 +2745,39 @@ window.__ModuleLoader__.load({
           h('div', { className: 'grid2' },
             Toggle({ label: '醒着没事时，自己找点事做', on: selfWakeOn,
               onChange: (v) => { setSelfWakeOn(v); patchGroup('memory', { selfWake: v }) },
-              hint: '她醒来时没有派活、桌上也没有东西，可以自己翻翻旧句子、写点什么，或者什么都不做。关掉只影响「自己找事做」这一种醒来。' }))),
+              hint: '过去 7 天她一件自己的事都没做时，下一次醒来不派活：她可以翻翻旧句子、写点什么，或者什么都不做。摆旧句子的那种醒来归「兴趣」管，关这里不影响。' }))),
         // 梦：独立一张卡（用户 m02765 要求从「日记」里拿出来——它跟日记不是一件事）。
         group('做梦',
-          '她醒来可以记一句梦。梦只能用她自己说过的话拼出来，不会改任何设置，也不算成长。',
+          null,
           h('div', { className: 'grid2' },
             Toggle({ label: '允许她记梦', on: dreamEnabled,
               onChange: (v) => { setDreamEnabled(v); patchGroup('dream', { enabled: v }) },
-              hint: '关掉后不再记新的，已经记下的一条不删。' }))),
+              hint: `只能用她自己说过的话拼，每天最多一条，不算成长。${dreamSwitchNote}` }))),
         group('日记',
-          '她每天会写日记。打开下面那个开关，你就能看。',
+          '写不写由她；内容在「住所」页。',
           h('div', { className: 'grid2' },
             Toggle({ label: '写日记', on: diaryEnabled,
               onChange: (v) => { setDiaryEnabled(v); patchDiary({ enabled: v }) },
-              hint: '关掉后不再写新的，已经写好的不会删。' }),
+              hint: '关掉后她写不了新的；已写的不删，关着时你也看不到。' }),
             Toggle({ label: '让我看日记', on: diaryVisible,
               onChange: (v) => { setDiaryVisible(v); patchDiary({ visible: v }) },
-              hint: '打开即时生效，之前错过的日记看不到，只能看到以后的日记，关闭的话就是盲盒体验' }),
+              hint: '打开后能翻全部日记，包括以前写的。' }),
             Sel({ label: '日记留多久', value: diaryKeep,
               onChange: (v) => { setDiaryKeep(v); patchDiary({ keepDays: Number(v) }) },
               options: [0, 30, 90, 365, 3650],
               fmt: (v) => (Number(v) === 0 ? '永久保留' : `${v} 天`),
-              hint: '超期的日记按天清掉，不占地方。想看历史就选永久。' }))),
-        group('深度思考与学习（maybe）',
-          '隔几天她会自己把最近的碎片压成一段自述（我之前……我曾经……），形成初始认知。并非总结报告。',
+              hint: '写日记时顺手清一遍：超过这个天数的会从 diary/ 里删掉。想看历史就选永久。' }))),
+        group('回头想',
+          '隔几天提醒她把最近的事写成一段对自己的说法。',
           h('div', { className: 'grid2' },
-            Num({ label: '每几天回头想一次', value: sleepEvery, onChange: setSleepEvery, min: 0, max: 60, unit: '天',
-              hint: '0 = 不主动想。想的时候复用一次晚间唤醒，不额外多跑一次模型。' }),
+            Num({ label: '回头想间隔', value: sleepEvery, onChange: setSleepEvery, min: 0, max: 60, unit: '天',
+              hint: '到那天醒来时提醒她，那次没派事件卡就不提；0 为不提醒。' }),
             Num({ label: '总共留几条自述', value: sleepKeep, onChange: setSleepKeep, min: 0, max: 100, unit: '条',
-              hint: '超出后最早的折进「更早以前」，不删。' }))),
+              hint: '超出后最早的折进「更早以前」，原文还在事件流里、她用 her_recall 翻得到。0 = 不限制（都留着）。' }))),
+        groupFull('四个阶段与三道瓶颈',
+          '阶段按天数推进；瓶颈没过就停在原阶段，成长期满后放行。',
+          h('div', { style: { fontSize: '13px', lineHeight: '1.9', opacity: 0.85 } },
+            ...STAGE_LINES.map((line, i) => h('div', { key: 'sh' + i, style: { marginTop: i ? '4px' : '0' } }, line)))),
         )
 
       // 她写的小纸条（2026-10-29 用户 m02105：原记忆页的「信箱」卡改名字、改描述，
@@ -2342,7 +2793,7 @@ window.__ModuleLoader__.load({
               h('div', { className: 'row', style: { marginBottom: '8px' } },
                 h('button', { onClick: markInbox, disabled: busy === 'inbox' || !inbox.unread },
                   inbox.unread ? '都看过了' : '已全部看过'),
-                h('span', { className: 'dim' }, `共 ${inbox.total} 张 · 未读 ${inbox.unread} 张 · 也存了一份 ~/.dsh-fish/inbox.md`)),
+                h('span', { className: 'dim' }, `共 ${inbox.total} 张 · 未读 ${inbox.unread} 张 · 数据文件夹里也存了一份 inbox.md`)),
               inbox.rows.slice(0, 20).map((r) => h('div', { key: r.id, style: { marginTop: '10px' } },
                 h('p', { className: 'dim' },
                   `${localStamp(r.ts)}${r.unread ? ' · 未读' : ''}`),
@@ -2367,17 +2818,17 @@ window.__ModuleLoader__.load({
 
       const homePage = h('div', { className: 'page' },
         group('大肥鱼住在哪',
-          '侧栏里新增工作区和新增会话，就是她的房间。',
+          '她在侧栏里的工作区和会话。',
           !home ? h('p', { className: 'empty' }, '读取中…')
             : h('div', null,
-                rowTip('工作区', home.workspace?.ok ? '已建好' : '没建起来（宿主没有 workspaceRegistry）',
-                  '侧栏里叫「大肥鱼的家」那个工作区。'),
+                rowTip('工作区', home.workspace?.ok ? '已建好' : '没建起来',
+                  '插件建的那个工作区，默认叫「大肥鱼的家」。'),
                 rowTip('会话', home.session?.ok ? '「跟大肥鱼说话」那条' : '没建起来，下面有备用框',
-                  '每天醒来说的话都落在这条会话里。满了会自动换新的，旧的改名留档。'),
+                  '你和她说话的那条；聊满轮数自动换新，旧的留档。'),
                 rowTip('身份文件', home.selfDoc?.exists ? `${home.selfDoc.bytes} 字节` : '还没有',
-                  '身份通过 system prompt 送给她，不进对话历史；这里是它的落盘副本。'),
+                  '她每轮读的身份文本在磁盘上的副本，不进对话记录。'),
                 home.session?.ok ? null : group('备用说话入口',
-                  '侧栏里没找到那条对话，所以这里留一个能说话的框。',
+                  '她的会话还没建起来时，用这里跟她说话。',
                   h('div', { className: 'form' },
                     h('textarea', {
                       value: sayText,
@@ -2398,7 +2849,7 @@ window.__ModuleLoader__.load({
                     : null))),
 
         group('她的请求',
-          '她有事想征求你同意的时候，会弹一张卡。这里能看到问过什么、你怎么答的；没答的可以在这里补答。一天最多一次，一周最多三次。',
+          '她有事想征求你同意的时候，会弹一张卡。这里能看到问过什么、你怎么答的；没答的可以在这里补答；放了 24 小时没人答的会自动记成「以后再说」，之后就补答不了。一天最多一次，一周最多三次。',
           !asks ? h('p', { className: 'empty' }, '读取中…')
             : (() => {
                 const pend = Array.isArray(asks.pending) ? asks.pending : []
@@ -2436,7 +2887,7 @@ window.__ModuleLoader__.load({
               })()),
 
         group('日记',
-          '如果你在「成长」页勾选了看日记。日记会在这里显示，一天一页，多天时自动出现翻页',
+          '在「成长」页打开「让我看日记」后显示，一天一页。',
           !diary ? h('p', { className: 'empty' }, '读取中…')
             : !diary.enabled ? h('p', { className: 'empty' }, '没在写日记。')
             : !diary.visible ? h('p', { className: 'empty' },
@@ -2466,7 +2917,7 @@ window.__ModuleLoader__.load({
         // 2026-11-05：改成「昨夜」一张卡——梦不是她的成长数据，是一句给她自己和给你看的话。
         // 卡片右下角把她引用的那几行原文摆出来，让你一眼看见这句梦是从哪儿长出来的。
         group('她做过的梦',
-          '她偶尔会把真实发生过的事重新拼成一句梦；不算成长，也不会被当成新的记忆。',
+          '她用自己说过的话拼成的梦；不算成长，不进她的判断。',
           !dreams ? h('p', { className: 'dim' }, '还没读到。')
             : !(dreams.items ?? []).length ? h('p', { className: 'dim' }, '她还没记过梦。')
             : (() => {
@@ -2500,7 +2951,7 @@ window.__ModuleLoader__.load({
         inboxCard,
 
         group('本插件工作自检',
-          '这个插件没有要安装的依赖（只用 Node 自带的东西，外加可选的 ffmpeg）。真会坏的是别的：状态库写不进去、cookie 过期、宿主没给接口、B 站风控。',
+          '查状态库、登录、宿主接口、工具，以及 B 站连不连得上。',
           risk && risk.cooling
             ? h('p', { className: 'warn' },
                 `B 站那边正在冷却，还有约 ${risk.remainMin} 分钟。冷却期她不刷站，但照常醒来说话。`)
@@ -2540,7 +2991,8 @@ window.__ModuleLoader__.load({
       const histFlat = (hist?.groups || []).flatMap((g) =>
         (g.items || []).map((it) => ({ ...it, date: g.date })))
       const histDayCount = (hist?.groups || []).length
-      const histTotal = histFlat.length
+      // 当前选的天数没读到（histErr）：手上那份不是这个天数的，翻页条也不出（列表本身见下面的 histErr）
+      const histTotal = histErr ? 0 : histFlat.length
       const histPerDay = histDayCount ? histTotal / histDayCount : 0
       const histPageSize = histTotal === 0 ? HIST_PAGE_MAX
         : histTotal <= 8 ? histTotal
@@ -2559,33 +3011,37 @@ window.__ModuleLoader__.load({
         : null
 
       const biliPage = h('div', { className: 'page' },
-        group('能不能出门',
-          '关掉之后她就不刷 B 站了，但照常醒来说话、写日记。',
+        // 第二个参数是这一组的说明（note），控件从第三个起。0.9.5 把装控件的 grid2 填进了 note 位，
+        // 两个控件被包进了 <p class="hint">。
+        group('上网', null,
           h('div', { className: 'grid2' },
-            Toggle({ label: '允许她上网（B 站）', on: browseOn, onChange: setBrowseOn,
-              hint: '总开关。关了就只看你发给她的东西。' }),
+            Toggle({ label: '允许她上网（B 站）', on: biliOn, onChange: setBiliOn,
+              hint: '关掉后她自己翻视频、看画面、发评论都用不了。' }),
             TimeRange({ label: '上网时间段（未成年人模式）', from: browseFrom, to: browseTo, onFrom: setBrowseFrom, onTo: setBrowseTo,
-              hint: '设定什么时候可以去看b站。同时满足醒着的条件和上网时间段，才会触发刷b站行为' }))),
-        group('频率设置',
-          '只能修改环境参数——至于看什么内容，由大肥鱼决定。',
+              hint: '默认跟着「几点醒」走。她睡着的时候不会出门翻视频，醒来那一刻才现去翻（她自己临时去看不受这条限制）。' })),
+          Toggle({ label: '按时间自动替她逛一圈', on: browseOn, onChange: setBrowseOn,
+            hint: '到点自己出去走一趟：只看、只记，不叫醒她，也不会把视频标题塞进每一轮。她下次醒来只会看到一行「今天又翻到了哪几条」。' })),
+        group('翻视频',
+          // 「每天最多刷几次」只有自动逛读；她自己翻（bili_look）不受它限制，其余几项两边都用。
+          '她翻首页、搜索、相关推荐或点开一条时用这几项；「每天最多刷几次」除外，它只管自动逛。',
           h('div', { className: 'grid2' },
             Sel({ label: '每天最多刷几次', value: browsePerDay, onChange: setBrowsePerDay, options: [0, 1, 2, 3, 4],
-              fmt: (v) => (Number(v) === 0 ? '0 次 · 从不上网' : `${v} 次`),
-              hint: '一次 = 逛一圈首页/排行，挑几条看。' }),
-            Num({ label: '一次看几条', value: browseTopN, onChange: setBrowseTopN, min: 1, max: 20, unit: '条',
-              hint: '挑几条进「打算看」的清单，不是每条都深读。' }),
-            Num({ label: '每条深读几条热评', value: browseDeepRead, onChange: setBrowseDeepRead, min: 0, max: 40, unit: '条',
-              hint: '热评是她理解一个视频的主要线索。0 = 只读简介。' }),
-            Num({ label: '每条抽几条弹幕', value: browseDanmaku, onChange: setBrowseDanmaku, min: 0, max: 30, unit: '条',
-              hint: '弹幕能看出气氛。0 = 不抽。' }))),
-        // 评论区里别人的话（2026-10-24，用户 m02454）
-        // 单独一张卡，不塞进「频率设置」：它改的不是刷几次，而是**她的认知来源里要不要算上陌生人**。
-        group('评论区里的别人',
-          '她刷视频时会读到热评。打开这一项，每次最多有一条评论被她记住，并进入她的认知循环——她可能同意、可能反驳，也可能拿它来问你。',
-          Toggle({ label: '把评论区的话也给她读', on: browseVoices, onChange: setBrowseVoices,
-            hint: '每次浏览最多留 1 条：优先跨视频重复出现的那句，其次高赞短句，最后才 25% 随机抽；同一句 30 天内不再出现。关掉也能正常上网，只是她读不到别人的说法。' })),
-        group('视频画面理解',
-          '让她能看见视频画面，而不只是标题和评论。',
+              fmt: (v) => (Number(v) === 0 ? '0 次 · 不自动逛' : `${v} 次`),
+              hint: '自动逛一天最多走几趟；一趟 = 逛一圈首页/排行，挑几条看。她自己去翻不算在里面。' }),
+            Num({ label: '每次翻几条', value: browseTopN, onChange: setBrowseTopN, min: 1, max: 20, unit: '条',
+              hint: '一次最多挑几条给她；挑中的每条都整条取来，简介、标签和热评一起给她。' }),
+            Num({ label: '每条读几条热评', value: browseDeepRead, onChange: setBrowseDeepRead, min: 0, max: 20, unit: '条',
+              hint: '超过 20 按 20 算；0 为不读热评。' }),
+            Num({ label: '每条读几条弹幕', value: browseDanmaku, onChange: setBrowseDanmaku, min: 0, max: 30, unit: '条',
+              hint: '按时间均匀抽，最多给她看 8 条（从头到尾等距挑）；0 为不抽。' })),
+          // 评论区里别人的话（2026-10-24，用户 m02454）：改的不是刷几次，而是她的认知来源里要不要算上陌生人。
+          // 2026-11-08（用户 m00460）：并入「翻视频」一张卡，文案不动。
+          // #59 后续：开关只管记不记那一句（voices.js 的 recordVoice），热评照样拼进她读到的正文（browse.js），
+          // 原名「把评论区的话也给她读」让人以为关掉就读不到，所以改名；说明也补上记下的那句会用在哪。
+          Toggle({ label: '记下评论区的一句话', on: browseVoices, onChange: setBrowseVoices,
+            hint: '每次浏览最多记 1 条：优先跨视频重复出现的那句，其次高赞短句，最后才 25% 随机抽；同一句 30 天内不再记。7 天内记下的、她还没自己说过的最近一句，会摆进她的自我描述，也可能出一张事件卡问她怎么看。\n关掉就不再记新的；已经记下的那句最多再摆 7 天，之后这两样就都没有了。热评照样跟着视频给她读，不想让她读热评，把「每条读几条热评」设成 0。' })),
+        group('看画面',
+          '她点名一条视频，抽几帧拼成一张图来看。',
           h('div', { className: 'grid2' },
             Toggle({ label: '允许看视频画面', on: videoOn, onChange: setVideoOn,
               hint: '需要本机有 yt-dlp 与 ffmpeg/ffprobe，并装好 dsh-video-storyboard。' }),
@@ -2610,68 +3066,75 @@ window.__ModuleLoader__.load({
               hint: '只用来当查天气的坐标，不参与任何身份判断。她查到的是你那边此刻的天气。' }))),
         // 请求节奏（issue #5）：机房/服务器 IP 与家宽的风控阈值差别很大。
         // 这里放的是**网络环境参数**，不是她看什么、怎么想。
-        group('请求节奏（网络环境）',
-          'B 站会按 IP 判机器人：家里宽带 0.8 秒一次很安全，云服务器上同样的速度反而更容易被盯。放在设置里，是因为这件事跟"你在哪台机器上养她"有关。',
+        group('请求节奏',
+          '调慢能少被 B 站风控；云服务器上要更慢。',
           h('div', { className: 'grid2' },
             Num({ label: '两次请求最少隔多久', value: biliMinGap, onChange: setBiliMinGap, min: 200, max: 120000, step: 100, unit: '毫秒',
               hint: '默认 800。云服务器/机房 IP 建议 2000–3000；被风控过就先调到 3000。' }),
-            Num({ label: '每次再随机多等多久', value: biliJitter, onChange: setBiliJitter, min: 0, max: 60000, step: 100, unit: '毫秒',
-              hint: '默认 500。固定的节奏像机器，抖动让它看起来像人手滑。0 = 不抖。' }))),
-        group('黑名单',
-          '这些是她的避让清单。以后想到新的可以随时加。',
+            Num({ label: '随机多等', value: biliJitter, onChange: setBiliJitter, min: 0, max: 60000, step: 100, unit: '毫秒',
+              hint: '每次再随机多等 0 到这么久；0 为不加。' }))),
+        group('屏蔽',
+          '翻视频和点名看画面都管；最短时长只管列表，她点名要看的那条不查时长。',
           h('div', { className: 'grid2' },
-            Text({ label: '视频内容黑名单（逗号分隔，可随时加）', value: avoidText, onChange: setAvoidText,
+            Text({ label: '屏蔽关键词', value: avoidText, onChange: setAvoidText,
               placeholder: '恐怖，血腥，鬼畜', wide: true,
-              hint: '标题或标签里命中这些词的，她不会点进去。' }),
-            Num({ label: '太短的不看', value: avoidMinDur, onChange: setAvoidMinDur, min: 0, max: 3600, unit: '秒',
-              hint: '设定低于这个时长的视频不去看。0 = 不限制。' }),
+              hint: '标题、UP 主名或标签含这些词的跳过；逗号分隔。' }),
+            Num({ label: '最短时长', value: avoidMinDur, onChange: setAvoidMinDur, min: 0, max: 3600, unit: '秒',
+              hint: '列表里比这短的视频跳过；0 为不限。' }),
             Text({ label: 'up主黑名单', value: avoidMids, onChange: setAvoidMids,
               placeholder: '12345678，87654321', wide: true,
-              hint: '已被大肥鱼拉黑，不会再看该up主。mid 是 B 站主页地址里那串数字。' }))),
-        group('在 B 站说话',
-          '这是唯一会动账号的功能：增加大肥鱼被发现的几率，默认关闭（可能会打扰别人）',
+              hint: '跳过这些 UP 主的视频（管哪几样见本组说明）。名单只在这里改，她自己拉黑不了。mid 是 B 站主页地址里那串数字。' }))),
+        group('发评论',
+          '她用下面登录的号发评论，别人看得见。',
           h('div', { className: 'grid2' },
             Toggle({ label: '允许在评论区说话', on: commentOn, onChange: setCommentOn,
               hint: '模型自己写评论内容，养成前期不建议开启，除非你想看到你的笨比大肥鱼出去给你丢人，到处发一些意义不明的评论。' }),
-            Sel({ label: '每天最多发几条评论', value: commentPerDay, onChange: setCommentPerDay, options: [0, 1, 2, 3, 4, 5],
+            Sel({ label: '每天评论几条', value: commentPerDay, onChange: setCommentPerDay, options: [0, 1, 2, 3, 4, 5],
               fmt: (v) => (Number(v) === 0 ? '0 条 · 不发' : `${v} 条`),
-              hint: '只能评当天真的看过的：平台推的、自己主动去看的、看过画面的都算。递过来但没看一眼的不算——看过才能评。配额到了就停。' }),
-            Num({ label: '每天最多回几条别人', value: commentReplyPerDay, onChange: setCommentReplyPerDay, min: 0, max: 10, unit: '条',
-              hint: '回的是别人在她评论下面的楼中楼。' }),
-            Sel({ label: '多久看一次有没有人回复', value: commentScanMin, onChange: setCommentScanMin, options: [5, 10, 15, 30, 60, 120, 360, 720],
+              hint: '只能评她当天翻到过或看过画面的视频。' }),
+            Num({ label: '每天回复几条', value: commentReplyPerDay, onChange: setCommentReplyPerDay, min: 0, max: 10, unit: '条',
+              hint: '回别人在她评论下的话；回你的不计数。' }),
+            Sel({ label: '查回复间隔', value: commentScanMin, onChange: setCommentScanMin, options: [5, 10, 15, 30, 60, 120, 360, 720],
               fmt: (v) => (Number(v) < 60 ? `${v} 分钟` : `${Number(v) / 60} 小时`),
-              hint: '扫得勤一点回得快，也更容易撞上风控。默认 30 分钟，回看最近 7 天的楼。' }),
-            Toggle({ label: '有人回复时让她回一句', on: commentReplyTo, onChange: setCommentReplyTo,
-              hint: '关掉就只发不接，像自言自语。' }),
-            TimeRange({ label: '允许评论和回复的时间段', from: commentFrom, to: commentTo, onFrom: setCommentFrom, onTo: setCommentTo,
-              hint: '其余时间只看不回。' })),
-          cm ? h('p', { className: 'hint', style: { marginTop: '8px' } },
+              hint: '隔这么久查一次她近 7 天评论下的新回复。' }),
+            Toggle({ label: '允许回复别人', on: commentReplyTo, onChange: setCommentReplyTo,
+              hint: '关掉后回复照样转给她，但她回不了。' }),
+            TimeRange({ label: '评论时段', from: commentFrom, to: commentTo, onFrom: setCommentFrom, onTo: setCommentTo,
+              hint: '只在这个时段内能发评论和回复。' })),
+          cm && commentOn ? h('p', { className: 'hint', style: { marginTop: '8px' } },
             `今天：发了 ${cm.usedToday}/${cm.perDay} 条，回了 ${cm.replyUsedToday}/${cm.replyPerDay} 条。`,
-            cm.waitingCount
-              ? ` 有 ${cm.waitingCount} 条没回${cm.waitingOwnerCount ? `，其中 ${cm.waitingOwnerCount} 条是你回的` : ''}。`
-              : ' 没人回。') : null),
+            // issue #62：断网时服务端根本没去问，0 条不等于「没有新回复」。
+            // 「关着」按上面那颗开关的本地状态说：刚翻过、30 秒轮询还没回来时，卡片和开关不打架。
+            // 刚打开、手上这份 /comment 还是关着时取的（cm.online === false），同样没去查，只是不说「关着」。
+            !biliOn
+              ? ' 「允许她上网」关着，没去查新回复。'
+              : cm.online === false
+                ? ' 上次刷新时「允许她上网」还关着，没去查新回复。'
+                : cm.waitingCount
+                  ? ` 还有 ${cm.waitingCount} 条新回复没转给她${cm.waitingOwnerCount ? `，其中 ${cm.waitingOwnerCount} 条是你回的` : ''}。`
+                  : ' 没有新回复。') : null),
         group('领养人验证',
-          '这是要 @ 的账号，一般填你自己的大号。它和下面登录用的 cookie 是两个账号，互不影响——存 cookie、点测试都不会改这两格。',
+          '填你自己的号，一般是大号：昵称用来在评论开头 @ 你，uid 用来认出你在她评论下的回复。它和下面登录用的号可以不是同一个。这两格要点「保存这两格」才存（「保存 cookie」会顺带存上填了的）；没存就去点测试、清除登录这些按钮，页面重读后会换回已存的值。',
           // 旧版本（≤0.5.9）会把登录账号写进这两格，只有点「保存」才会重写；这里点出来，别让人以为是刷新丢的。
           owMid && ow?.account?.mid && String(owMid) === String(ow.account.mid)
             ? h('p', { className: 'warn' },
-                '这两格现在跟下面登录的账号是同一个号，像是旧版本写进去的。改成你要 @ 的 uid 和昵称，再点下面「保存这两格」。')
+                '这两格现在跟下面登录的账号是同一个号，像是旧版本写进去的。改成你自己的 uid 和要 @ 的昵称，再点下面「保存这两格」。')
             : null,
           h('div', { className: 'grid2' },
-            Text({ label: '要 @ 的 B 站 uid', value: owMid, onChange: setOwMid, placeholder: '数字，比如 12345678', wide: true,
-              hint: '就是 B 站个人主页地址里那串数字。' }),
+            Text({ label: '你的 uid', value: owMid, onChange: setOwMid, placeholder: '数字，比如 12345678', wide: true,
+              hint: '主页地址里那串数字，用来认出你在她评论下的回复。' }),
             Text({ label: '要 @ 的 B 站昵称', value: owName, onChange: setOwName, placeholder: '评论里 @ 的就是这个名字', wide: true,
               hint: '要跟 B 站上显示的一字不差（带空格也照填）。没填就 @ 不出来——空的 @ 只是一串没人认领的字符。' }),
-            Toggle({ label: '发评论时在最前面 @ 你', on: atOwner, onChange: setAtOwner,
-              hint: '关掉就不 @，评论会显得更像自言自语。这个开关改完就生效，不用按保存。' })),
+            Toggle({ label: '评论开头 @ 你', on: atOwner, onChange: setAtOwner,
+              hint: '只加在她发的评论上，回复不加；没填昵称就不 @。' })),
           // 这组自己的保存键（2026-11-06，用户反馈）：填完就地能存，不用再去下面 cookie 那栏找。
           h('div', { className: 'row', style: { marginTop: '8px', gap: '8px' } },
             h('button', { onClick: saveOwnerIdentity, disabled: busy === 'owid' },
               busy === 'owid' ? '保存中…' : '保存这两格'),
-            h('span', { className: 'hint' }, '只存上面填了的格子，不动下面那份 cookie；留空的不改原值。'),
+            h('span', { className: 'hint' }, 'uid 和昵称要点这里保存；空着的格子保留原值。'),
             owIdNote ? h('span', { className: 'dim' }, owIdNote) : null)),
         group('B 站登录',
-          '她刷视频、发评论用的账号，建议放一个小号。没存也能看视频，只是不能说话。',
+          '她发评论、回复用这个号，看画面时也会带上；建议用小号，不登录也能翻视频。',
           // 两个入口：扫码是给人用的，粘贴是退路（扫码不顺利、或者想换个号）。
           // 用 .seg 而不是页签那套 .tabs/.tab——卡片里的切换不该长得像导航栏（2026-11-02）。
           h('div', { className: 'seg' },
@@ -2686,7 +3149,7 @@ window.__ModuleLoader__.load({
           owTab === 'qr'
             ? h('div', null,
               h('p', { className: 'hint', style: { margin: '0 0 8px' } },
-                '点按钮，用手机 B 站扫弹出的码。确认成功后先给你看一眼登的是谁——你点了「就是她」才写进磁盘，中途关掉就当没扫过。'),
+                '用手机 B 站扫码；确认是哪个号后点「就是这个号，保存」才会存下，中途关掉不存。'),
               h('div', { className: 'row' },
                 h('button', { onClick: startQr, disabled: qrBusy },
                   qrBusy ? '生成中…' : qr ? '再换一张码' : '用手机扫码登录'),
@@ -2695,7 +3158,7 @@ window.__ModuleLoader__.load({
                 qrNote ? h('span', { className: 'qrerr', style: { margin: 0 } }, qrNote) : null))
             : h('div', null,
               h('p', { className: 'hint', style: { margin: '0 0 8px' } },
-                'cookie 存好之后为隐私起见不再回显，输入框永远是空的——空着不代表没存上，上面那行「已存…」才是凭据。'),
+                '存好后不回显：输入框空着不代表没存，以上面那行为准。'),
               h('textarea', {
                 rows: 3,
                 value: owCookie,
@@ -2707,7 +3170,7 @@ window.__ModuleLoader__.load({
               h('div', { className: 'row', style: { marginTop: '8px' } },
                 h('button', { onClick: saveOwnerCard, disabled: busy === 'owner' },
                   busy === 'owner' ? '保存中…' : '保存 cookie'),
-                h('span', { className: 'hint' }, '「保存 cookie」会顺带存一次上面填了的格子；只想改那两格就点上面那组里的「保存这两格」。'))),
+                h('span', { className: 'hint' }, '会顺带存上面填了的 uid 和昵称；只改那两格，点上面那组里的「保存这两格」。'))),
 
           h('div', { className: 'row', style: { marginTop: '8px' } },
             owNote ? h('span', { className: 'dim' }, owNote) : null,
@@ -2728,23 +3191,27 @@ window.__ModuleLoader__.load({
               }, busy === 'owclear' ? '清除中…' : '清除登录')
               : null,
             ow?.hasCookie
-              ? h('span', { className: 'hint' }, '测试只验这份 cookie，不保存、也不动上面那两格。')
+              ? h('span', { className: 'hint' }, '测试只查这份 cookie 登的是哪个号，不改已存的 cookie、uid 和昵称；上面两格没存的会换回已存的值。')
               : null)),
 
         // ---- 以前看了什么（视频观看历史，分页） ----
-        groupFull('看视频历史记录',
-          '按条翻页：每页 6~12 条，按你一天实际刷多少自动调，刷得越密每页越短；日期只在换天时出现一次。标题点开就是 B 站原视频。',
+        groupFull('看过的视频',
+          // 其余那部分有 look:（她自己点开的）和 browse:（自动逛和以前刷站记的），不只是旧版（issue #69）
+          '按天从近到远，点标题打开原视频；标「看过画面」的是抽帧看过的，其余是她自己点开的，或者自动逛时翻到的。',
           h('div', { className: 'grid2', style: { marginBottom: '10px' } },
             Sel({ label: '查多久的记录', value: histDays,
-              onChange: (v) => { setHistDays(Number(v)); setHistPage(0) },
-              options: [1, 7, 14, 30, 90, 180, 365],
-              fmt: (v) => (Number(v) === 1 ? '今天' : `${v} 天`),
-              hint: '最多一年。这只是查询范围，不会删记录；改完点右上「刷新」。' })),
+              onChange: pickHistDays,
+              options: HIST_DAYS_OPTIONS,
+              fmt: (v) => `${v} 个有记录的日子`,
+              hint: '按有记录的日子数，不按日历：没上网的日子不占数。只是查询范围，不会删记录；改完立刻重列，下次打开还记得。' })),
           h('div', { className: 'row', style: { marginBottom: '8px' } },
-            h('span', { className: 'dim' }, `共 ${histDayCount} 天 · ${hist?.total ?? 0} 条`),
+            h('span', { className: 'dim' }, histErr ? '没读到' : `共 ${histDayCount} 天 · ${hist?.total ?? 0} 条`),
             histPager),
-          !histFlat.length
-            ? h('p', { className: 'empty' }, '还没有记录。等她刷过一次再来。')
+          // 当前选的天数没读到（histErr）：手上那份不是这个天数的，一条都不摆
+          histErr || !histFlat.length
+            ? h('p', { className: 'empty' }, histErr
+              ? `这段时间的记录没读到，不是没有记录。换个天数，或者过一会儿再选一次。（${histErr}）`
+              : '还没有记录。')
             : h('div', null, histSlice.map((it, i) => h('div', {
                 // 列表按时间从新到旧摊平；换天时插一条日期标签（一页 12 条，不是一天一页）
                 key: `${it.date}|${it.bvid}|${i}`,
@@ -2785,12 +3252,18 @@ window.__ModuleLoader__.load({
           // 今日概览并进这里，不再单开一张卡（原来「今天看了什么」和「以前看过什么」是两次重复）
           // 2026-10-30：三个数分开报——看过画面 / 翻到过 / 递过来还没看。
           // 原来只有一个「累计看过 M 条」，把三件事算成一个数，才有的客户反馈。
+          // issue #62：browse.enabled 只是「自动逛」。「允许她上网」关着时她自己也出不去，
+          // 不能再说「她自己临时去看不受影响」。这句说的是她现在能不能出门，按上面那颗开关的
+          // 本地状态判（停手 700 毫秒就存盘），不等 /browse 的 30 秒轮询，免得和开关说反。
           !browse ? null
-            : !browse.enabled ? h('p', { className: 'hint' }, '今天没开上网。')
+            : !browse.enabled ? h('p', { className: 'hint' }, !biliOn
+              ? '今天没开自动逛；「允许她上网」也关着，她自己也打不开视频。'
+              : '今天没开自动逛（她自己临时去看不受影响）。')
             : h('p', { className: 'hint', style: { marginTop: '8px' } },
-                `今天：用了 ${browse.usedToday} / ${browse.perDay} 次，一次 ${browse.topN} 条；`
+                `今天：自动逛了 ${browse.usedToday} / ${browse.perDay} 次，一次 ${browse.topN} 条；`
                 + `其中真的看了画面 ${browse.watchedCount ?? 0} 条、只翻到过 ${browse.glancedCount ?? 0} 条`
-                + `${(browse.handed ?? []).length ? `、你递过来还没看 ${browse.handed.length} 条` : ''}。`)),
+                + `${(browse.handed ?? []).length ? `、你递过来还没看 ${browse.handed.length} 条` : ''}。`
+                + (!biliOn ? '「允许她上网」关着，她自己打不开视频。' : ''))),
         )
 
       // ---------------------------- 记忆 ----------------------------
@@ -2806,26 +3279,26 @@ window.__ModuleLoader__.load({
         }
       }
       const memoryPage = h('div', { className: 'page' },
-        group('上下文',
-          '一个侧栏会话聊到几百轮，上下文必然撑爆——不是变慢，是每轮都为几十万字付费，最后直接失败。',
+        group('会话与身份',
+          '会话聊多久换新，她每轮读到的身份段多长。',
           h('div', { className: 'grid2' },
             Num({ label: '聊满多少轮换新会话', value: rotateAfter, onChange: setRotateAfter, min: 0, max: 500, unit: '轮',
-              hint: '请在不断的循环中，找到能引发本质变化的唯一解。0 = 永不换——那条会话会一直聊到宿主上下文撑不住为止，之后这一轮会直接失败（不会自动换）。换的时候会把当前已形成的核心认知和初始信息，作为提示词带到新会话。' }),
+              hint: '请在不断的循环中，找到能引发本质变化的唯一解。0 = 永不换——那条会话会一直聊到宿主上下文撑不住为止，之后这一轮会直接失败（不会自动换）。换的时候带过去的是最近几轮原话（「上次我们说到这」），还会在旧会话里请她给新会话留一句话；身份段本来每轮都有，不用另带。' }),
             Num({ label: '会话内容多大换新', value: rotateWhenKB, onChange: setRotateWhenKB, min: 0, max: 5000, step: 100, unit: 'KB',
               hint: '0 = 不看大小，只按轮数换。轮数和上下文大小不严格挂钩——一轮里调很多次工具也会把上下文顶爆。量的是会话日志里会进上下文的内容总量（估），和上面的轮数谁先到谁生效。默认 1MB（2026-11-10 计量修准后从 800KB 调上来，800 是旧口径虚高时的保守值）。' }),
-            Num({ label: '单次上下文限制（身份文档多少字）', value: docBudget, onChange: setDocBudget, min: 600, max: 4000, step: 100, unit: '字',
+            Num({ label: '身份段字数', value: docBudget, onChange: setDocBudget, min: 600, max: 4000, step: 100, unit: '字',
               hint: '超了按照规则遗忘部分认知/经历；「初始人格」和四条禁令不会遗忘。根据经历不同，部分认知可能会变成永久记忆不再遗忘。' }))),
 
         // ---- 记忆（原「背了多少东西」） ----
         // 全是客观计数：多少字、占预算几成、多少条被挤掉。
         // 刻意不出现任何"打分"型指标（那属于 N2 禁止的量化评价）。
         group('记忆',
-          '当前上下文占用量，查看哪些变为「记不太清」的「久远回忆」。',
+          '身份段的字数用量，以及判断、矛盾、立场等计数。',
           h('div', { className: 'grid2', style: { marginBottom: '10px' } },
-            Num({ label: '每轮对话认知记忆条数', value: beliefsShown, onChange: setBeliefsShown, min: 1, max: 8, unit: '条',
-              hint: '调整的是大肥鱼能记住多少自己的定论/判断/信念。数值越大记得越多，更不容易遗忘，但是要消耗更多token，默认推荐3.' }),
-            Num({ label: '每几轮记一句你说的话', value: hearEvery, onChange: setHearEvery, min: 0, max: 50, unit: '轮',
-              hint: '0 = 不记。每 N 轮挑你说过最长的一句原话存成「旁听」，不加解释、不改写；她自己翻回忆时看到的，就是你当时说的那句原话。' })),
+            Num({ label: '眼前的判断条数', value: beliefsShown, onChange: setBeliefsShown, min: 1, max: 8, unit: '条',
+              hint: '每轮逐条给她看几条最显著的判断，其余折成一行。要消耗更多 token，默认推荐 3。' }),
+            Num({ label: '记你原话的间隔', value: hearEvery, onChange: setHearEvery, min: 0, max: 50, unit: '轮',
+              hint: '每隔这么多轮，记下你那一轮最长的一句原话，不加解释、不改写。群聊不按间隔：你在群里说的每条都记最长的一句。0 为不记，群聊里也一样。' })),
           !mem ? h('p', { className: 'empty' }, '读取中…')
             : h('div', null,
                 h('div', { className: 'row', style: { alignItems: 'center', gap: '10px' } },
@@ -2860,8 +3333,12 @@ window.__ModuleLoader__.load({
                     ? h('div', { className: 'dim' }, `　最近读到：「${mem.sections.voiceLast.text}」${mem.sections.voiceLast.echoed ? '（她认下了）' : ''}`)
                     : null,
                   // issue #32：口径同面板标题那行——含她读到的别人说法与开局起点，不只她写的。
-                  h('div', { title: '她自己写的判断、留话、日记，加上她读到并记下的别人说法和开局那份起点；不含系统后台记账。' },
-                    `· 记下的事：${mem.events ?? 0} 条 · 日记 ${mem.diaries ?? 0} 篇`),
+                  // 日记篇数：diaries 是 diary/ 里还留着的；diariesWritten 含被「日记留多久」清掉的，
+                  // 跟身份文档、her_diary 说的「写过几篇」同一个数（issue #67）。两个不一样时都写出来。
+                  h('div', { title: '事件流里除系统记账外的条数，和页头的「记录」是同一个数；日记写在文件里，不算在里面，篇数另算。' },
+                    `· 记录：${mem.events ?? 0} 条 · 日记 ${mem.diaries ?? 0} 篇${Number(mem.diariesWritten ?? 0) > Number(mem.diaries ?? 0)
+                      ? `（一共写过 ${mem.diariesWritten} 篇，更早的按「日记留多久」清掉了）`
+                      : ''}`),
                   h('div', null, `· 这条会话：${
                     (mem.session?.rotateAfter > 0 || mem.session?.rotateWhenKB > 0)
                     ? [
@@ -2876,17 +3353,17 @@ window.__ModuleLoader__.load({
                     : '不主动想'}`)),
                 (mem.selfDoc?.dropped || []).length
                   ? h('p', { className: 'dim', style: { marginTop: '6px' } },
-                      `这一段正在被预算挤掉：${mem.selfDoc.dropped.join('、')}。想把它们放回来，把「单次上下文限制」调大。`)
+                      `这几段这一轮放不下：${mem.selfDoc.dropped.join('、')}。调大「身份段字数」可以放回来。`)
                   : null,
                 h('p', { className: 'dim', style: { marginTop: '8px' } },
-                  '记忆深刻的认知详细记录；普通认知只有一句话，超出上下文的不重要记忆被折叠，被模糊（不是完全消失，只是可能记不太清）。被反复提起、或被反复检验过的会固定下来（记得很牢）——固定只代表她忘不掉，不代表那句是对的。'),
+                  '记忆深刻的认知详细记录；普通认知只有一句话，超出上下文的不重要记忆被折叠，被模糊（不是完全消失，只是可能记不太清）。被反复提起、或被反复检验过的会固定下来（记得很牢）：身份段里最多列 5 条，字数紧时这一段也可能放不下；90 天没再被提起或检验，就会掉回普通的。固定不代表那句是对的。'),
                 h('p', { className: 'dim', style: { marginTop: '6px' } },
                   '为什么这样做？1.节省token成本2.全量记忆等于提示词污染/强调，会让人格的改变无从发生3.在遗忘发生时，什么能够留下来才是更显珍贵的。'))),
 
         // ---- 记忆体检（0.7.6，2026-10-30 用户 m00342）----
         // 只读：按现在的账本算一遍。点一下才跑，不自动轮询，也不给她本人看。
         group('记忆体检',
-          '按现在的账本算一遍：哪两句话对不上、哪些快忘了、哪些快固定下来了。只读，不会写任何东西，也不算分。',
+          '按账本算一遍矛盾、久没固定的和快固定的判断；只读。',
           h('div', { className: 'row', style: { marginBottom: health ? '10px' : '0' } },
             h('button', {
               className: 'primary',
@@ -2896,21 +3373,25 @@ window.__ModuleLoader__.load({
           !health ? h('p', { className: 'dim' }, '还没查过。点上面那颗按钮才会读账本。')
             : health.error ? h('p', { className: 'err' }, `没查成：${health.error}`)
             : h('div', { style: { fontSize: '12.5px', lineHeight: '1.9' } },
-                h('div', null, `· ${health.events ?? 0} 条记录，跨 ${health.days ?? 0} 天；判断 ${health.beliefs ?? 0} 条，记得很牢 ${health.solid ?? 0} 条`),
+                h('div', null, `· 账本 ${health.events ?? 0} 行（含系统记账），跨 ${health.days ?? 0} 天；判断 ${health.beliefs ?? 0} 条，记得很牢 ${health.solid ?? 0} 条`),
                 health.empty
                   ? h('p', { className: 'dim', style: { margin: '4px 0 0' } }, '还太早：等她说出第一条判断，这里才有东西可看。')
                   : null,
+                // issue #67：总数和下面列出的行数不一样多时，两个数都写出来，别让「列出 5 处」底下只有 3 行。
                 (health.tensions ?? []).length
-                  ? h('div', { style: { marginTop: '4px' } }, `· 两句话对不上 ${health.tensions.length} 处`)
+                  ? h('div', { style: { marginTop: '4px' } }, Number(health.tensionsTotal ?? 0) > health.tensions.length
+                      ? `· 两句话对不上，共 ${health.tensionsTotal} 处，列出前 ${health.tensions.length} 处`
+                      : `· 两句话对不上，列出 ${health.tensions.length} 处`)
                   : null,
                 ...(health.tensions ?? []).map((t) => h('div', { className: 'dim', key: `${t.a}|${t.b}` }, `　「${t.a}」／「${t.b}」`)),
                 (health.stale ?? []).length
-                  ? h('div', { style: { marginTop: '4px' } }, `· 快被忘掉的 ${health.stale.length} 条（${health.staleDays ?? 21} 天以上没再提起）`)
+                  // 天数按最后一次被提起或检验算（issue #67），不是从第一次说出口算。
+                  ? h('div', { style: { marginTop: '4px' } }, `· ${health.staleDays ?? 21} 天以上没再提起或检验、眼下没固定的，列出 ${health.stale.length} 条`)
                   : null,
                 ...(health.stale ?? []).map((s, i) => h('div', { className: 'dim', key: `s${i}` },
-                  `　「${s.text}」${s.days != null ? ` · ${s.days} 天前` : ''}`)),
+                  `　「${s.text}」${s.days != null ? ` · ${s.days} 天没再提起或检验` : ''}`)),
                 (health.nearSolid ?? []).length
-                  ? h('div', { style: { marginTop: '4px' } }, `· 快固定下来的 ${health.nearSolid.length} 条`)
+                  ? h('div', { style: { marginTop: '4px' } }, `· 快固定下来的，列出 ${health.nearSolid.length} 条`)
                   : null,
                 ...(health.nearSolid ?? []).map((n, i) => h('div', { className: 'dim', key: `n${i}` },
                   `　「${n.text}」 · 被提起 ${n.mentions} 次，被检验 ${n.verified} 次`)),
@@ -3099,7 +3580,7 @@ window.__ModuleLoader__.load({
               '学一门手艺、把踩过的坑变成判断、复盘'),
             theoryCard('四阶段与三道瓶颈',
               'Bowlby 依恋理论（1969）＋ Erikson 心理社会发展（1950）',
-              '阶段按天推进，但每一道瓶颈要她自己走：先形成一条判断（信任），真的拒绝过两件事（自主），两次推翻自己的判断（主动），最后回头看（整合）。走完不再加关，之后长的是立场清单——喜欢什么、绝不做哪几件事，每条都得有代价垫着。',
+              '阶段按天推进，但每一道瓶颈要她自己走：先形成一条判断（信任），真的拒绝过两件事（自主），两次推翻自己的判断（主动），最后回头看（整合）；成长周期定在 14 天及以下时，自主和主动各一次就够。走完不再加关，之后长的是立场清单——喜欢什么、绝不做哪几件事，每条都得有代价垫着。',
               '人格养成、避免「只要熬时间就长大」'),
             theoryCard('立场：走完门才开始攒',
               'Dewey 经验的连续性（1938）＋ Schön 反思性实践（1983）＋ 本项目的取舍',
@@ -3123,7 +3604,7 @@ window.__ModuleLoader__.load({
               '训练、考核、习惯养成'),
             theoryCard('自我叙述',
               'Metzinger 自我模型（2003）',
-              '她随口说「我一直觉得自己……」这类话时会被单独记下来，成为「对自己的说法」，而不是一条普通判断。',
+              '她随口说「我一直觉得自己……」这类话时，这句照常算一条判断，同时成为最新的「对自己的说法」。',
               '身份形成、会讲自己的故事'))),
 
         groupFull('这一套能用在什么场景',
@@ -3259,7 +3740,7 @@ window.__ModuleLoader__.load({
         }))
 
       const aboutCard = group('关于',
-        '这个插件是从 npm 或 GitHub 装的，装完之后没有东西会提醒你作者又发了新版——想查就点一下。',
+        '不会自动提醒新版本，想查就点「检查更新」。',
         h('div', null,
           rowTip('当前版本', curVer || '读不到',
             '插件自己记的版本号，和 GitHub 上 tag 对应的那个。'),
@@ -3382,7 +3863,7 @@ window.__ModuleLoader__.load({
           h('div', { style: { fontSize: '13.5px', lineHeight: '1.9' } },
             h('div', null, '开发者 QQ：', h('span', { style: { fontWeight: 600 } }, '1264518494')),
             h('div', { className: 'hint', style: { margin: '8px 0 0' } },
-              '加好友备注「大肥鱼」。如果是报错之类的问题，建议把「设置 → 大肥鱼 → 数据」那份报告一起发过来，比截图好用。'))),
+              '加好友备注「大肥鱼」。报错的话，附上「数据」页导出的运行日志，比截图好用；那份不含她的原话。'))),
 
         groupFull('交流群',
           '想看看别人怎么养、想闲聊、想问一句就走，进群。',
@@ -3404,15 +3885,7 @@ window.__ModuleLoader__.load({
       // ---------------------------- 出门 ----------------------------
       // 用户 m07453：让她自己出门去别的工作区干活，回来再判这趟算不算数。
       // 「出门」不是配置（没有自动保存提示），是一次动作——所以不进 AUTO_SAVE_TABS。
-      const [outing, setOuting] = useState(null)
-      const [outingBusy, setOutingBusy] = useState(false)
-      const [outingMsg, setOutingMsg] = useState('')
-      const [outingPick, setOutingPick] = useState('')
-      const [outingEndAsk, setOutingEndAsk] = useState(false)
-      // 回家卡上被取消勾选的条目 id（默认全勾 = 空数组）
-      const [outingDrop, setOutingDrop] = useState([])
-      // 复用同一趟（0.6.16，用户 m01613）：接着这个工作区上次那条会话。
-      const [outingReuse, setOutingReuse] = useState(false)
+      // 这一块的 state 在组件开头（读不到状态时会提前 return，hook 不能写在那之后）。
 
       // 说明卡看过一遍才放开三个入口（2026-10-30，用户 m01904）。
       // 只记本地配置——挪了数据目录要重新点一次，这是有意的。
@@ -3461,7 +3934,7 @@ window.__ModuleLoader__.load({
           setOuting(await jget('/outing'))
           setOutingMsg(reuseSession
             ? '回到园区里上次那条对话了，接着做。'
-            : '她去园区了。那边没有任何会干扰记忆和认知的内容（项目笔记、交接记录等）；要交付的文件，等她回来你点头再搬。')
+            : '她去园区了，新开了一条对话。第一次去时那边没有项目笔记、交接记录；用过以后会留下这个工作区自己的记录。她做出来的文件在园区目录里。')
         } catch (e) {
           setOutingMsg(`没送出去：${e.message}`)
         } finally {
@@ -3501,16 +3974,25 @@ window.__ModuleLoader__.load({
           // 而 0.6.12 起 kept=false 根本没写 outing-reject 标记 → 一条都没跳过。
           // 现在 kept=false 会把这一趟的条目全部标上，所以要把真实条数说出来。
           const autoN = Number(r?.rejected ?? 0)
+          const held = Number(r?.held ?? 0)
           setOutingMsg(
-            r?.status === 'pending'
-              ? '这趟的记录对不上，先没算数。人已经回来了，能力也收回；把记录恢复成出门时的样子，再点「核对一次」就能算数。'
-              : keep === false
-                ? (autoN > 0
-                    ? `叫回来了。这趟不算数：她写的 ${autoN} 条全部跳过，不会算成她的成长。`
-                    : '叫回来了。这趟不算数——她这趟什么都没写，所以没有要跳过的。')
-                : drop.length
-                  ? `叫回来了。划掉了 ${drop.length} 条，那几条不算，其余的照常算。`
-                  : '叫回来了。这趟算数。',
+            r?.marked === false
+              ? `叫回来了，但${unmarkedEndText(r, '出门时')}`
+              : (r?.tampered || r?.status === 'pending')
+                // issue #68：对不上时这趟先整趟不算，人的选择存下来，核对通过后照办。
+                ? `这趟的记录对不上，先没算数${held ? `（她这趟写的 ${held} 条先全部跳过）` : ''}。人已经回来了，能力也收回；把记录恢复成出门时的样子，再点「核对一次」。` +
+                  (keep === false
+                    ? '核对通过后，这趟照你选的不算。'
+                    : autoN > 0
+                      ? `核对通过后，你划掉的 ${autoN} 条不算，其余的算上。`
+                      : '核对通过后，这趟就算数。')
+                : keep === false
+                  ? (autoN > 0
+                      ? `叫回来了。这趟不算数：她写的 ${autoN} 条全部跳过，不会算成她的成长。`
+                      : '叫回来了。这趟不算数——她这趟什么都没写，所以没有要跳过的。')
+                  : autoN > 0
+                    ? `叫回来了。划掉了 ${autoN} 条，那几条不算，其余的照常算。`
+                    : '叫回来了。这趟算数。',
           )
           setOutingEndAsk(false)
         } catch (e) {
@@ -3520,16 +4002,64 @@ window.__ModuleLoader__.load({
         }
       }
 
+      // 复核之后说清这趟是怎么结的（issue #68）：照回家时的选择，可能整趟不算、可能划掉了几条。
+      // 出门和请神共用。
+      const reviewDoneText = (r, rec) => {
+        if (!r?.ok) return '还是对不上，没算数。'
+        if (rec?.status === 'rejected') return '核对通过，这趟照你选的不算。'
+        const n = Number(r?.rejected ?? 0)
+        return n > 0 ? `核对通过，这趟算数，你划掉的 ${n} 条不算。` : '核对通过，这趟算数。'
+      }
+      // 回家时「不算」的标记没写进去（issue #68）：这趟不落成算 / 不算，留在等复核，
+      // 核对时照人的选择补写。写到一半失败的，有一些已经标上了。出门和请神共用。
+      const unmarkedEndText = (r, when) =>
+        `「不算」的标记${r?.markedPart ? '只写进去一部分' : '没写进去'}（${r?.markWhy || '写记录失败'}），这趟写的${r?.markedPart ? '有一些' : ''}眼下还算着。` +
+        (r?.tampered ? `记录也对不上：先把记录恢复成${when}的样子，` : '这趟先留在下面那张卡上：等记录能写了，') +
+        '再点「核对一次」，照你选的结。'
+      // 「还没算数」卡的标题（issue #68）：先标掉过条目的才说「还没算数」；
+      // 一条也没先标掉的（标记没写进去、升级前留下的请神），她写的一直算着，只能说「还没结完」。
+      const pendingTitle = (p, kind) => {
+        const held = Number(p?.held ?? 0) > 0
+        const head = kind === 'outing'
+          ? (held ? '上一趟还没算数' : '上一趟还没结完')
+          : (held ? '上一次请神还没算数' : '上一次请神还没结完')
+        return head + (p?.unmarked && p?.okNow ? '：「不算」的标记没写进去' : p?.checkable === false ? '' : '：记录被篡改过')
+      }
+      // 「还没算数」卡上，核对通过之后会怎么结（issue #68）。出门和请神共用。
+      const reviewPlanText = (p) => {
+        const n = Number(p?.dropped ?? 0)
+        const fix = p?.unmarked && (p?.autoRejected || n > 0) ? '先照你选的补上标记，' : ''
+        if (p?.autoRejected) return `点「核对一次」，${fix}这趟照你回家时选的不算。`
+        if (n > 0) return `点「核对一次」，${fix}这趟算数，你回家时划掉的 ${n} 条不算。`
+        return Number(p?.held ?? 0) > 0 ? '点「核对一次」，这趟就算数。' : '这趟写的一直算着，点「核对一次」只是把这趟结掉。'
+      }
+      // 「核对一次」能点时先说为什么能点（issue #68）：出门时没记下基线的那趟核对不了、按能结算算，
+      // 不能说成「已经对得上了」——卡片标题里的原因正写着「没记下她自己的记录」。
+      const reviewNowText = (p) =>
+        p?.checkable === false ? '这趟开始时没记下能比对的记录，没法核对。' : '现在记录已经对得上了。'
+      // 还没核对时这趟眼下是什么样：标记没写进去的、升级前挂上的请神 pending，都没有先标掉的条目，
+      // 她写的一直算着，不能说成「先全部不算」「还没算数」。
+      const heldText = (p) =>
+        p?.unmarked
+          ? '回家时「不算」的标记没写进去，这趟写的眼下还算着。'
+          : Number(p?.held ?? 0) > 0
+            ? `这趟她写的 ${p.held} 条先全部不算。`
+            : '这趟没有先标掉的条目，她写的一直算着。'
+
       // 核对上一次没算数的那趟（0.6.32）：记录恢复后重新比对，通过就当场算数。
       async function doReviewPending() {
         setOutingBusy(true)
         setOutingMsg('正在重新核对……')
         try {
-          const r = await jpost('/outing', { action: 'review' })
+          // 带上卡上那一趟（issue #68）：两趟都在等时，别的窗口刚结掉这一趟，
+          // 服务端取到的就是下一趟——人没看过它的卡，要回 409，不能顺手结掉。
+          const card = outing?.pendingReview ?? null
+          const r = await jpost('/outing', { action: 'review', sessionId: card?.sessionId || '', startedAt: card?.startedAt ?? null })
           setOuting(await jget('/outing'))
-          setOutingMsg(r?.ok ? '核对通过，这趟算数。' : '还是对不上，没算数。')
+          setOutingMsg(reviewDoneText(r, r?.outing))
         } catch (e) {
           setOutingMsg(`核对没过：${e.message}`)
+          jget('/outing').then(setOuting).catch(() => {})
         } finally {
           setOutingBusy(false)
         }
@@ -3537,14 +4067,7 @@ window.__ModuleLoader__.load({
 
       // 请神（2026-10-28）：把一条正在用的对话临时交给她。
       // 不做「人格设定」——请神只是把此刻的她借过去，结束时撤销，那条对话恢复原样。
-      const [possess, setPossess] = useState(null)
-      const [possessBusy, setPossessBusy] = useState(false)
-      const [possessMsg, setPossessMsg] = useState('')
-      const [possessPick, setPossessPick] = useState('')
-      // 回家审查（m02241 第⑤条）：结束请神前先把这趟多出来的条目摆出来。
-      // 默认全收下；取消勾选的会写成 possess-reject: 标记，之后派生时跳过。
-      const [possessEndAsk, setPossessEndAsk] = useState(false)
-      const [possessDrop, setPossessDrop] = useState([])
+      // 这一块的 state 也在组件开头，理由同「出门」。
 
       async function loadPossess() {
         try { setPossess(await jget('/possession')) } catch { /* 拿不到就保持原样 */ }
@@ -3582,10 +4105,19 @@ window.__ModuleLoader__.load({
           setPossessEndAsk(false)
           setPossessDrop([])
           const n = Number(r?.rejected ?? 0)
+          const held = Number(r?.held ?? 0)
           // 文案要跟结算一致（与出门 0.7.4 的修法同一套）：说「不算数」就得说清几条被跳过。
           setPossessMsg(
-            r?.tampered
-              ? `她回去了，但这趟先不算数：${r?.verify?.why || '记录对不上'}。把记录恢复成接管前的样子，再点「核对一次」。`
+            r?.marked === false
+              ? `回去了，但${unmarkedEndText(r, '接管前')}`
+              : r?.tampered
+              // issue #68：对不上时这趟先整趟不算（以前只是嘴上说，标记一条没写），人的选择留到核对通过再照办。
+              ? `她回去了，但这趟先不算数：${r?.verify?.why || '记录对不上'}${held ? `（她这趟写的 ${held} 条先全部跳过）` : ''}。把记录恢复成接管前的样子，再点「核对一次」。` +
+                (keep === false
+                  ? '核对通过后，这趟照你选的不算。'
+                  : n > 0
+                    ? `核对通过后，你划掉的 ${n} 条不算，其余的算上。`
+                    : '核对通过后，这趟就算数。')
               : keep === false
                 ? (n > 0
                     ? `回去了。这趟不算数：她写的 ${n} 条全部跳过，不会算成她的成长。`
@@ -3593,7 +4125,7 @@ window.__ModuleLoader__.load({
                 : n > 0
                   ? `回去了。划掉了 ${n} 条，那几条不算，其余的照常算。`
                   : r?.note?.ok
-                    ? '回去了，那条对话里留了一句「已经还给你了」。'
+                    ? '回去了，那条对话里补了一句交接：「（大肥鱼回去了，这条对话还给你。）」'
                     : `回去了，那条对话恢复原样${r?.note?.why ? `（那句交接没写进去：${r.note.why}）` : ''}。`,
           )
         } catch (e) {
@@ -3608,11 +4140,13 @@ window.__ModuleLoader__.load({
         setPossessBusy(true)
         setPossessMsg('正在重新核对……')
         try {
-          const r = await jpost('/possession', { action: 'review' })
+          const card = possess?.pendingReview ?? null
+          const r = await jpost('/possession', { action: 'review', sessionId: card?.sessionId || '', startedAt: card?.startedAt ?? null })
           await loadPossess()
-          setPossessMsg(r?.ok ? '核对通过，这趟算数。' : '还是对不上，没算数。')
+          setPossessMsg(reviewDoneText(r, r?.possession))
         } catch (e) {
           setPossessMsg(`核对没过：${e.message}`)
+          loadPossess()
         } finally {
           setPossessBusy(false)
         }
@@ -3639,6 +4173,10 @@ window.__ModuleLoader__.load({
 
       const awayNowUI = outing?.away ?? null
       const isOut = awayNowUI?.kind === 'outing'
+      // issue #68 第 5 条：原来按名字里含「口袋/园区」判，名字像的普通工作区也会被当成园区。
+      // 0.9.5 改成拿目录名跟工作区名比，可园区那趟的工作区名是「工作园区」，永远对不上。
+      // 现在由服务端按登记的工作区 id 或目录认（away.atPocket）。
+      const inPocketOuting = awayNowUI?.atPocket === true
       const wsList = outing?.workspaces ?? []
       const recentOutings = (outing?.outings ?? []).slice(-6).reverse()
       const outPick = outingPick || wsList[0]?.id || ''
@@ -3652,8 +4190,14 @@ window.__ModuleLoader__.load({
       const verifyText = (v) => {
         if (!v) return '还没核对。'
         if (v.checkable === false) return '这趟出门前没记下她自己的记录，回来没法核对。'
-        if (v.ok === true) return '记录里只多了她这趟写的东西，之前的内容没被改过。'
+        if (v.ok === true) return '出门前的记录没被改过。'
         return `这段记录对不上：${v.why || '内容对不上'}`
+      }
+      // 清单只摆最近那些条（issue #68）：摆不下的照常算，整趟不算时也一起标上，要说一声。
+      const moreThanListed = (since) => {
+        const total = Number(since?.total ?? 0)
+        const shown = (since?.items ?? []).length
+        return total > shown ? `清单只列出最近 ${shown} 条，更早的 ${total - shown} 条没法单独划掉，照常算；点「整趟不算」会连它们一起不算。` : ''
       }
       const outingStatusText = (o) =>
         o.status === 'active'
@@ -3677,6 +4221,7 @@ window.__ModuleLoader__.load({
         // 一个元素一段；「送她出门：」「请神：」把冒号前当小标题加粗，这么长的说明才扫得动。
         h('div', { className: 'card full' },
           h('h3', null, '关于出门'),
+          adv('点开详细了解',
           ...OUTING_INTRO.map((line, i) => {
             const cut = line.indexOf('：')
             const label = cut > 0 && cut <= 6 ? line.slice(0, cut) : ''
@@ -3690,7 +4235,7 @@ window.__ModuleLoader__.load({
             },
               label ? h('strong', null, `${label}：`) : null,
               label ? line.slice(cut + 1) : line)
-          })),
+          }))),
 
         // 确认门（2026-10-30，用户 m01904）：没点过「我知道了」，三个入口按钮先灰着。
         // 只做在界面——服务端拦住会把命令行与旧用例一起挡掉，而这里要挡的是误点。
@@ -3702,10 +4247,10 @@ window.__ModuleLoader__.load({
                 h('button', { disabled: outingBusy, onClick: doAckOuting }, outingBusy ? '正在记……' : '我知道了，开始用'),
                 h('span', { className: 'hint', style: { margin: 0 } }, '点过之后不再问；说明随时在上面的卡里。')),
               h('p', { className: 'hint', style: { margin: '8px 0 0' } },
-                '第一次用，先试「工作园区」：一个空的工作区，不会碰你别的目录。')),
+                '第一次用，先试「工作园区」：一个不带项目记录的工作区。')),
 
         groupFull('现在在哪',
-          '她现在是待在家，还是去了别的工作区。出门期间家里的日程会暂停：一个人不能同时在两个地方干活，不然两边会写进同一本记录。',
+          '她在家还是在外；在外时家里的定时日程暂停。',
           isOut
             ? h('div', null,
                 h('p', { style: { margin: '0 0 6px', fontWeight: 600 } },
@@ -3723,10 +4268,10 @@ window.__ModuleLoader__.load({
                   ? h('p', { style: { margin: '0 0 4px', color: '#e5534b', fontWeight: 600 } }, awayNowUI.warning)
                   : null,
                 h('p', { className: 'hint' },
-                  '这趟不会自动算数。她回来时，会先核对她自己的记录有没有被人改过（人为或意外篡改）；如果对不上，这趟就先不算数——人照样回家、能力也收回，只是等你点一下确认。'),
+                  '她在外面写下的，一落进记录就先算上了；叫她回家时，你可以划掉其中几条，或者整趟不算。回来时会先核对她自己的记录有没有被人改过（人为或意外篡改）；如果对不上，这趟就先整趟不算——人照样回家、能力也收回，等你恢复记录、点一下核对再照你的选择结算。'),
                 h('p', { className: 'hint' },
                   verifyText(awayNowUI.verify),
-                  outing?.identityFrozen ? ' 她带出去的是出门那一刻的自己；出门之后家里改了什么，这趟都不算数。' : ''),
+                  outing?.identityFrozen ? ' 她带出去的是出门那一刻的身份；家里之后的变化，这趟她看不到。' : ''),
                 // 想念天数（0.6.16，用户 m01677）：只写事实——第几天，不替她抒情。
                 // 2026-10-30（用户 m00650）：不再 +1——tripDays 本身就从「今天算第 1 天」起算。
                 awayNowUI.tripDays > 0
@@ -3761,11 +4306,14 @@ window.__ModuleLoader__.load({
                         // 这是**事实错误**——她的那几个工具是插件级全局注册的，口袋那条会话里
                         // 一样在手上（只是没有那个工作区的 bash/read/write）。空清单的真实原因
                         // 是她一条没写，不是她没有工具。
-                        /(口袋|园区)/.test(awayNowUI.outing?.workspaceName || '')
-                          ? '这趟她去的是园区，那个位置没有能干活的工作区工具，所以能写下的只有她自己记的东西。清单空着，通常就是这趟她没写。算不算，你说了算。'
-                          : (awayNowUI.since?.total ?? 0) === 0
-                            ? '这趟她没写新东西，所以没有可以划掉的。只跟你聊天不算她做的事。想让她留下点什么，就让她在那边记一条（说一句话、写篇日记、评个视频都行），回来这里才会出现可勾的条目。'
-                            : `这趟她写了 ${awayNowUI.since?.total ?? 0} 条记录。默认全算上；不想要的，把前面的勾去掉。她拒绝过或推翻过的会单独标出来——只挑好听的话留下，等于把这趟教坏。`),
+                        (awayNowUI.since?.total ?? 0) === 0
+                          ? (inPocketOuting
+                              ? '这趟她去的是园区。清单空着，通常就是这趟她没写下什么。算不算，你说了算。'
+                              // issue #68 起清单和结算同一个口径，记账行一条不收：写日记、评视频只留一行记账，
+                              // 不会出现在这里，所以不能再拿它们举例。
+                              : '这趟她没写新东西，所以没有可以划掉的。只跟你聊天不算她做的事；她写的日记、评的视频也不在这张清单里。想让她留下点什么，就让她在那边记一条自己的想法或判断，回来这里才会出现可勾的条目。')
+                          : `这趟她写了 ${awayNowUI.since?.total ?? 0} 条记录。默认全算上；不想要的，把前面的勾去掉。她拒绝过或推翻过的会单独标出来——只挑好听的话留下，等于把这趟教坏。` +
+                            moreThanListed(awayNowUI.since)),
                       h('div', { style: { display: 'flex', flexDirection: 'column', gap: '6px', marginTop: '6px', maxHeight: '260px', overflow: 'auto' } },
                         ...(awayNowUI.since?.items ?? []).map((it) => {
                           const on = !outingDrop.includes(it.id)
@@ -3798,9 +4346,9 @@ window.__ModuleLoader__.load({
                   // 护栏只作用于**这一条**被接管的对话——别的对话照常，不会全被拦；
                   // 结束也只能在界面里点，不能让她自己结束（第三版原文「所有对话都不能修改」「只能由用户消息覆盖」都不成立）。
                   h('p', { className: 'hint' },
-                    '这段时间，这条对话里回你话的是她，不是原来那个。护栏是这条对话共用的：分不出谁在打字，所以只有这条被接管的对话改不了她家里的东西（屋子、记忆、对话、配置），会被一起拦下来；别的对话不受影响。回你话的也不再是原来的助手。结束只能在界面里点。'),
+                    '这段时间，这条对话里回你话的是她，不是原来那个。护栏是这条对话共用的：分不出谁在打字，所以只有这条被接管的对话碰不到她家里的东西（屋子、记忆、对话、配置）——调用里带着这些路径的，读和写都会被一起拦下来；别的对话不受影响。回你话的也不再是原来的助手。结束只能在界面里点。'),
                   h('p', { className: 'hint' },
-                    '这期间她说过的话会留在上下文里（可能会干扰这条对话原本的工作），结束时系统会补一句「已经还给你了」，帮原来的助手接回人格。想完全干净，就新开一条对话。'))
+                    '这期间她说过的话会留在上下文里（可能会干扰这条对话原本的工作），结束时系统会补一句「（大肥鱼回去了，这条对话还给你。）」，帮原来的助手接回人格。想完全干净，就新开一条对话。'))
               : h('p', { className: 'dim', style: { margin: 0 } }, '在家。没有出门。'),
 
           outingMsg ? h('p', { className: 'hint', style: { marginTop: '10px' } }, outingMsg) : null,
@@ -3810,15 +4358,15 @@ window.__ModuleLoader__.load({
           // 结果人和文件都在，却是死路。这里把原因和复核按钮一起摆出来。
           (outing?.pendingReview ?? null)
             ? h('div', { style: { marginTop: '10px', padding: '8px', border: '1px solid var(--border, #333)', borderRadius: '8px', fontSize: '13px' } },
-                h('p', { style: { margin: '0 0 4px', fontWeight: 600 } }, '上一趟还没算数：记录被篡改过'),
+                h('p', { style: { margin: '0 0 4px', fontWeight: 600 } }, pendingTitle(outing.pendingReview, 'outing')),
                 h('p', { className: 'hint', style: { margin: '0 0 4px' } },
                   // 2026-10-30（用户 m00650 第三版第 21 条）：不再摆会话短号——
                   // 对普通用户来说那是一串看不懂的编号。
                   `${outing.pendingReview.workspaceName || '那个工作区'} · ${outing.pendingReview.reason || '对不上'}`),
                 h('p', { className: 'hint', style: { margin: '0 0 6px' } },
                   outing.pendingReview.okNow
-                    ? '现在记录已经对得上了。点「核对一次」，这趟就算数。'
-                    : '人已经回家了，能力也收回，只是这趟还没算数。把记录恢复成出门时的样子，再来点「核对一次」。'),
+                    ? reviewNowText(outing.pendingReview) + reviewPlanText(outing.pendingReview)
+                    : `人已经回家了，能力也收回，${heldText(outing.pendingReview)}把记录恢复成出门时的样子，再来点「核对一次」。`),
                 h('div', { className: 'row', style: { alignItems: 'center' } },
                   h('button', { disabled: outingBusy || !outing.pendingReview.okNow, onClick: () => doReviewPending() }, '核对一次'),
                   outing.pendingReview.okNow ? null : h('span', { className: 'hint', style: { margin: 0 } }, '还没恢复')))
@@ -3832,7 +4380,7 @@ window.__ModuleLoader__.load({
             : null),
 
         groupFull('工作园区（专门干活用）',
-          '一个空的工作区：没有任何会干扰记忆和认知的内容。她带过去的，只有出门那一刻的自己。在这里可以火力全开不受限制的干活。',
+          '一个固定的工作区，专门用来干活。第一次去时不带项目记录，用过以后会留下这个工作区自己的记录和文件。她带过去的，只有出门那一刻的自己。',
           !outing
             ? h('p', { className: 'hint' }, '正在读园区……')
             : h('div', null,
@@ -3861,7 +4409,7 @@ window.__ModuleLoader__.load({
                           ' 去的。不勾就新开一条。')))
                   : null,
                 h('p', { className: 'hint', style: { marginTop: '8px' } },
-                  '在工作园区里，她写不进你别的项目目录——权限是跟着工作区走的（沙箱或全部权限）。要交付的文件，等她回来再搬。'),
+                  '能不能写到别的目录，看这个工作区的权限设置（沙箱或全部权限）。她做出来的文件在园区目录里。'),
                 h('p', { className: 'hint', style: { marginTop: '8px', fontWeight: 600 } },
                   '别把她送到放着插件源码的工作区：在那边她能读到自己不该看的文件（禁令的完整清单就写在源码里）。只是干活的话，用园区最稳妥。'))),
 
@@ -3899,7 +4447,7 @@ window.__ModuleLoader__.load({
                             ' 去的。不勾就新开一条。')))
                     : null,
                   h('p', { className: 'hint', style: { marginTop: '8px' } },
-                    '出门期间：家里不会叫她、不刷 B 站、不写日记。等她回家那一刻，才决定这趟算不算数。'),
+                    '出门期间，家里不会定时叫醒她。她在那边写下的当场就先算上；叫她回家时，你可以划掉几条，或者整趟不算。'),
                   h('p', { className: 'hint', style: { marginTop: '8px', fontWeight: 600 } },
                     '这个选项有副作用：那个工作区的项目笔记、交接记录、记忆文件等凡是你之前调用过以及你的记忆类插件总结过的，会被整份带进她的上下文（可能会导致她知道很多不该、不适合知道的事）。只想让她干活，用上面的工作园区。'),
                   awayNowUI?.kind === 'possession'
@@ -3907,7 +4455,7 @@ window.__ModuleLoader__.load({
                     : null)),
 
         groupFull('请神（让她接管一条正在用的对话）',
-          '把一条对话临时交给她。从你下一句话开始，回你的就是她——是本人灵魂出窍接手回复，工具按照该会话的给，不是人格复制。你点结束时，这条对话就恢复原样。',
+          '把一条对话临时交给她。从你下一句话开始，回你的就是她——是本人灵魂出窍接手回复，工具按照该会话的给，不是人格复制。你点结束时交还，她说过的话仍留在那条对话里。',
           possessActive
             ? h('div', null,
                 h('p', { className: 'hint', style: { margin: 0, fontWeight: 600 } },
@@ -3917,9 +4465,9 @@ window.__ModuleLoader__.load({
                 // 「所有对话都不能修改」不成立——只有被接管的这一条会被拦；
                 // 「结束请神只能由用户消息覆盖」也不成立——结束只能从界面按钮触发。
                 h('p', { className: 'hint', style: { marginTop: '8px' } },
-                  '这段时间护栏是共用的：它分不出谁在打字，所以你在那条对话里也无法修改她家里的东西（屋子、记忆、对话、配置），会被一起拦下来。只有这条被接管的对话受影响，别的对话照常。回你话的也不再是原来的助手。'),
+                  '这段时间护栏是共用的：它分不出谁在打字，所以你在那条对话里也碰不到她家里的东西（屋子、记忆、对话、配置）——调用里带着这些路径的，读和写都会被一起拦下来。只有这条被接管的对话受影响，别的对话照常。回你话的也不再是原来的助手。'),
                 h('p', { className: 'hint', style: { marginTop: '6px' } },
-                  '这期间她说过的话会留在上下文里（可能会干扰这条对话的工作任务），结束时系统会补一句「已经还给你了」，帮助恢复原来的助手人格。想完全干净，就新开一条对话。'),
+                  '这期间她说过的话会留在上下文里（可能会干扰这条对话的工作任务），结束时系统会补一句「（大肥鱼回去了，这条对话还给你。）」，帮助恢复原来的助手人格。想完全干净，就新开一条对话。'),
                 // 回家审查卡（m02241 第⑤条）：两栏并排——左边逐条挑，右边看比对结果再拍板。
                 // 和出门那张卡同一套语义：默认全收下，取消勾选 = 那几条跳过；整趟不算 = 全跳过。
                 possessEndAsk
@@ -3949,7 +4497,8 @@ window.__ModuleLoader__.load({
                         h('p', { className: 'hint', style: { margin: '0 0 4px', fontWeight: 600 } }, '记录核对'),
                         h('p', { className: 'hint', style: { margin: '0 0 4px' } }, verifyText(possess?.verify)),
                         h('p', { className: 'hint', style: { margin: '0 0 6px' } },
-                          '默认全算上；左边没勾的会被标成「不算」。她拒绝过或推翻过的会单独标出来——只挑好听的话留下，等于把这趟教坏。'),
+                          '默认全算上；左边没勾的会被标成「不算」。她拒绝过或推翻过的会单独标出来——只挑好听的话留下，等于把这趟教坏。' +
+                            moreThanListed(possess?.since)),
                         h('div', { className: 'row' },
                           h('button', { disabled: possessBusy, onClick: () => doEndPossess(true, possessDrop) }, '这趟算数'),
                           h('button', { disabled: possessBusy, className: 'ghost', onClick: () => doEndPossess(false, []) }, '整趟不算'),
@@ -3975,18 +4524,18 @@ window.__ModuleLoader__.load({
                   }, possessBusy ? '正在接入……' : '请她上身')),
                 // 2026-10-30（用户 m00650 第三版第 47 条：两处不重复全文，这里缩成一句结论）。
                 h('p', { className: 'hint', style: { marginTop: '8px', fontWeight: 600 } },
-                  '注意：接上之后，这条对话的护栏就被她和原来那个共用——分不出谁在打字，所以你在那条对话里也改不了她家里的东西（屋子、记忆、对话、配置），会被一起拦下来。只有这条对话受影响，别的对话照常。只能由你结束。')),
+                  '注意：接上之后，这条对话的护栏就被她和原来那个共用——分不出谁在打字，所以你在那条对话里也碰不到她家里的东西（屋子、记忆、对话、配置），读和写都会被一起拦下来。只有这条对话受影响，别的对话照常。只能由你结束。')),
           // 上一次没结算的请神（m02241 第②条）：与出门那趟同一套——摆原因、摆复核按钮。
           // 不给这块，pending 就只剩一句「等复核」，人不知道在等什么。
           (possess?.pendingReview ?? null)
             ? h('div', { style: { marginTop: '10px', padding: '8px', border: '1px solid var(--border, #333)', borderRadius: '8px', fontSize: '13px' } },
-                h('p', { style: { margin: '0 0 4px', fontWeight: 600 } }, '上一次请神还没算数：记录被篡改过'),
+                h('p', { style: { margin: '0 0 4px', fontWeight: 600 } }, pendingTitle(possess.pendingReview, 'possess')),
                 h('p', { className: 'hint', style: { margin: '0 0 4px' } },
                   `${possess.pendingReview.title || '那条对话'} · ${possess.pendingReview.reason || '对不上'}`),
                 h('p', { className: 'hint', style: { margin: '0 0 6px' } },
                   possess.pendingReview.okNow
-                    ? '现在记录已经对得上了。点「核对一次」，这趟就算数。'
-                    : '人已经回到原来的位置了，只是这趟还没算数。把记录恢复成接管前的样子，再来点「核对一次」。'),
+                    ? reviewNowText(possess.pendingReview) + reviewPlanText(possess.pendingReview)
+                    : `人已经回到原来的位置了，${heldText(possess.pendingReview)}把记录恢复成接管前的样子，再来点「核对一次」。`),
                 h('div', { className: 'row', style: { alignItems: 'center' } },
                   h('button', { disabled: possessBusy || !possess.pendingReview.okNow, onClick: () => doReviewPossession() }, '核对一次'),
                   possess.pendingReview.okNow ? null : h('span', { className: 'hint', style: { margin: 0 } }, '还没恢复')))
@@ -3996,11 +4545,11 @@ window.__ModuleLoader__.load({
       const envPage = h('div', { className: 'page' },
         toolsCard,
         group('为什么默认只放这几个',
-          '别的插件一装，宿主会把它们的工具定义也塞进她的上下文。',
-          h('div', { style: { fontSize: '13px', lineHeight: '1.9', opacity: 0.85 } },
-            h('div', null, '工具定义本身占用每轮的上下文，开的工具过多，留给大肥鱼思考的输出余量就越少。'),
-            h('div', null, '· 工具越多，越容易「顺手做点什么」，而不是先想清楚要不要做。'),
-            h('div', null, '· 有些工具会真的动到外面的东西（发消息、下文件、跑命令），一旦接上，一句玩笑就能变成一次真实操作。'))),
+          null,
+          h('ul', { style: { margin: 0, paddingLeft: '18px', fontSize: '13px', lineHeight: '1.9', opacity: 0.85 } },
+            h('li', null, '每个工具的定义都占她每轮的上下文。'),
+            h('li', null, '工具越多，越容易顺手去做，而不是先想要不要做。'),
+            h('li', null, '有些工具会真的动到外面：发消息、下文件、跑命令。'))),
         aboutCard,
         )
 
@@ -4022,9 +4571,65 @@ window.__ModuleLoader__.load({
           a.download = name
           a.click()
           setTimeout(() => URL.revokeObjectURL(url), 4000)
-          setBackupMsg(`已导出「${name}」：${b.files?.length ?? 0} 个文件，约 ${Math.max(1, Math.round((b.bytes || 0) / 1024))}KB。`)
+          // skipped 只有真没装进去的文件，每条自带原因（超限、读不到……），报真实个数、列出名字：
+          // 0.9.5 只列前 3 条再写「等」，owner.json、state.json 这种要紧的会被盖住。
+          const skipped = Array.isArray(b.skipped) ? b.skipped : []
+          const unlisted = Math.max(0, Number(b.skippedUnlisted) || 0)
+          const missingCount = skipped.length + unlisted
+          // 照规矩不带的目录在 excluded 里。顶层的 logs/、backups/ 卡片上已经写了「不含运行日志和旧备份」；
+          // 可目录名在哪一层都认，她房间里叫 backups、node_modules 的文件夹也没带，这些要单独说，不能不声不响。
+          const CARD_SAYS = ['logs/', 'backups/', 'dsh-fish-backups/']
+          const quiet = (Array.isArray(b.excluded) ? b.excluded : []).filter((x) => typeof x === 'string' && !CARD_SAYS.includes(x))
+          // 事件流不设上限，包可能比「从备份恢复」一次能收的大。导出时就说，不要等到恢复那天。
+          const tooBig = b.fitsRestore === false
+          setBackupMsg(
+            `已导出「${name}」：${b.files?.length ?? 0} 个文件，约 ${Math.max(1, Math.round((b.bytes || 0) / 1024))}KB。`
+            + (missingCount ? `有 ${missingCount} 个文件没打进包，恢复出来也不会有：${missingText(skipped, skipped.length, unlisted)}。` : '')
+            + (quiet.length ? `另外，叫 logs、backups、node_modules 这类名字的文件夹照规矩不打包，这次没带：${quiet.slice(0, 10).join('、')}${quiet.length > 10 ? `，还有 ${quiet.length - 10} 个` : ''}。` : '')
+            + (tooBig
+              ? `这份包有 ${mbText(b.restoreBytes)}，「从备份恢复」一次最多收 ${mbText(b.restoreLimit)}，用它装不回去。换机器的话，直接把数据文件夹整个复制过去。`
+              : ''),
+          )
         } catch (e) {
           setBackupMsg(`备份失败：${e.message}`)
+        } finally {
+          setBackupBusy(false)
+        }
+      }
+
+      // issue #65：恢复撞上碎字文件时，后端不退不让——先把坏文件点出来，等人说跳过才继续。
+      // 这中间旧档、新档一个都没动（见 lib/backup.js 的 restoreBackup）。
+      async function pushRestore(obj, skipBad) {
+        setBackupBusy(true)
+        setBackupMsg(skipBad ? '正在跳过那些文件继续恢复……' : '正在恢复……')
+        setRestoreBad(null)
+        try {
+          const r = await jpost('/backup/restore' + (skipBad ? '?skipBad=1' : ''), obj)
+          // 导出时就没打进包的文件，恢复出来也没有。照报成功会让人以为全回来了。
+          // skipped 最多带前 200 条，个数以 skippedCount 为准。
+          const missing = Array.isArray(r.skipped) ? r.skipped : []
+          const unlisted = Math.max(0, Number(r.skippedUnlisted) || 0)
+          const missingCount = Math.max(Number(r.skippedCount) || 0, missing.length + unlisted)
+          const badSkipped = Array.isArray(r.skippedBad) ? r.skippedBad : []
+          setBackupMsg(
+            `已恢复 ${r.restored} 个文件。${r.quarantined ? `旧档整体封存在「${r.quarantined}」，没有删。` : ''}`
+            + (badSkipped.length ? `按你说的，${badSkipped.length} 个碎字文件跳过了、没写回去：${someOf(badSkipped, badSkipped.length)}。` : '')
+            + (missingCount ? `这份包导出时有 ${missingCount} 个文件没打进去，这次也没有恢复出来：${missingText(missing, missingCount - unlisted, unlisted)}。` : '')
+            + '重启 DSH 之后她才是这份档的样子。',
+          )
+        } catch (e) {
+          const p = e && e.payload
+          if (p && p.needDecision) {
+            // 点名：哪个文件坏了，先让人看见，再问跳不跳。
+            setRestoreBad({
+              obj,
+              files: Array.isArray(p.badFiles) ? p.badFiles : [],
+              count: Math.max(Number(p.badCount) || 0, Array.isArray(p.badFiles) ? p.badFiles.length : 0),
+            })
+            setBackupMsg('')
+          } else {
+            setBackupMsg(`恢复失败：${e.message}`)
+          }
         } finally {
           setBackupBusy(false)
         }
@@ -4037,21 +4642,15 @@ window.__ModuleLoader__.load({
         el.onchange = async () => {
           const f = el.files && el.files[0]
           if (!f) return
-          setBackupBusy(true)
-          setBackupMsg('正在恢复……')
+          let obj = null
           try {
             const text = await f.text()
-            let obj = null
             try { obj = JSON.parse(text) } catch { throw new Error('这个文件不是 json') }
-            const r = await jpost('/backup/restore', obj)
-            setBackupMsg(
-              `已恢复 ${r.restored} 个文件。${r.quarantined ? `旧档整体封存在「${r.quarantined}」，没有删。` : ''}重启 DSH 之后她才是这份档的样子。`,
-            )
           } catch (e) {
             setBackupMsg(`恢复失败：${e.message}`)
-          } finally {
-            setBackupBusy(false)
+            return
           }
+          await pushRestore(obj, false)
         }
         el.click()
       }
@@ -4072,6 +4671,8 @@ window.__ModuleLoader__.load({
             if (dir) setMoveTarget(String(dir))
             return String(dir || '')
           }
+          // 没有原生选择器（web 模式、宿主没暴露）：原来点了什么都不发生，像是按钮坏了。
+          setMoveMsg('这里打不开文件夹选择器。把文件夹的完整路径直接填进左边的框里，例如 D:\\大肥鱼。')
         } catch (e) {
           setMoveMsg(`打开文件夹选择器失败：${e.message}`)
         }
@@ -4121,7 +4722,7 @@ window.__ModuleLoader__.load({
               h('p', { className: 'hint' }, '搬的是复制 + 逐文件核对字节数。老目录不会删，会改名收在同级的 dsh-fish-backups 里。'),
               h('p', { className: 'hint' }, '搬完必须重启 DSH 才生效——她现在住哪是在启动时定下来的。'),
               moveHint ? h('p', { className: 'hint' }, moveHint) : null,
-              h('p', { className: 'dim' }, '选一个文件夹。搬过去之后会在里面建一个 dsh-fish 子目录（如果那个文件夹里已经有一份完整的档，就直接用它）。'),
+              h('p', { className: 'dim' }, '选一个文件夹，会在里面建 dsh-fish 子目录（已有非空的 dsh-fish 不行）。已经放着一份档的文件夹（里面有 events.jsonl）也不行：会直接拒绝，两边什么都不动。'),
               h('div', { className: 'row' },
                 h('input', {
                   type: 'text',
@@ -4140,8 +4741,7 @@ window.__ModuleLoader__.load({
         group('数据在哪',
           '一个文件夹装全部。想备份、想搬走、想看原始记录，都在这一格里。',
           h('div', null,
-            h('p', { className: 'dim' }, '所有东西都在同一个文件夹里。路径不显示在页面上——真要的时候点下面这个按钮复制。'),
-            h('p', { className: 'dim' }, '文件夹里有一份「说明.md」，逐项写了每个文件和子目录是什么。'),
+            h('p', { className: 'dim' }, '文件夹里的「说明.md」写了每个文件是什么。'),
             h('div', { className: 'row' },
               h('button', {
                 disabled: !dataPaths?.root,
@@ -4152,17 +4752,33 @@ window.__ModuleLoader__.load({
         group('备份与恢复',
           '备份是一份 json：事件流、配置、日记、她的房间、头像都在里面。换台机器，或者想重开一局之前，先存一份。',
           h('div', null,
-            h('p', { className: 'hint' }, '不打包 logs/（现场日志只对这台机器有用）和 backups/（备份里不再套备份）。'),
-            backupMsg ? h('p', { className: 'hint' }, backupMsg) : null),
+            h('p', { className: 'hint' }, '不含运行日志和旧备份。'),
+            // owner.json 原样在包里（主人身份和 B 站登录 cookie）。备份能发出去、能放网盘，
+            // 所以这件事要写在按钮旁边，不能只在迁移卡里提一句。
+            h('p', { className: 'hint' }, '也含主人身份和 B 站登录凭据（登录过的话）。拿到这份文件就能用你的 B 站登录，别随手发给别人。'),
+            backupMsg ? h('p', { className: 'hint' }, backupMsg) : null,
+            restoreBad
+              ? h('div', { style: { marginTop: '10px' } },
+                  h('p', { className: 'dim' }, `这份备份里有 ${restoreBad.count} 个文本文件读出来是碎字（早先导出时丢过字节，不是这次弄坏的）：`),
+                  h('p', { className: 'hint' }, someOf(restoreBad.files, restoreBad.count)),
+                  h('p', { className: 'hint' }, '现在的档什么都没动。可以跳过这些文件、其余照常恢复；也可以先不动。'),
+                  h('div', { className: 'row' },
+                    h('button', { disabled: backupBusy, onClick: () => pushRestore(restoreBad.obj, true) }, '跳过这些文件继续恢复'),
+                    h('button', {
+                      disabled: backupBusy,
+                      className: 'ghost',
+                      onClick: () => { setRestoreBad(null); setBackupMsg('') },
+                    }, '先不动')))
+              : null),
           h('div', { className: 'row' },
             h('button', { disabled: backupBusy, onClick: backupNow }, '备份成一份文件'),
             h('button', { disabled: backupBusy, onClick: restoreFromFile }, '从备份恢复')),
           h('p', { className: 'hint' }, '恢复不会覆盖删除：现在的档会整体改名到 dsh-fish-backups/pre-restore-<时间>，写坏了还能换回来。')),
 
         groupFull('每日报告',
-          '每天自动归档，不主动显示。想看得点一下，想看全部就去文件夹。',
+          '她醒过的日子各有一份；点日期看那天的。',
           !reports.dates.length
-            ? h('p', { className: 'empty' }, '还没有报告。刷过之后才会生成。')
+            ? h('p', { className: 'empty' }, '还没有报告，她醒过一次之后才有。')
             : h('div', null,
                 h('div', { className: 'row', style: { marginBottom: '8px', flexWrap: 'wrap' } },
                   ...reports.dates.map((d) => h('button', {
@@ -4175,7 +4791,7 @@ window.__ModuleLoader__.load({
                     style: d === reports.date ? { borderColor: 'var(--dsw-alias-state-business-primary)' } : undefined,
                   }, d))),
                 h('div', { className: 'row', style: { flexWrap: 'wrap' } },
-                  h('button', { onClick: () => setShowReport(!showReport) }, showReport ? '收起报告' : '每日报告'),
+                  h('button', { onClick: () => setShowReport(!showReport) }, showReport ? '收起报告' : '展开报告'),
                   h('button', { onClick: downloadReport }, '导出报告'),
                   h('button', {
                     title: '点了只是把这个文件夹的路径复制到剪贴板（不会弹窗口）——粘到资源管理器地址栏回车就能打开。',
@@ -4187,7 +4803,7 @@ window.__ModuleLoader__.load({
         // 为什么单独一张卡：她某晚没说话、没刷站、没写日记，只看状态页是猜不出来的。
         // 三件事分开做——预览（小）、导出（大、纯文本、给 AI 看）、清空（单独一次点击）。
         group('运行日志导出',
-          '出问题时把导出的文本交给 AI，比描述现象有用。日志只记插件自己做了什么，不含 cookie 和正文。',
+          '出问题时导出来发给开发者或 AI；不含 cookie 和她的原话。',
           !logTail ? h('p', { className: 'empty' }, logBusy ? '读取中…' : '还没读。')
             : h('div', null,
                 h('p', { className: 'hint' },
@@ -4214,7 +4830,7 @@ window.__ModuleLoader__.load({
             }, '导出日志'),
             h('button', {
               onClick: () => {
-                if (!window.confirm('清空运行日志？导出过的文件不受影响。')) return
+                if (!window.confirm('清空当前日志？轮转出的旧日志和导出过的文件不受影响。')) return
                 jpost('/log/clear', {}).then(() => jget('/log?lines=40')).then(setLogTail).catch(() => {})
               },
             }, '清空日志')),
@@ -4250,12 +4866,13 @@ window.__ModuleLoader__.load({
         h('p', {
           className: 'sub',
           // issue #32：这个数字（counts.total = countEvents().real）从来不只是「她写的」——
-          // 她读到的别人说法、开局那份起点、日记、答你的话都在里面。以前文案写「她记下
-          // N 条」，跟面板上「记下的事」一起被当成了「她写了 N 条」，于是永远对不上。
+          // 她读到的别人说法、开局那份起点、答你的话都在里面。日记不在：日记写在文件里，
+          // 事件流只留一条 meta。以前文案写「她记下 N 条」，跟面板上「记下的事」一起被当成了
+          // 「她写了 N 条」，于是永远对不上；#59 后续把页头改叫「记录」，跟记忆页同一个叫法。
           // 口径不改（改 real 的定义会动事件流语义与一堆派生数字），把话说清楚。
-          title: '她自己写的判断、留话、日记，加上她读到并记下的别人说法和开局那份起点；不含系统后台记账（另计）。',
+          title: '事件流里除系统记账以外的条数：她自己写下的（判断、留话、改口、拒绝、梦这些）、对话里回你的话、她读到的别人说法、记下的你的原话、开局那份起点，还有冷落、申请、请求这类替她记下的事。日记写在文件里，每篇只在系统记录里留一行标记，不算在这里。',
         },
-          s ? `第 ${s.day} / ${s.growthDays} 天 · ${s.stageName} · 她记下 ${s.counts.total} 条${s.counts.meta ? `，另有 ${s.counts.meta} 条系统记录` : ''}` : '读取中…'),
+          s ? `第 ${s.day} / ${s.growthDays} 天 · ${s.stageName} · 记录 ${s.counts.total} 条${s.counts.meta ? `，另有 ${s.counts.meta} 条系统记录` : ''}` : '读取中…'),
         err ? h('pre', { className: 'err' }, err) : null,
         note ? h('pre', { className: 'ok' }, note) : null,
         // 保存回执只是确认「存到了」，不占页签里的说明位（2026-10-29 用户）。
@@ -4276,14 +4893,18 @@ window.__ModuleLoader__.load({
                     setToolsAllowText(keep.join(', '))
                     setDroppedTools([])
                   },
-                }, '从名单里清掉这些名字'),
+                }, '也从输入框删掉'),
                 h('button', { style: { marginLeft: '8px' }, onClick: () => setDroppedTools([]) }, '知道了')))
           : null,
         // 保存失败是一个要处理的状态，不是提示：一句人话先说清「不是你填错了」，
         // 技术信息另起一行留给开发者，自己点掉。放在页签栏上方，不混进设置项里。
         saveFail
           ? h('div', { className: 'err', style: { margin: '0 0 10px' } },
-              h('div', null, '这一项没存上。不是你填错了——已经保存的内容没丢，调整之后再改一次就会重试；实在不行重启应用看看。'),
+              // 数字框只在失焦时才收回范围内；打字打到一半越界，也会落到这个框里。那时确实是数填错了。
+              // 看的是这一次失败的原因（saveFailRange），不是渲染这一刻输入框里的数。
+              h('div', null, saveFailRange
+                ? '这个数超出了允许的范围，所以没存。改回下面括号里的范围就会自动再存；已经保存的内容没丢。'
+                : '这一项没存上。不是你填错了——已经保存的内容没丢，调整之后再改一次就会重试；实在不行重启 DSH 看看。'),
               h('div', { className: 'dim', style: { marginTop: '4px' } }, `技术信息：${saveFail}`),
               h('div', { className: 'row', style: { marginTop: '6px' } },
                 h('button', { onClick: () => setSaveFail('') }, '知道了')))
@@ -4296,7 +4917,8 @@ window.__ModuleLoader__.load({
             h('button', { onClick: () => setBubble('') }, '知道了'))) : null,
 
         tabBar,
-        AUTO_SAVE_TABS.has(tab) ? h('p', { className: 'hint', style: { margin: '0 0 8px' } }, '这里的改动改完就生效，不需要点保存。') : null,
+        AUTO_SAVE_TABS.has(tab) ? h('p', { className: 'hint', style: { margin: '0 0 8px' } },
+          tab === 'bili' ? '改完自动保存；uid 和昵称、B 站登录各有自己的保存键。' : '改完自动保存。') : null,
 
         showTab('now') ? nowPage : null,
         showTab('grow') ? growPage : null,

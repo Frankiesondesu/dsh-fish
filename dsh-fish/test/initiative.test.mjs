@@ -109,6 +109,8 @@ test('proactiveState 的 chance 真的被压（这根线最容易只写不接）
   assert.equal(base.bias.factor, 1)
   const pressed = proactiveState({ config, events: [seen, refusal('不', NOW - 1 * H)], now: NOW })
   assert.equal(pressed.bias.factor, 0.6)
-  assert.ok(pressed.chance < base.chance, `被压过：${pressed.chance} < ${base.chance}`)
-  assert.ok(pressed.chance <= config.proactive.maxChance)
+  // 上游 #67 把 chance 从 state 里拿掉了（骰子退役）；压缩本身挪到 scheduler.js 的
+  // st.bias × 劲儿值（test/wake.test.mjs 那边有接线的断言）。这里钉的是系数还在。
+  assert.equal('chance' in pressed, false, 'chance 已随 #67 退场，别把它加回来')
+  assert.ok(pressed.bias.factor < 1, 'refusal 的抑制系数还在（fork.50）')
 })

@@ -54,13 +54,19 @@ test('删掉的视频控件不该再被调用（fork.22 的四个）', async () 
  * 而设置页是**整表提交**——下一次自动保存就把默认值写进了 config.json，
  * 他的唤醒时段从 18:00 变成 20:00，界面上只有一行红字，没有任何"我改了你的设置"的提示。
  *
- * 所以两条保存路径（手动 save / 700ms 自动保存）都必须先看 cfgLoaded。
+ * 所以两条保存路径（手动 save / 700ms 自动保存）都必须先确认配置读全了。
+ * 0.9.6 合入后自动保存走上游的 cfgLoads 闸（读不全时挂出 CFG_MISSING 说清楚，
+ * 不再静默返回）；cfgLoaded 与 cfgLoads 在同一段 try 末尾一起置位，保护等价。
  */
 test('配置没读出来时，两条保存路径都要拒绝写盘', async () => {
   const src = await readFile(new URL('../lib/client.js', import.meta.url), 'utf8')
   assert.match(src, /const cfgLoaded = useRef\(false\)/, '标记本身没了')
   assert.match(src, /cfgLoaded\.current = true/, '载入成功后要把它置真')
   const guards = (src.match(/if \(!cfgLoaded\.current\)/g) || []).length
-  assert.ok(guards >= 2, `手动保存与自动保存都要挡（现在只有 ${guards} 处）`)
+  assert.ok(guards >= 1, `手动保存要挡（现在只有 ${guards} 处）`)
+  assert.ok(
+    guards >= 2 || /if \(!cfgLoads\) \{ failSave\(CFG_MISSING\)/.test(src),
+    '自动保存也要挡：cfgLoaded 守卫或上游 cfgLoads 闸，二者必居其一',
+  )
 })
 

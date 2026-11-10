@@ -63,9 +63,9 @@ test('调成 1 条时只剩一条，其余折进「更早以前」', () => {
   assert.equal((seg.match(/^- 判断编号/gm) || []).length, 1)
   const old = text.slice(text.indexOf('## 更早以前'))
   assert.ok(old.includes('判断编号1'), '折行从第 2 条开始')
-  assert.match(old, /还有 \d+ 条更早的，没摆在这儿/, `折叠行要交代还有多少条：${old.slice(0, 80)}`)
-  // fork.36：这一句曾经是「你记不清原话了」——替她陈述她的记忆状态。
-  // 她把这句当成了事实写进账本（11-04 08:20），所以现在只说"没摆在这儿"。
+  assert.ok(old.includes('没摆出来'), `折叠行要交代还有多少条：${old.slice(0, 80)}`)
+  // fork.36 / 上游 #97：这一句曾经是「你记不清原话了」——替她陈述她的记忆状态。
+  // 她把这句当成了事实写进账本（11-04 08:20）。两边各自改到了同一处，钉子留着。
   assert.ok(!old.includes('记不清'), '不许替她断言她记不清：原文都在，翻不翻得到由检索门槛定')
 })
 
@@ -93,9 +93,9 @@ test('配置项：默认 3，越界被夹回 1–8', () => {
 
 test('客户端：设置项、buildConfig、上限表都在', () => {
   const src = fs.readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')
-  assert.ok(src.includes('每轮对话认知记忆条数'), '设置项标签')
+  assert.ok(src.includes('眼前的判断条数'), '设置项标签（PR #59 F5：原「每轮对话认知记忆条数」）')
   assert.ok(src.includes('beliefsShown: Number(beliefsShown)'), 'buildConfig 要提交它')
-  assert.ok(src.includes("['一次看见几条', beliefsShown, 1, 8]"), '坏值校验表')
+  assert.ok(src.includes("['眼前的判断条数', beliefsShown, 1, 8]"), '坏值校验表（PR #59 F5 改名后同步）')
   assert.ok(src.includes('setBeliefsShown(Number(cfg.memory?.beliefsShown ?? 3))'), 'load 要读它')
 })
 
@@ -103,10 +103,15 @@ test('观测台与身份文档同源：/memory 用 shownCount 而不是写死的
   const src = fs.readFileSync(new URL('../lib/observe.js', import.meta.url), 'utf8')
   assert.ok(src.includes('shownCount(config?.memory?.beliefsShown ?? BELIEF_SHOWN)'))
   assert.ok(
-    src.includes('personaBudget(model, { budget, withBans: model?.persona?.imported !== true, shown: shownCap })'),
+    src.includes('personaBudget(model, { budget, withBans: model?.persona?.imported !== true, shown: shownCap, sleepKeep: config?.memory?.sleepKeep })'),
     '禁不禁用要跟身份文档同源，并且只认事件流里的导入标记（备份/恢复搬来的 config 不算）',
   )
-  assert.ok(src.includes('Math.min(shownCap, model.beliefs.length)'))
+  // 0.9.7 起多一层「总共留几条」：先按 sleepKeep 夹住总数，再在留下的里面取眼前几条。
+  assert.ok(
+    src.includes('const kept = keepCap === null ? model.beliefs.length : Math.min(model.beliefs.length, Math.max(keepCap, shownCap))'),
+    '总数上限要先夹住，再看眼前几条',
+  )
+  assert.ok(src.includes('const shown = Math.min(shownCap, kept)'), '眼前几条永远不超过 shownCap')
 })
 
 test('白名单里额外放行的工具要念给她听（0.6.1，用户 m01371）', () => {

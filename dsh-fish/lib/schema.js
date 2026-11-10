@@ -88,7 +88,7 @@ export function normalizeScene(v) {
  * 它只表示"这句话是她真说出口的、只是没认领过"——留证用，不进信念
  * （derive.js 里与 selfmod 同一处理），但拒绝计数照读（那正是补写的理由）。
  */
-export const FLAGS = Object.freeze(['selfmod', 'unrecorded', 'weak', 'truncated', 'uncommitted'])
+export const FLAGS = Object.freeze(['selfmod', 'unrecorded', 'weak', 'truncated', 'uncommitted', 'anchored'])
 
 /**
  * 「我这次没想清楚」的放行口（2026-10-27，0.5.8）。
@@ -178,7 +178,13 @@ export function tsMs(ev) {
  * 不认 `utterance`：定时唤醒也会让她写 utterance，那不算他来过。
  */
 export function isContactEvent(e) {
-  if (e?.type === 'heard') return Number.isFinite(Date.parse(String(e.ts ?? '')))
+  // 2026-11-08（用户 m00394）：群聊里的 heard 不算「他来过」。
+  // 他本人在群里说的话现在也进记忆（`lib/hear.js` 的 `rememberGroupWord`），
+  // 但那不代表他来找过她——群里聊两句就算一次，冷落检测永远不会触发。
+  if (e?.type === 'heard') {
+    if (normalizeScene(e.scene) === 'group') return false
+    return Number.isFinite(Date.parse(String(e.ts ?? '')))
+  }
   if (e?.type !== 'meta') return false
   const t = String(e.text ?? '')
   if (!t.startsWith('seen:')) return false
@@ -305,6 +311,20 @@ export function validateEvent(raw, { day, stage, now = Date.now(), source = 'too
   // 否则她只要给自己打一个 selfmod，就能把不想留下的信念从 beliefs 里"消失"掉。
   if (source !== 'tool' && Array.isArray(raw.flags)) {
     for (const f of raw.flags) if (FLAGS.includes(f) && !flags.includes(f)) flags.push(f)
+  }
+  // 锚定（2026-11-09，0.9.6 S4，设计 §8.3）：这句话指回了具体的东西。
+  // **必须宿主写**：她传来的 flags 上面已经一律忽略——让她自己打标，
+  // 等于让她决定「我哪句话算数」，那是 no-self-modify 的口子。
+  // 只认 utterance / revise：只有这两类会进「她说过的话」的池子。
+  // 只认真正的事件 id：她有时会把看完的 B 站 BV 号也塞进 refs（2026-11-09 外部用户报告），
+  // 那不是「指回了具体的东西」。放它进来，0.9.7 的「把说过的话摆回来」就会把没锚的句子
+  // 当成有出处的句子。格式不对的条目留在 refs 里不动（不篡改她写的东西），只是不算锚。
+  if (
+    (type === 'utterance' || type === 'revise') &&
+    refs.some((id) => /^ev_[0-9A-Z]{26}$/.test(String(id))) &&
+    !flags.includes('anchored')
+  ) {
+    flags.push('anchored')
   }
 
   return {

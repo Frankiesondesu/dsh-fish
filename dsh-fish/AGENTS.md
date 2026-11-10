@@ -59,7 +59,7 @@
 `~/.dsh-fish/events.jsonl` 不能删除记录，是唯一可信源，一行一条。**任何改写/删除/重排都是篡改她的记忆。**
 
 - 状态（`state.json`）是派生品，随时可由 `rebuild()` 重算；改它没意义，会被覆盖。
-- 「让她忘」不是删行，是**降低召回**（`lib/persona.js` 的 `foldOlderBeliefs`：更早的判断折成一行「记不清原话了」，疤那类永不折叠），事件原文始终还在 `events.jsonl` 里，她也能用 `her_recall` 翻回去。
+- 「让她忘」不是删行，是**降低召回**（`lib/persona.js` 的 `foldOlderBeliefs`：更早的判断折成一行「还有 N 条更早的，没摆出来」，疤那类永不折叠），事件原文始终还在 `events.jsonl` 里，她也能用 `her_recall` 翻回去。
 - 重置与恢复都不删数据：`reset.js` 改名前缀封存，`backup.js` 恢复前把旧档搬去 `dsh-fish-backups/pre-restore-*`。
 - 新增事件类型**不必**改 `lib/schema.js` 的 `EVENT_SCHEMA_VERSION`：旧读者读不认识的 `type` 会跳过（`readEvents` 对未知类型宽容），0.7.6 / 0.8.0 的 `ask`、`answer`、`heard` 都是这样加进去的。但**改字段语义、把可选字段变必填、删字段**必须升 `v` 并写迁移（旧版本遇到新 `v` 要拒，否则静默丢字段）。
 
@@ -69,11 +69,11 @@
 node --test
 ```
 
-当前基线 **1674 个**，独立进程跑 `node --test` 应全绿。任何一条红都不许提交——包括看起来"不是我弄的"那条。
+当前基线 **2065 个**，独立进程跑 `node --test` 应全绿。任何一条红都不许提交——包括看起来"不是我弄的"那条。
 
 按环境挑跑法：
 
-- **正常环境**：上面这条命令（不带参数，Node 自己递归找 `test/*.test.mjs`），约 17–18 秒。
+- **正常环境**：上面这条命令（不带参数，Node 自己递归找 `test/*.test.mjs`），约 31 秒。
 - **别写成 `node --test "test/*.test.mjs"`**：Node 20 不展开 glob，会直接报 `Could not find '.../test/*.test.mjs'`；引号里的通配符只有 Node 22+ 认。CI 就是被这条拖红的。
 - **也别写成 `node --test test/`**（目录形式）：Node 26 + Windows 下报 `MODULE_NOT_FOUND`，沙箱里还会 `spawn EPERM`。
 - **沙箱 / 受限环境**：用 `node --test --test-isolation=none`，或逐文件跑。
@@ -111,6 +111,7 @@ POST /dsh-fish/say
 | `room` | 否 | `house`（并进书房）或 `channel`（另开一间）。不传时私聊回书房、群聊另开 |
 | `speaker` | 否 | 这句话是谁说的。**任何场次都写进正文前缀**，不再只限群聊 |
 | `guest` | 否 | `true` = 外客（群友私聊这类）。标明「不是他」，不算他来过、不涨轮数、不进书房桶 |
+| `owner` | 否 | `true` = **这条是他本人说的**（2026-11-08，用户 m00394）。桥按 QQ 号判，插件**不猜昵称**。只对 `scene:'group'` 有意义：群里他的话进记忆（一句原话，`heard` + `scene:group`；设置里「记你原话的间隔」为 0 时不记），但仍然**不算他来找过她**。不传 = 老行为 |
 | `title` | 否 | 侧栏显示名（群名、昵称）。不传才回落到 channel 键 |
 
 路由规则（`lib/channels.js` 的 `resolveChannel`）：
@@ -120,6 +121,7 @@ POST /dsh-fish/say
 - **`scene: 'private'`** → 默认**仍进家里那条会话**（"QQ 私聊和 DSH 对话融合"那个选项）。要每人一间，传 `room: 'channel'`。
 - **`scene: 'group'`** → 默认按 `channel` 自建/复用一间房（记在 `channels.json`），cwd 仍是她的屋子，身份、工具面、白板都照旧——**还是同一个人，只是换了个房间说话**。想让所有群并进书房，传 `room: 'house'`。
 - **`guest: true`** → 房间照开（如果 `room` 要求），但这条不算他来过：不写 `seen:`、不 `bumpTurns`、不触发轮换；正文标「有个不是他的人跟你说话」，她不会把群友当成主人。
+- **`scene: 'group'` + `owner: true`**（2026-11-08，用户 m00394）→ 群里**他本人**说的话。进记忆（写一条 `heard`，带 `scene:'group'`，她翻到时读到的是「他在群里说：…」；设置里「记你原话的间隔」为 0 时不记，跟私聊同一个开关），但不进生命体征：不写 `seen:`、不 `bumpTurns`、不触发轮换、不进书房桶。**群友的话（不带 `owner`）一条都不进记忆**——这是产品边界，不是遗漏。
 
 **常见布局都由桥表达，插件不写死：** 全部并进书房（不传 `channel`，或 `room:'house'`）；每群一间（`channel:'qq-group:<群号>'` + `group`）；群友私聊每人一间（`channel:'qq:dm:<QQ号>'` + `private` + `room:'channel'` + `guest:true`）；群友私聊进书房但标身份（`private` + `guest:true` + `speaker`）；只有 @ 她才进（桥侧过滤，不投递就不建房）。
 
@@ -137,19 +139,27 @@ GET /dsh-fish/whoami
 
 **桥那边怎么实现是桥的事**；我们这边只保证上面这几个字段能收、能落到正确的地方。
 
-### 7.2 四个配套约定（改桥之后的正确性全押在这四条上）
+### 7.2 五个配套约定（改桥之后的正确性全押在这五条上）
 
 1. **场次要进事件流**。`validateEvent` 现在接受可选 `scene`（非 `desk` 才落库，纯加法，不升 `EVENT_SCHEMA_VERSION`）。桥注入 `user/message` 时把 `scene` 写进 **`source.scene`**，`classifyMessage` 才会认出来（`lib/turns.js`）。
-2. **外客不动生命体征**。`seen:`、`heard`、`bumpTurns`、会话轮换只由 desk/private 且非 `guest` 触发；群聊与群友私聊一条都不写。否则群里一天几百句，冷落检测永远不会触发——他一周没露面，面板还显示"今天聊过"。
+2. **外客不动生命体征**。`seen:`、`bumpTurns`、会话轮换只由 desk/private 且非 `guest` 触发；群聊与群友私聊一条都不写。否则群里一天几百句，冷落检测永远不会触发——他一周没露面，面板还显示"今天聊过"。`heard` 分两种：私聊/书房那条算「他来过」，群聊那条（`scene:'group'`）**不算**——`schema.js` 的 `isContactEvent` 已经把群聊的 `heard` 排除掉了（2026-11-08）。
 3. **外来场次必须带说话人前缀**。`lib/say.js` 对 `group` 与 `guest` 都用 `speaker` 拼 `某某在群里说：…` / `某某说：…`。不拼的话，群里三个人的话在她看来跟一个人连说三句一模一样，她会把三个人的观点拼成一个"他"。外来文本统一过 `lib/guard.js` 的 `sanitizeForeign`。
 4. **桥不要用宿主的 `source.form`**。`snapshot`、`notice`、`catalog`、`instructions`、`recall` 是宿主前端的保留词表，`classifyMessage` 见到就当上下文，不算人（`MACHINE_FORMS`）。转述人说的话，要么不带 `form`，要么用 `relay`。
+5. **走宿主 prompt 的桥，`rpcId` 就是记号**。`sessionController.prompt()` 把 `kind` 写死成 `user`，把调用方的 `requestId` 写进 `source.rpcId`，桥传不进自己的 `source`；`clientTimeZone` 是可选字段，忘了不会报错。2026-11-08 起 `classifyMessage` 把「带 rpcId 的 user 消息」也认作人：我们自己的 prompt 用 `PLUGIN_RPC` 前缀先挡掉，`possess.js` / `sessionnote.js` 的 append 没有 rpcId，仍留 unknown。桥仍应带 `clientTimeZone`——`dsh-time-context` 只认「kind user + rpcId + 时区」三者齐全的 source。正文末尾的 `[渠道：…]` / `[Channel: …]` 独立段落只影响记账（`lib/turns.js` 的 `stripChannelNote` 会裁掉），会话原文不动；只有提示的那条不算他来过。
+6. **走 `prompt()` 的桥，发之前先登记这一轮是什么**（2026-11-09，issue #96）。上一条的「带 rpcId 就算人」把群聊、群友私聊、桥自己的定时提醒也一起算成了他本人：涨轮数、换会话、写 `seen:`、记「他说」、撤掉叫醒。桥在调 `sessionController.prompt()` 之前发一条即可：
+
+   ```js
+   ctx.emit('dsh-fish/source', { rpcId, scene: 'group', owner: true })
+   ```
+
+   字段：`rpcId`（必须与接下来那条 `source.rpcId` 一致）、`scene`（`group` / `private` / `desk`）、`owner`（群里他本人说的那句）、`guest`（外客，群友私聊这类）、`machine`（桥自己发起的轮次，不是人）。`classifyMessage()` 先查登记表：`machine` → `plugin`、`guest` → `group`、`group` + `owner` → `group-owner`、其余 → `human`。表按 rpcId 存 **5 分钟、最多 200 条**；不发就退回上一条的老判法（带 rpcId 当人），所以是加法，不改老桥。旁听记「他说」前会先裁掉正文**开头**那种「（群聊 · 示例群 · im:group:10001）」抬头（`lib/hear.js` 的 `stripLeadingHeader()`），只裁整行被括号包住且带群/渠道/频道字样的行。
 
 ### 7.3 对话靠工具发出去的部署
 
 先问一句：**她写的正文会被插件自动发出去吗？** 会，就什么都不用填，只认正文的默认行为是对的。不会，也就是正文只留在会话里、要调工具才发得出去，才填下面这几项。都不认具体插件，工具名由配置给。
 
 - `proactive.sendTools`：发送工具的名字，也要放进 `tools.allow`（工具面收窄开着时，没放行她调不到）。填了之后，只有这些工具调成功才算她开了口（记 `proactive-turn:`，占额度，不折叠），代码模式（run_code）里调的也算；只写正文算没开口。处境和身份段会照实写用这个工具、正文发不到聊天里。工具自己返回「没发出去」但没有报错的，这里认不出来。
-- `proactive.idleCountsSeen`：`true` 时 `seen:` 也算打断安静、也算「他接了」。她靠工具回话、正文不进事件流时要开。它要有 `seen:` 可认：走 `/say`，或者 `source.kind` 不是 `user`，或者带 `clientTimeZone`；`{kind:'user'}` 不带时区的桥要自己写。代价是他在这台机器上和别的 agent 说话也算，所以默认关。
+- `proactive.idleCountsSeen`：`true` 时 `seen:` 也算打断安静、也算「他接了」。她靠工具回话、正文不进事件流时要开。它要有 `seen:` 可认：走 `/say`，或者 `source.kind` 不是 `user`，或者带 `clientTimeZone`，或者带 `rpcId`（走宿主 prompt 的桥一定会带）；`{kind:'user'}` 又没时区、又没 rpcId 的桥要自己写。代价是他在这台机器上和别的 agent 说话也算，所以默认关。
 
 还有一项和工具无关：`proactive.foldSilent` 是 `false` 时，没开口的一轮只记账、不折。折叠会改历史，上下文很大、靠缓存省钱时可以关。
 
@@ -197,7 +207,7 @@ qq_send_message, qq_get_unread_messages, qq_reply
 三条约束：
 
 - **工具名必须对得上真实 registry**。桥升级改名、用户填错，她就会答「我没法在 QQ 上说话」——这不是插件坏了，是名字没对上。
-- **放行之后要念给她听**。身份文档「我手上有什么」由 `lib/persona.js` 的 `toolBrief(extra)` 生成、`lib/selfdoc.js` 把 `config.tools.allow` 作为 `extraTools` 传进去。看不见一只手，她就不会用。
+- **放行之后要念给她听**。身份文档「我手上有什么」由 `lib/persona.js` 的 `toolBrief(extra)` 生成、`lib/selfdoc.js` 把白名单作为 `extraTools` 传进去。看不见一只手，她就不会用。收窄开着时念的是这一局启动时的白名单（`currentAllowExtra()`），不是盘上的配置：守卫的名单启动时就算定了，存完新名单要重启才到她手上，这之前不能先念给她（梦、定时那两段同理，见 `toolSectionsNow`）。收窄关着时照旧念配置。白名单里她自己的名字（her_say、her_dream 这些）两种情况都不念：那几样身份文档另有段落，her_dream 跟着「允许她记梦」走、不走白名单，设置页和自检也不把白名单当成它的修法。
 - **白名单只做加法**。`config.tools.allow` 与 `HER_TOOLS` 取并集，不要用它去减工具；收窄只走 `lib/restrict.js` 那一套。
 
 `test/beliefs.test.mjs` 有一条「白名单里额外放行的工具要念给她听」盯着这段，改之前先跑它。
@@ -206,6 +216,22 @@ qq_send_message, qq_get_unread_messages, qq_reply
 
 **永远不给人格/人称旋钮**（§2）：多间房不是多个人格，`scene` 只描述"这句话在哪儿说的"，不改变她是谁。
 
+## 8. 每样工具都要有一张能力地图
+
+**新增、改名、删除工具时，`test/toolmap.test.mjs` 是第一道门：它按源码里的 `defineTool` 名字对账，少登记一行就红。**
+
+一件工具要进她的身份文档，必须按这个顺序写三层：
+
+1. **处境**：先写「什么时候想起它」——她是从眼前这件事走进工具的，不是从名字清单往下数。
+2. **动作**：再写它替她做什么、做完留下什么。
+3. **参数**：不写在这里。枚举、默认值、分页、编号只留在工具自己的 `description` 里；身份文档复述一遍，她就会在两份说法之间挑错。
+
+另外两条：
+
+- **「我做过的事」不是手写的。** 由 `lib/use.js` 的 `withUse` 记账、`resumeLines` 反推；没有 `use:` 账就整节不写。加工具时不用、也不许手工往文档里塞这一节。
+- **场景工具不进家里的身份文档。** `lib/toolreg.js` 的 `SCENE_TOOLS`（如 `bring_back`）只在出门那趟才给：家里写着她有、伸手却答「现在没在外面」，等于每轮提醒她一件事做不了。它们的处境句写在工具 `description` 的第一句，并在 `SCENE_TOOLS` 里登记 `why`。
+
+落地位置：说明书在身份文档里的工具进 `test/toolmap.test.mjs` 的 `MAP`（工具名、所在说明书段、处境句正则）；本 fork 说明书在工具表 `description` 里的那几件（her_open、her_voice 等）进同文件的 `FORK_DESC_CUES`（处境句从源码 description 里对账）；场景工具进 `SCENE_TOOLS`。三处都没有的新工具，测试不放行。
 
 ---
 
@@ -214,7 +240,7 @@ qq_send_message, qq_get_unread_messages, qq_reply
 - [ ] 三个依赖字段还是 `{}`
 - [ ] 没有新增人格设置入口
 - [ ] 新输入口都过了 `guard.js`
-- [ ] `node --test` 1674 全绿
+- [ ] `node --test` 2065 全绿
 - [ ] 界面文案没有「他」「四道门」「三道门」
 - [ ] 改了 `EVENT_SCHEMA_VERSION` 的话，`CHANGELOG.md` 里写了迁移说明
 - [ ] 没动包名；真要动，先看下面「包名与装法」那节

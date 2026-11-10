@@ -17,18 +17,16 @@ import { join } from 'node:path'
 import { deriveSelfCached } from './derive.js'
 import { validateEvent } from './schema.js'
 import { readEvents, appendEvent, rootDir, ensureHer, paths, readJson } from './store.js'
-import { loadConfig, dateKey, inWindow, pickWakeTime, updateConfig } from './settings.js'
+import { loadConfig, dateKey, inWindow, pickWakeTime, updateConfig, biliOn } from './settings.js'
 import { plan } from './generator.js'
 import { findTemplate } from './events.js'
 import { offerPrompt, SLEEP_TODAY } from './persona.js'
-import { offerDueDay, pendingOffer, grantableRules } from './unlock.js'
+import { offerDueDay, offerLimits, pendingOffer, grantableRules } from './unlock.js'
 import { holdWake } from './wakewin.js'
 import { detectAbsence, lastAbsenceEvent } from './absence.js'
 import { createClient } from './bili.js'
-import { gather, browseCountToday, recordBrowse } from './browse.js'
-import { seenOn } from './whatseen.js'
-import { renderWatchList } from './history.js'
-import { fetchCover, coverLines } from './cover.js'
+import { gather, browseCountToday, recordBrowse, lastBrowseAt, browseGapMs } from './browse.js'
+import { seenOn, glancedItems, digestMentioned, DIGEST_PREFIX } from './whatseen.js'
 import { riskState, browsePlan, noteRisk, isRiskCode } from './risk.js'
 import { scanReplies, renderReplies, repliesScanDue, markRepliesSeen, REPLY_SHOW_MAX } from './comment.js'
 import { flushReport } from './report.js'
@@ -48,9 +46,11 @@ import { followWake, planWakeCompaction, compactWake, looksLikeNothingSaid, look
 import { logLine } from './log.js'
 import { recordGrant, GRANT_YES, GRANT_NO } from './grant.js'
 import { readNotes, renderNotes } from './note.js'
+import { dueAppointment, appointPrompt, markNotified } from './appoint.js'
 import { curiosityOf, renderEcho } from './curiosity.js'
 import { deskFor } from './desk.js'
 import { wishesOf } from './wish.js'
+import { currentAllowTools, configuredAllowTools, visibleAllowTools } from './restrict.js'
 import { gapwallsOf } from './gapwall.js'
 import { driveOf, deskHasMaterial } from './drive.js'
 import { interestOf, topicLabel } from './interest.js'
@@ -108,6 +108,34 @@ const WAKE_FAIL_MANUAL = '手动 '
 const IDLE_WAIT_MS = 10 * 60_000
 // turn/start 之后迟迟等不到 turn/end（宿主重启、事件丢了），超过这么久就不再当她在忙
 const BUSY_STALE_MS = 15 * 60_000
+
+/**
+ * 她此刻手上真正有的工具名（issue #58，2026-11-08）。
+ *
+ * 摆「够不着的那件事」时用来剔掉已经到手的：`need-tool` 卡不发权限，他只能
+ * 在卡外给（装插件 / 加白名单），事件流里没有这条记录，所以要看白名单里她那条会话此刻真有的那部分。
+ * 收窄关着、家里那条的 agent 还没见到时 `currentAllowTools()` 返回 null —— 不传，
+ * 宁可多摆一条，也不能把「不知道」当成「没有」。
+ *
+ * 只按家里那一条算：会话 id 和 agent 都没有时直接当「不知道」，不让 `currentAllowTools()`
+ * 退回最近建的那个她——那可能是一间群房，工具表跟家里不一样。
+ *
+ * `unverified` 只给劲儿那一处用：重启后她那条会话是冷的，agent 要等第一次被叫起来才建，
+ * 劲儿却在那之前就要算。这时白名单里的名字先当到手——没核实过的卡不单独推她醒，
+ * 已经到手的那张也不会把她推起来（0.9.5 修好的那件事）。真醒了，桌上按核实过的摆。
+ *
+ * @param {string} [sessionId] 家里那条会话（她可能同时住着好几条，按这条的工具表算）
+ * @param {{unverified?: boolean, agent?: object}} [opt] `agent`：探活时宿主交回来的那条会话的 agent
+ */
+function toolInHandNow(sessionId = '', { unverified = false, agent = null } = {}) {
+  const verified = sessionId || agent ? currentAllowTools(sessionId, { agent }) : null
+  // 收窄关着时「白名单」没有意义（currentAllowTools 给 null），可她手上真有什么仍然
+  // 答得出：这一局的工具表就是答案。2026-11-09 用户拍板（#58 的遗留）——把 null 当成
+  // 「没有」时，心事卡要的东西已经能用了，还摆到 14 天窗口过期。
+  const visible = verified ?? (sessionId || agent ? visibleAllowTools(sessionId, { agent }) : null)
+  const allow = visible ?? (unverified ? configuredAllowTools() : null)
+  return allow ? new Set(allow) : null
+}
 
 // 2026-10-26（用户 m00507）：她看不懂对话里那句「……」。
 // 真机 reasoning 原话是「用户发来的只有一个省略号，没有实质请求」，接着猜
@@ -213,6 +241,9 @@ export function startScheduler(ctx, deps = {}) {
   let awayLogged = ''
   // 今天她请过假（请求事件 rest）只记一次日志：tick 每分钟跑，别把这一行刷成弹幕。
   let restLogged = ''
+  // 安静刷站的尝试间隔（内存态）：真正的配额与节奏由 events.jsonl 判，
+  // 这里只防「网络抖一下 → 每分钟去撞一次 B 站」。
+  let lastQuietTry = 0
 
   // 哪个会话正在一轮里（turn/start → turn/end）。叫醒排在她正在说的那一轮后面时，
   // 那一轮的 turn/end 会先把 fish:wake 段清掉，真正醒来的那一轮反而看不到处境。
@@ -348,8 +379,10 @@ export function startScheduler(ctx, deps = {}) {
     const leave = lastLeaveAt(events)
     const seen = lastSeenAt(events)
     const echoBack = !!(leave && seen && seen >= leave && now - leave <= 72 * 3600_000)
-    // 上游 0.9.3：桌上多两笔——wish（她攒着的想要）与 wall（撞过的墙）。
-    const driveDesk = { gaps: gaps.length, stale: 0, echo: echoBack, favorite: interest.length > 0, wish: wishesOf(events, { now }).length, wall: gapwallsOf(events, { now }).length }
+    // 够不着的那件事按家里那条会话的工具表算；那条还是冷的，就先拿白名单顶（issue #58，见 toolInHandNow）。
+    const homeSid = await homeStatus(root).then((h) => h.sessionId).catch(() => '')
+    const hasForDrive = toolInHandNow(homeSid, { unverified: true })
+    const driveDesk = { gaps: gaps.length, stale: 0, echo: echoBack, favorite: interest.length > 0, wish: wishesOf(events, { now, has: hasForDrive }).length, wall: gapwallsOf(events, { now }).length }
     const pc = proactiveConfig(config)
     let drv = null
     if (!forced) {
@@ -411,19 +444,6 @@ export function startScheduler(ctx, deps = {}) {
       return false
     }
 
-    const material = recentMaterial(events, { now })
-    const loose = looseEnds(events, { now })
-    const text = proactiveSection({
-      now,
-      state: st,
-      material,
-      loose,
-      sendTools: pc.sendTools,
-      countSeen: pc.idleCountsSeen,
-      // 2026-11-06（用户）：bili.enabled=false 的部署不给她这个念头——提了也是够不着
-      canLook: config?.bili?.enabled !== false,
-    })
-
     const requestId = `proactive-${now}`
     // 这一轮她写的话不算他来过：唤醒时间窗开到 turn/end（投递只等入队，见 wakewin.js），
     // turn/end 一直不来就最迟 WAKE_TIMEOUT_MS 关上。
@@ -449,6 +469,20 @@ export function startScheduler(ctx, deps = {}) {
         // 另开一条空壳 —— 交给 reviveIfBlank 判，见 lib/deliver.js。
         await reviveIfBlank(sc, sessionId, await ensureHer(root), (msg) => log(`proactive: ${msg}`)).catch(() => {})
       }
+      // 处境等会话接上再拼（issue #58）：冷会话的 agent 到上面这一步才建出来，
+      // 悬着的事里哪张卡已经到手，要按她这条会话真有的工具算，不按白名单猜。
+      const material = recentMaterial(events, { now })
+      const loose = looseEnds(events, { now, has: toolInHandNow(sessionId, { agent: live.agent }) })
+      const text = proactiveSection({
+        now,
+        state: st,
+        material,
+        loose,
+        sendTools: pc.sendTools,
+        countSeen: pc.idleCountsSeen,
+        // 2026-11-06（用户）：bili.enabled=false 的部署不给她这个念头——提了也是够不着
+        canLook: config?.bili?.enabled !== false,
+      })
       gen = setWakeSection(text, sessionId)
 
       // 投递之前先把这一轮盯起来（0.9.0 用户 m00803）。认领信号是 rpcId：
@@ -632,7 +666,7 @@ export function startScheduler(ctx, deps = {}) {
       // 全仓没有消费者）。现在按那个间隔真去问一次，问到了就把那几句排队投给她。
       // 投递用 queueNote：她醒着就立刻补进当前这条会话，没开着就等她下次打开。
       try {
-        if (repliesScanDue(config?.comment, now)) {
+        if (repliesScanDue(config?.comment, now, config)) {
           const waiting = await scanReplies({ root, events, dateKey: dk }).catch(() => [])
           // 无论有没有人回都记一次：不记的话每 30 秒就会重新问一遍 B 站（-412 就是这么撞出来的）。
           await updateConfig({ comment: { lastScanAt: new Date(now).toISOString() } }, root).catch(() => {})
@@ -674,6 +708,18 @@ export function startScheduler(ctx, deps = {}) {
 
       if (!inWindow(config, new Date())) return
 
+      // ---- 安静刷站（2026-11-07，用户 m00365）----
+      // 恢复「自动刷」，但不挂在唤醒上：这一趟只取数、只记账，不叫醒、不往正文里塞素材。
+      // 她下次醒来只会看到一行「今天你自己又翻到了 N 条」，想看细节自己调 bili_look。
+      // 放在请假日与活动时段之后：她不在的日子不刷。成功与否都不影响下面的叫醒。
+      // 尝试本身也隔开（10 分钟一次），别让一次网络抖动变成每分钟撞墙。
+      if (now - lastQuietTry >= 10 * 60_000) {
+        lastQuietTry = now
+        try {
+          await quietBrowse(root, () => deriveSelfCached(events, { growthDays: config.growthDays }), config, dk, { events, now }, log)
+        } catch { /* 刷站失败不拖累叫醒 */ }
+      }
+
       const counts = await todayCounts(events, dk)
       if (now < scheduled.at) return    // 还没到今天的落点
 
@@ -682,7 +728,23 @@ export function startScheduler(ctx, deps = {}) {
 
       const model = deriveSelfCached(events, { growthDays: config.growthDays })
       // 空档补偿只影响这一次挑选的冷却判断（见 gapSqueeze）
-      const decision = plan(model, config, counts, events, { squeeze: gapSqueeze(gapSinceLastWake(events)) })
+      // 通用预约簿（2026-11-08）：到点的约定优先于今天的卡。它不占「提问」配额，
+      // 但仍受当天事件/唤醒上限约束——plan() 说 skip 就不抢；quiet 时也该叫醒。
+      let apptDue = null
+      let decision = plan(model, config, counts, events, { squeeze: gapSqueeze(gapSinceLastWake(events)) })
+      if (decision.action !== 'skip') {
+        apptDue = await dueAppointment(root, now).catch(() => null)
+        if (apptDue) {
+          decision = {
+            action: 'wake',
+            template: { id: 'appoint' },
+            prompt: appointPrompt(apptDue, now),
+            occurrences: 0,
+            reason: `appointment ${apptDue.id}`,
+            alternatives: [],
+          }
+        }
+      }
 
       if (decision.action === 'quiet') {
         // 2026-10-28 修（用户 m06971）：原来每分钟写一条。
@@ -737,7 +799,7 @@ export function startScheduler(ctx, deps = {}) {
 
       running = true
       try {
-        await wake(ctx, root, model, config, decision, dk, log, { ...deps, events, isBusy, waitIdle, isDisposed: () => disposed })
+        await wake(ctx, root, model, config, decision, dk, log, { ...deps, events, apptDue, isBusy, waitIdle, isDisposed: () => disposed })
       } finally {
         running = false
       }
@@ -872,7 +934,140 @@ export async function lookBeforeWake(root, model, config, dk, deps, log) {
   }
 }
 
+/**
+ * 安静刷站（2026-11-07，用户 m00365）。
+ *
+ * 为什么单独一条路，而不是把 lookBeforeWake 接回唤醒上：
+ *   用户原话——「自动刷要恢复，也要给开关，但有办法不走那个唤醒吗……不需要每轮都显示视频信息」。
+ *   自动刷真正需要的是「今天她确实出去看过」，不需要每次醒来都先读十几条简介热评：
+ *   那既费上下文，也会让「醒来」变成「刷站」，把别的材料挤掉（0.9.0 摘它的原因）。
+ *   所以这一趟只取数、只记账（写 `browse:` / `looked:`），不投递会话、不叫醒、
+ *   不把素材拼进任何一条正文。下一次醒来只带一行「今天你自己又翻到了 N 条」，
+ *   想看细节她自己调 bili_look / bili_watch。
+ *
+ * 与 lookBeforeWake 的区别：不产 text/intro，也没有 riskNote 要摆给她看。
+ * 其余闸门（开关、次数、上网时段、风控冷却）保持同一套，免得两条路各说各话。
+ *
+ * 第一道闸是 biliOn（issue #62 之后）：`bili.enabled` 是「彻底断网」那一项，
+ * 而 `browse.enabled` 默认开着，只判后者的话，关掉「允许她上网」后台照样去取热门、
+ * 深读、记账。定时 tick 和 `POST /browse` 接口（force: true）都走这里，force 也绕不过这一道。
+ * lookBeforeWake 没有这道闸：它眼下没有线上调用方，只剩旧测试在用；哪天接回唤醒，先给它补上。
+ *
+ * @param {string|object} root 数据根目录
+ * @param {Function|object} model 她的自述（传函数则用到时才求值，省掉每分钟一次 deriveSelf）
+ * @param {object} config
+ * @param {string} dk
+ * @param {{now?:Date, events?:object[], client?:object, force?:boolean}} deps force 给 POST /browse 接口用
+ * @returns {Promise<{ok:boolean, picks:object[], note:string}>}
+ */
+export async function quietBrowse(root, model, config, dk, deps = {}, log = () => {}) {
+  const no = (note) => ({ ok: false, picks: [], note })
+  if (!biliOn(config)) return no('现在上不了网')
+  if (!config?.browse?.enabled) return no('自动刷没开')
+  const perDay = Number(config?.browse?.perDay ?? 0)
+  const forced = deps.force === true
+  if (!forced && !(perDay > 0)) return no('今天没给次数')
 
+  const bw = Array.isArray(config?.browse?.window) ? config.browse.window
+    : Array.isArray(config?.window) ? config.window
+      : ['00:00', '23:59']
+  // tick 传进来的是 Date.now() 的数字，测试传 Date；两种都认，别把时钟悄悄换成「此刻」。
+  const now = deps.now instanceof Date ? deps.now
+    : Number.isFinite(deps.now) ? new Date(deps.now)
+      : new Date()
+  if (!forced && !inWindow({ window: bw }, now)) return no('不在上网时段')
+
+  const st = riskState(root, now)
+  if (st.cooling) return no(`网络不太顺，${st.remainMin} 分钟后再试`)
+
+  const events = deps.events ?? (await readEvents(root)).events
+  if (!forced && browseCountToday(events, dk) >= perDay) return no('今天的次数用完了')
+  if (!forced) {
+    // 一天几次要摊开：不能一进时段就一口气刷完，那和「定时投喂」没区别。
+    const last = lastBrowseAt(events)
+    if (last > 0 && now.getTime() - last < browseGapMs(perDay)) return no('还没到下一趟')
+  }
+
+  const bp = browsePlan(config, st)
+  const cfg2 = (bp.topN === Number(config?.browse?.topN) && bp.deepRead === Number(config?.browse?.deepRead))
+    ? config
+    : { ...config, browse: { ...config.browse, topN: bp.topN, deepRead: bp.deepRead } }
+
+  try {
+    const who = typeof model === 'function' ? model() : model
+    const client = deps.client ?? createClient({ log: (...a) => log?.('bili', ...a) })
+    // 安静刷不投递、不叫醒：翻到的东西她这一趟没看见，所以不记 `looked:`（那是
+    // 「她真读过」的账，记了会把她自己去看的路挡掉），也不替她记别人的话（issue #62 第 3 条，
+    // 2026-11-09 用户拍板）。自动刷自己的去重用 `browsed:`。
+    const r = await gather(client, who, cfg2, { root, dk, events, mark: 'browsed', voice: false })
+    if (!r.ok || !r.picks?.length) {
+      if (isRiskCode(r.code)) noteRisk(root, r.code, now)
+      if (r.note) log?.('browse empty', r.note)
+      return no(r.note || '什么都没翻到')
+    }
+    await recordBrowse(root, dk, r.picks, who)
+    return { ok: true, picks: r.picks, note: '' }
+  } catch (err) {
+    if (isRiskCode(err?.code)) noteRisk(root, err?.code, now)
+    log?.('browse failed', err?.message ?? err)
+    return no('这一趟没刷成')
+  }
+}
+
+const CN_TENS = { 2: '二', 3: '三', 4: '四', 5: '五', 6: '六', 7: '七', 8: '八', 9: '九' }
+
+/**
+ * 条数的说法（2026-11-07，用户 m00758）。
+ *
+ * 真实条数可以到 80（perDay 4 × topN 20），但这一行只是线索，不需要精确到个位：
+ * 一多就只说「十几条 / 二十多条」，准确的数字在历史记录里。
+ * 十以内照实说，免得把「翻到 2 条」也说成「十几条」。
+ */
+export function countPhrase(n) {
+  const k = Math.max(0, Math.floor(Number(n) || 0))
+  if (k <= 10) return `${k} 条`
+  if (k < 20) return '十几条'
+  const word = CN_TENS[Math.floor(k / 10)]
+  return word ? `${word}十多条` : '好几十条'
+}
+
+/** 那一行最多念几个标题（记「提过谁」也按这个数算）。 */
+export const DIGEST_NAMES_MAX = 3
+
+/**
+ * 醒来时那一行便条（2026-11-07，用户 m00365 / m00758）。
+ *
+ * 只报**上一次醒来之后**新翻到的：不然每隔几小时醒来都是同三条标题，
+ * 那就成了复述，不是「今天外面有过什么」。
+ * 今天还没醒过时 since=0，这一行才真的覆盖「今天」；标题最多三条，条数一多就只说「十几条」。
+ *
+ * 2026-11-08（用户 m00187 第 4 条）：调用方还要把**已经提过的**剔掉——
+ * 安静刷会把同一个列表反复记成 `browse:`，只按时间过滤不算「新翻到的」。
+ * 那一层在 whatseen.js 的 digestMentioned()，这里只管把已经筛好的一条念出来。
+ */
+export function browseDigestLine(items, opts = {}) {
+  const max = Math.max(1, Number(opts?.max ?? DIGEST_NAMES_MAX) || DIGEST_NAMES_MAX)
+  const since = Number(opts?.since ?? 0) || 0
+  const all = (items ?? []).filter((x) => x?.bvid)
+  if (!all.length) return ''
+  const show = all.slice(0, max)
+  const names = show.map((x) => (x.title ? `《${x.title}》` : x.bvid)).join('、')
+  const more = all.length > show.length ? ' 等' : ''
+  // 今天还没醒过（since=0）时，这确是「今天」；醒过一次之后，数字只覆盖
+  // 上次醒来之后那一段，就别再说成「今天」，否则同一个「今天」两句不同口径。
+  const head = since > 0 ? '上次醒来之后，你自己又翻到了' : '今天你自己又翻到了'
+  return `${head} ${countPhrase(all.length)}：${names}${more}。想看哪条，自己点开。`
+}
+
+/**
+ * 唤醒那一刻的时间与缘由（2026-10-27 用户反馈）。
+ *
+ * 她在会话里第一次醒来时，只看到「（醒一醒）」，然后自己猜「大概不是我的时段」，
+ * 还以为是权限出了问题。与其让她猜，不如把事实摆给她：现在几点、这一次是谁让醒的。
+ *
+ * `manual` = 有人按了叫醒（观测台按钮 / 首次建屋），否则是定时醒来；
+ * `insideWindow` = 这一刻在不在她平时的活动时段里（跨零点窗口也交给 inWindow 判）。
+ */
 async function wake(ctx, root, model, config, decision, dk, log, deps = {}) {
   const sc = ctx.sessionController
   if (!sc) { log('no sessionController'); return }
@@ -941,6 +1136,9 @@ async function wake(ctx, root, model, config, decision, dk, log, deps = {}) {
     }
   }
 
+  // 到点的约定优先：这一轮不能被她自己的「空醒」顶掉。
+  if (deps.apptDue) free = null
+
   const parts = [
     notesLine,
     wakeTimeLine(now, { manual: deps.manual === true, insideWindow: inWindow(config, now) }),
@@ -962,31 +1160,89 @@ async function wake(ctx, root, model, config, decision, dk, log, deps = {}) {
   // 旧句子 + 「这一轮没有待办」。B 站动静与惦记清单都会替她提供「最像活的那件事」，
   // 18:44 真机她就是挑了旧句子里唯一像活的一条去核对，没往梦里想。
   // 手动「让她去刷 B 站」（forceBrowse）本来就指定了这一轮做什么，不跟着空醒一起收。
-  // 2026-11-05（用户 m02562）：刷站不再挂在唤醒上。所有醒来都只有桌子与世界之外的事，
-  // 想上网由她自己调工具（bili_*），不再由唤醒替她决定看什么。
-  const showWorld = false
-  const look = showWorld ? await lookBeforeWake(root, model, config, dk, deps, log) : { text: '', intro: '', picks: [] }
-  if (look.text) {
-    parts.push('', look.intro, '', look.text)
-    // 带链接的清单（2026-10-23 用户提）：她能说出"有一条是一个人跑不起来了"，
-    // 但你不知道是哪条，就接不上话。把链接摆在她眼前，她想指的时候才有东西可指。
-    // 只给标题 + 链接，不给"重点在第几分钟"——标好重点她就只会复述。
-    const wl = renderWatchList(look.picks)
-    if (wl) parts.push('', wl)
-    // 封面图（2026-10-23 用户提）：她没看过画面，但封面是这条视频对外的样子。
-    // 用本地绝对路径的 markdown 图片——图已经落在本机，不依赖外网、不受防盗链影响。
-    // 最多两张：多了就成了相册，不是她想说什么。
-    if (look.picks?.length) {
-      try {
-        for (const p of look.picks.slice(0, 2)) {
-          await fetchCover({ root, bvid: p.bvid, pic: p.pic, log })
+  // 2026-11-07（用户 m00365）：自动刷改由后台自己走（见 quietBrowse），这一轮不再摆
+  // 十几条标题简介热评——那会把每一次醒来都变成刷站，把别的材料挤掉（0.9.0 摘它的原因）。
+  // 只留一行便条：上一次醒来之后她又翻到了哪几条；想看哪条，她自己调 bili_look / bili_watch。
+  // 断网（biliOn 为假）时不念：身份文档说她这会儿出不去，bili_look 也回打不开，
+  // 这一行却叫她「自己点开」，同一轮里三种说法。断网前记下、还没念过的也一并不念。
+  if (config?.browse?.enabled && biliOn(config)) {
+    try {
+      // 现读一遍：tick 开头那份快照是「这一轮开始前」的，安静刷刚写的 browse: 不在里面，
+      // 醒来就会漏掉本该带上的那一行。
+      const evs = await readEvents(root).then((r) => r.events).catch(() => deps.events ?? [])
+      const since = lastWakeAt(evs, dk)
+      // 2026-11-08（用户 m00187 第 4 条）：提过的不再提。安静刷隔几个钟头就把
+      // 同一个列表再记一遍 `browse:`，光按 since 过滤拦不住——连醒三次，三次同一条。
+      const said = digestMentioned(evs, { now: now.getTime() })
+      const fresh = glancedItems(evs, dk, { since }).filter((x) => !said.has(x.bvid))
+      const line = browseDigestLine(fresh, { since, max: DIGEST_NAMES_MAX })
+      if (line) {
+        parts.push('', line)
+        // 只记真念出来的那几条：剩下的留给下一次醒来，否则「十几条」里
+        // 没被点名的一直轮不到，等于白翻。
+        const shown = fresh.slice(0, DIGEST_NAMES_MAX).map((x) => x.bvid)
+        if (shown.length) {
+          await appendEvent(
+            { type: 'meta', text: `${DIGEST_PREFIX}${dk} ${shown.join(' ')}` },
+            { source: 'timer' },
+            root,
+          ).catch(() => {})
         }
-        const covers = coverLines(look.picks, root, 2)
-        if (covers.length) parts.push('', ...covers)
-      } catch { /* 一张图不能拖垮一次唤醒 */ }
-    }
+      }
+    } catch { /* 一行便条拖不垮一次唤醒 */ }
   }
-  if (look.riskNote) parts.push('', look.riskNote)
+
+  // ---- 会话（P3 改造）----
+  // 2026-11-08（issue #58）：会话挪到摆桌子之前接上。重启后她那条会话是冷的，
+  // agent 要到探活这一步才建；桌上那张 need-tool 卡到没到手，得按她这条会话真有的
+  // 工具算——放在后面的话，桌子摆的时候还没有她的 agent，已经到手的卡会照摆。
+  //
+  // 2026-10-23 用户定案：她的**所有**开口都落进侧栏那个真实会话，
+  // 不再每天另起 `fish-wake-YYYY-MM-DD`。
+  // 理由：用户要的是"打开就能看见她"，不是"去一个隐藏会话里找她说过什么"。
+  // 副作用（刻意接受）：定时唤醒的内容会出现在同一条对话流里，读起来像
+  //   「她自己在那个房间里说话了」——这正是要的效果。
+  // 手动唤醒以前传 deps.sessionId（带时间戳的独立会话），2026-10-26 改掉：
+  // 用 cwd 建的会话没有工作区归属，宿主侧栏把它丢进「未分组」，用户在
+  // 「大肥鱼的家」里看不见（m00507）。现在 wakeNow 也先取屋子会话。
+  //
+  // 2026-11-03（用户 m01596）：「醒一醒」必须落在**屋子现在的那条**会话里。
+  // 以前这里先看 deps.sessionId——那是 index.js 在**启动那一刻**从 home.json
+  // 抄下来的快照。40 轮自动换会话之后 home.json 已经指向新房间，这份快照
+  // 却还是旧的，于是她醒来说的话一直发进旧对话，用户在侧栏里只看见旧的那条
+  // 在动，新房间一直是空的。
+  // 会话是「屋子现在的房间」，随时可能被轮换换掉，任何被缓存的 id 都会过期，
+  // 所以每次都现取 talkSessionId()（它自己读 home.json，天然跟着轮换走）；
+  // deps.sessionId 只当**屋子读不到时的退路**，不再是首选。
+  let sessionId = await talkSessionId(ctx, { root, log }).catch(() => '')
+  if (!sessionId) sessionId = String(deps.sessionId ?? '')
+  if (!sessionId) {
+    // 2026-10-24 改：不再退回 `fish-wake-${dk}`（那种用 cwd 建的会话没有工作区
+    // 归属，宿主侧栏会把它丢进「未分组」）。没有屋子就不开口——但**留一条记录**，
+    // 免得「她今天没说话」被读成人格或心情问题。
+    await appendEvent(
+      { type: 'meta', text: `wakefail:${dk} 屋子没接上，这次没开口` },
+      { day: model.day, stage: model.stage, source: 'timer' },
+      root,
+    ).catch(() => {})
+    log('no home session; skip wake')
+    return
+  }
+
+  // cwd = 她自己的房间（root/her），**不是 root**。
+  // 以前写的是 root：她站在状态库正中央，`cat events.jsonl` 就能把自己
+  // 的全部历史、配置、黑名单读一遍——B 文档 §N3 声称做不到，实现却在放水。
+  // 现在她在一个空目录里，状态库是父目录，要碰得主动 `cd ..`。
+  const herDir = deps.herDir ?? await ensureHer(root)
+  // 2026-11-05（用户 m03265）：同 maybeProactive —— create({ sessionId }) 只会在
+  // 宿主侧多堆一条空白会话，投递本身走的是 deliverWake 里的 resolveLiveAgent。
+  // 先探活，探不通才退回建一条。
+  const live = await ensureSessionLive(sc, sessionId)
+  if (!live.live) {
+    log('wake: 会话探活没通过，看看能不能按原 id 唤回来', live.why ?? '')
+    // 同上（2026-11-06 换房报告）：只有宿主确实给不出这一条时才建。
+    await reviveIfBlank(sc, sessionId, herDir, (msg) => log(`wake: ${msg}`)).catch(() => {})
+  }
 
   // ---- 桌子：她惦记的口子、回音（主观能动性 步 0，2026-11-05，用户 m01512）----
   // 用户定下的顺序是「先把桌子摆满（好奇 + 回音）→ 再上劲儿」。
@@ -1020,7 +1276,7 @@ async function wake(ctx, root, model, config, decision, dk, log, deps = {}) {
           free: !!free,
           favorite: fav,
           // 够不着的那件事：她提过、手上没有的（用户 m01602）。
-          wishes: wishesOf(evc, { now: now.getTime() }),
+          wishes: wishesOf(evc, { now: now.getTime(), has: toolInHandNow(sessionId, { agent: live.agent }) }),
           // 撞过墙的那件事：她试过、手上没有的（用户 m00493 的 ②）。
           walls: gapwallsOf(evc, { now: now.getTime() }),
           at: now,
@@ -1095,7 +1351,7 @@ async function wake(ctx, root, model, config, decision, dk, log, deps = {}) {
     const ev2 = (await readEvents(root).catch(() => ({ events: [] }))).events
     if (!pendingOffer(ev2, Date.now())) {
       for (const r of grantableRules()) {
-        const due = offerDueDay(r.id, model, ev2)
+        const due = offerDueDay(r.id, model, ev2, offerLimits(config))
         if (due === null || model.day < due) continue
         try {
           const ev = validateEvent(
@@ -1150,53 +1406,6 @@ async function wake(ctx, root, model, config, decision, dk, log, deps = {}) {
   }
   // 给 wake 段加一句性质说明：对话里那句括号短句是叫醒信号，不是用户的话。
   const wakeText = `${WAKE_HINT}\n\n${content}`
-  // ---- 会话（P3 改造）----
-  // 2026-10-23 用户定案：她的**所有**开口都落进侧栏那个真实会话，
-  // 不再每天另起 `fish-wake-YYYY-MM-DD`。
-  // 理由：用户要的是"打开就能看见她"，不是"去一个隐藏会话里找她说过什么"。
-  // 副作用（刻意接受）：定时唤醒的内容会出现在同一条对话流里，读起来像
-  //   「她自己在那个房间里说话了」——这正是要的效果。
-  // 手动唤醒以前传 deps.sessionId（带时间戳的独立会话），2026-10-26 改掉：
-  // 用 cwd 建的会话没有工作区归属，宿主侧栏把它丢进「未分组」，用户在
-  // 「大肥鱼的家」里看不见（m00507）。现在 wakeNow 也先取屋子会话。
-  //
-  // 2026-11-03（用户 m01596）：「醒一醒」必须落在**屋子现在的那条**会话里。
-  // 以前这里先看 deps.sessionId——那是 index.js 在**启动那一刻**从 home.json
-  // 抄下来的快照。40 轮自动换会话之后 home.json 已经指向新房间，这份快照
-  // 却还是旧的，于是她醒来说的话一直发进旧对话，用户在侧栏里只看见旧的那条
-  // 在动，新房间一直是空的。
-  // 会话是「屋子现在的房间」，随时可能被轮换换掉，任何被缓存的 id 都会过期，
-  // 所以每次都现取 talkSessionId()（它自己读 home.json，天然跟着轮换走）；
-  // deps.sessionId 只当**屋子读不到时的退路**，不再是首选。
-  let sessionId = await talkSessionId(ctx, { root, log }).catch(() => '')
-  if (!sessionId) sessionId = String(deps.sessionId ?? '')
-  if (!sessionId) {
-    // 2026-10-24 改：不再退回 `fish-wake-${dk}`（那种用 cwd 建的会话没有工作区
-    // 归属，宿主侧栏会把它丢进「未分组」）。没有屋子就不开口——但**留一条记录**，
-    // 免得「她今天没说话」被读成人格或心情问题。
-    await appendEvent(
-      { type: 'meta', text: `wakefail:${dk} 屋子没接上，这次没开口` },
-      { day: model.day, stage: model.stage, source: 'timer' },
-      root,
-    ).catch(() => {})
-    log('no home session; skip wake')
-    return
-  }
-
-  // cwd = 她自己的房间（root/her），**不是 root**。
-  // 以前写的是 root：她站在状态库正中央，`cat events.jsonl` 就能把自己
-  // 的全部历史、配置、黑名单读一遍——B 文档 §N3 声称做不到，实现却在放水。
-  // 现在她在一个空目录里，状态库是父目录，要碰得主动 `cd ..`。
-  const herDir = deps.herDir ?? await ensureHer(root)
-  // 2026-11-05（用户 m03265）：同 maybeProactive —— create({ sessionId }) 只会在
-  // 宿主侧多堆一条空白会话，投递本身走的是 deliverWake 里的 resolveLiveAgent。
-  // 先探活，探不通才退回建一条。
-  const live = await ensureSessionLive(sc, sessionId)
-  if (!live.live) {
-    log('wake: 会话探活没通过，看看能不能按原 id 唤回来', live.why ?? '')
-    // 同上（2026-11-06 换房报告）：只有宿主确实给不出这一条时才建。
-    await reviveIfBlank(sc, sessionId, herDir, (msg) => log(`wake: ${msg}`)).catch(() => {})
-  }
 
   // 2026-11-04：`AbortController` 与那个 5 分钟 kill 定时器一起删掉了。
   // 原来它们只服务于 `sc.prompt(req, ac.signal)`；现在投递走 `agent.followup()`，
@@ -1294,6 +1503,11 @@ async function wake(ctx, root, model, config, decision, dk, log, deps = {}) {
         { day: model.day, stage: model.stage, source: 'timer' },
         root,
       )
+    }
+    // 预约簿：真的叫醒了她才算「到点提过了」。上面任何一步抛错都不会走到这里，
+    // 所以投递失败不会白白吃掉这一次约定——下一个落点还会再试。
+    if (deps.apptDue) {
+      await markNotified(root, deps.apptDue.id, now.getTime()).catch((err) => log('appoint notify failed', err?.message ?? err))
     }
     // 空醒也要记账：`table:<dk>` 让摆料一天只摆一次，`think:<dk>` 让想一想一天只空一次。
     if (free) {

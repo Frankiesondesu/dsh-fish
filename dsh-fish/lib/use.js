@@ -17,6 +17,8 @@
 
 import { appendEvent, readEvents } from './store.js'
 import { similarity } from './derive.js'
+import { noteRegisteredTool } from './toolreg.js'
+import { callerInRoot } from './tenant.js'
 
 /** 一句话的上限：她在回忆里看到的是一条，不是一段。 */
 export const USE_LINE_MAX = 80
@@ -69,7 +71,9 @@ function oneLine(text, n = USE_LINE_MAX) {
  */
 const SAYING = {
   her_recall: (out) => (out?.found ? '翻到了。' : '没翻到。'),
-  her_diary: (out) => (out?.found ? '翻到日记了。' : '那天没有日记。'),
+  // gone：那天写过、文件被「日记留多久」清掉了（herdiary.js）。记成「那天没有日记」，
+  // 她以后翻回忆会以为自己那天没写。
+  her_diary: (out) => (out?.found ? '翻到日记了。' : out?.gone ? '写过的日记已经清掉了，没翻到。' : '那天没有日记。'),
 }
 
 /**
@@ -145,21 +149,31 @@ export async function recordUse(root, { tool, out, sessionId, now = Date.now() }
 export function withUse(def, { root, tool }) {
   const run = def?.execute
   if (typeof run !== 'function') return def
-  return {
-    ...def,
-    async execute(args, exec) {
-      try {
-        const out = await run(args, exec)
-        await recordUse(root, { tool, out, sessionId: exec?.sessionId })
-        return out
-      } catch (err) {
-        // 做到一半炸了也要留一笔：这是「尝试没完成」里最该被记住的一类。
-        // 不记异常原文——英文、内部词、堆栈都不该进她的账。
-        await recordUse(root, { tool, out: { ok: false, note: '这次没成。' }, sessionId: exec?.sessionId })
-        throw err
-      }
-    },
+  // 按属性描述符复制，不用 `{ ...def }`：展开会把 getter 当场求值成死值。
+  // bili_speak 的说明是 getter（随「能不能说话」现取），展开之后就定格在启动那一刻，
+  // 之后开关怎么翻，她读到的说明都不变（issue #62 后续）。
+  const props = Object.getOwnPropertyDescriptors(def)
+  delete props.execute
+  const wrapped = Object.create(Object.getPrototypeOf(def), props)
+  async function execute(args, exec) {
+    // 记录之前先问一句「这次调用是不是发生在这个家里」（2026-11-09 外部用户报告）：
+    // 别的会话顺手点了一下，写入会被 guardWrite 拒掉，但记账这一层以前照记，
+    // 于是一次误操作也给她的成长账添了一行 use:… fail。记不记与写不写分开管：
+    // 出门 / 请神那条会话仍然算她（判据在 callerInRoot 里与 checkCaller 一致）。
+    const own = callerInRoot(root, exec)
+    try {
+      const out = await run(args, exec)
+      if (own) await recordUse(root, { tool, out, sessionId: exec?.sessionId })
+      return out
+    } catch (err) {
+      // 做到一半炸了也要留一笔：这是「尝试没完成」里最该被记住的一类。
+      // 不记异常原文——英文、内部词、堆栈都不该进她的账。
+      if (own) await recordUse(root, { tool, out: { ok: false, note: '这次没成。' }, sessionId: exec?.sessionId })
+      throw err
+    }
   }
+  Object.defineProperty(wrapped, 'execute', { value: execute, configurable: true, enumerable: true, writable: true })
+  return wrapped
 }
 
 /**
@@ -173,7 +187,14 @@ export function withUseDuringRegistration(ctx, root, fn) {
   const tools = ctx?.tools
   const orig = tools?.register
   if (typeof orig !== 'function') return fn()
-  tools.register = (def) => orig.call(tools, withUse(def, { root, tool: def?.name }))
+  tools.register = (def) => {
+    // 顺手记一笔「这一版真的注册了哪些工具」（2026-11-08，用户 m00002）：
+    // 清单从此现算，加工具不用再去 restrict.js 抄一遍表。
+    // 记在真正下发之后——注册抛错的那次不算，免得界面显示一只根本不存在的手。
+    const out = orig.call(tools, withUse(def, { root, tool: def?.name }))
+    noteRegisteredTool(def?.name)
+    return out
+  }
   try {
     return fn()
   } finally {

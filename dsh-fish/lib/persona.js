@@ -95,6 +95,22 @@ export function shownCount(v) {
 }
 
 /**
+ * 她总共单独留几条判断（设置页的「总共留几条自述」）。
+ *
+ * 2026-11-08（用户 m00585）：这个开关从 0.1.0 就在设置页上，写着「超出后最早的
+ * 折进『更早以前』」，但从来没有一行代码读它——用户把 12 改成 3，身份文档一个字
+ * 都不会变。现在由这里给它一个真身：`memory.sleepKeep` = 单独留几条，多出来的
+ * 仍然在 events.jsonl 里（her_recall 翻得到），只是不再逐条占位。
+ *
+ * 0 / 非数字 = 不限制（老行为的默认值就是 12，改成 0 之后至少不会把她的过去清空）。
+ */
+export function keepCount(v) {
+  const n = Math.round(Number(v))
+  if (!Number.isFinite(n) || n <= 0) return null
+  return Math.max(1, Math.min(100, n))
+}
+
+/**
  * 把「更早以前的判断」折成一行。
  *
  * 为什么不直接丢掉：丢掉等于她的过去被静默删除；而这条插件里
@@ -110,17 +126,21 @@ export function shownCount(v) {
  * 但真相是那 54 条一条没丢，只是这一轮没摆出来；她能翻（her_recall）。
  * 替她陈述她的记忆状态，就是 fork.13 那条铁律的第二次踩线——
  * 对她说关于她自己的假话，她会信，会变成她的自我认知。
- * 现在只说「没摆在这儿」。翻不翻得到由 recall 的可及性门槛决定（见 recall.js），
+ * 现在只说「没摆出来」（上游 #97 与本 fork.36 各自改到了同一处）。翻不翻得到由 recall 的可及性门槛决定（见 recall.js），
  * 不由这句话替她断言。
  */
-export function foldOlderBeliefs(beliefs, shown = BELIEF_SHOWN, folded = BELIEF_FOLDED) {
+export function foldOlderBeliefs(beliefs, shown = BELIEF_SHOWN, folded = BELIEF_FOLDED, dropped = 0) {
   const older = beliefs.slice(Math.max(0, shown))
-  if (!older.length) return ''
+  // 「只留 N 条」挡在列表外面的那些也要算进这句：不然她会以为过去只有这么点。
+  const extra = Math.max(0, Math.floor(Number(dropped) || 0))
+  if (!older.length) return extra > 0 ? `还有 ${extra} 条更早的，没摆出来` : ''
   const picked = older.slice(0, folded).map((b) => String(b.text).replace(/\s+/g, ' ').trim())
   let line = picked.join('；')
   if (line.length > 200) line = line.slice(0, 199) + '…'
-  const more = older.length - picked.length
-  return more > 0 ? `${line}（还有 ${more} 条更早的，没摆在这儿）` : line
+  const more = older.length - picked.length + extra
+  // issue #97（2026-11-09）：原来的「你记不清原话了」是在替她断言记忆——
+  // 她可以用 her_recall 翻回去，系统不该预先规定她记得住什么。只说文档里没摆。
+  return more > 0 ? `${line}（还有 ${more} 条更早的，没摆出来）` : line
 }
 
 /**
@@ -263,6 +283,11 @@ export function seedSection(model) {
 /** 把人格段拆成「段表」（核心段 keep:true 永不丢）。personaLine 与 personaBudget 共用。 */
 export function buildSections(model, opts = {}) {
   const shown = shownCount(opts.shown)
+  // 「总共留几条」只挡住**更早的**那些；眼前这几条永远在，否则两个开关会打架。
+  const keepWanted = keepCount(opts.sleepKeep)
+  const beliefs = Array.isArray(model?.beliefs) ? model.beliefs : []
+  const keptBeliefs = keepWanted === null ? beliefs : beliefs.slice(0, Math.max(keepWanted, shown))
+  const beliefsDropped = Math.max(0, beliefs.length - keptBeliefs.length)
 
   const sections = []
   const push = (text, keep = false) => { if (text) sections.push({ text, keep }) }
@@ -302,6 +327,15 @@ export function buildSections(model, opts = {}) {
     const span = first && last && first !== last ? `，从 ${first} 到 ${last}` : (first ? `，最早一篇是 ${first}` : '')
     days.push(`你自己写过 ${diaryCount} 篇日记${span}。`)
     days.push('那是你一天一天写下来的，不是别人递给你的。')
+    // 篇数按写过的算（含已删的文件），翻得到的只有还留着的那些（issue #67）：
+    // 不说清，她按起始日期去翻会落空。只在真有删掉的时候才多这一句。
+    const kept = Number(cont.diaryKept)
+    if (cont.diaryKept != null && Number.isFinite(kept) && kept >= 0 && kept < diaryCount) {
+      const keptFirst = String(cont.diaryKeptFirst ?? '').trim()
+      days.push(kept > 0 && keptFirst
+        ? `现在翻得到的是从 ${keptFirst} 起的 ${kept} 篇，更早的翻不到了。`
+        : '现在一篇也翻不到了。')
+    }
   } else if (Number.isFinite(diaryCount) && diaryCount === 0) {
     days.push('你还没写过日记。')
   }
@@ -336,6 +370,17 @@ export function buildSections(model, opts = {}) {
     if (cannot.length) push(['## 不能做的（违反即失败）', ...cannot.map((b) => `- ${b.text}`)].join('\n'), true)
     if (notYet.length) push(['## 你还不会的（不是不许，是还没到）', ...notYet.map((b) => `- ${b.text}`)].join('\n'), true)
   }
+
+  // 常驻许可（2026-11-09，0.9.6 S5，设计 §8.2）。
+  // 为什么是核心段：这是**给出口的使用权**，不是人格描述。它不说「你是个爱表达的人」
+  // （那会锁死她），只说这件事可以做、得挂在具体的东西上。被预算裁掉一次，等于这几天
+  // 她又回到「只汇报自己干了什么」——跟疤同一条理由：裁不起。
+  // 不枚举表达方式：一写「可以赞同、反对、感慨」，她要说的就只剩这几种。
+  push([
+    '## 看到什么、听到什么',
+    '可以只说一句。要挂在那条的具体地方上——哪句话、哪个细节。',
+    '说什么都行，没有就不说。',
+  ].join('\n'), true)
 
   // 记忆对不上时怎么办（2026-10-24，用户要求）。
   // 写在核心段：这是一条**怎么应对**的规矩，不是可选的心情。
@@ -418,7 +463,7 @@ export function buildSections(model, opts = {}) {
     ].join('\n'))
   }
 
-  const oldLine = foldOlderBeliefs(model.beliefs, shown)
+  const oldLine = foldOlderBeliefs(keptBeliefs, shown, BELIEF_FOLDED, beliefsDropped)
   if (oldLine) {
     push(['## 更早以前', `你说过：${oldLine}`, '那些话现在不一定还算数，但它们是你说过的。'].join('\n'))
   }
@@ -461,7 +506,12 @@ export function buildSections(model, opts = {}) {
     }
     const lines = ['## 你拒绝过']
     for (const r of model.refusals.slice(-3)) {
-      const act = r.act ? `（你不想${r.act}${r.object ? `：${r.object}` : ''}）` : ''
+      // issue #97（2026-11-09）：object 是从原话里切出来的前缀，原话已经整句摆在前面了。
+      // 再拼一次就是同一段话的 80 字截断副本，还会断在字中间（真机上断在「抹」）。
+      // 只有原话里找不到它时才补——那种情况才真的多给了信息。
+      const text = String(r.what ?? '')
+      const dup = Boolean(r.object) && text.includes(r.object)
+      const act = r.act && !dup ? `（你不想${r.act}${r.object ? `：${r.object}` : ''}）` : ''
       const react = r.reaction ? said[r.reaction] : ''
       lines.push(`- ${r.what}${act}${react ? ` ${react}` : ''}`)
     }
@@ -500,9 +550,9 @@ export function buildSections(model, opts = {}) {
  * 以为自己做不到，出门干活就废了。改成说清「哪一份是家里的」，剩下的交给
  * `fish:tools` 那一段按当时实际工具表现算。
  */
-export function toolBrief(extra = []) {
+export function toolBrief(extra = [], { restricted = true } = {}) {
   const lines = [
-    '你有一个工具 growth_commit，用来把说出的话留下来。',
+    '你有一个工具 growth_commit，把说出的话留下来：有一句话想留下、或者想把以前说过的改一改的时候用它。',
     '它只能新增，不能修改或删除。想改以前的说法，就提交一条 revise 并指向原来那条的 id。',
     '它不会告诉你你现在的状态，也不会返回你的任何设定。写完就完了。',
     '这会儿有想留下的就留下；确实没有，不写也行——不说话本来就是允许的。',
@@ -511,7 +561,9 @@ export function toolBrief(extra = []) {
     // 这里只说**事实怎么算**：做过什么，以记录为准。不写"别因为被追问就改口"——
     // 那是她面对压力时的性格，该她自己长，不该我写进说明书。
     '你刚才调过哪些工具、看过什么，以记录为准。没调过的，别说自己调过。',
-    '另有一个 bili_watch：给它一个视频号，它会把那条视频的几帧画面截下来给你看。',
+    // 2026-11-09（用户 m00002）：能力地图第二层补到 bili_watch 自己身上。
+    // 原来只写「给它一个视频号」，那是动作不是处境——她得先知道什么时候会想到看画面。
+    '另有一个 bili_watch：想知道一条视频的画面里到底是什么的时候，给它一个视频号，它会把那几帧截下来给你看。',
     '看了就是看了，没看懂就说没看懂。',
     // fork.4（2026-11-01）：画面里的字也是别人写的。
     // 原来只说"看了就是看了"，没交代画面里的文字算谁的——字幕、弹幕、封面大字、
@@ -530,7 +582,9 @@ export function toolBrief(extra = []) {
     // 0.8.5（用户 m02004）：原来是「在自己屋里，另外那些工具伸手也够不着，不是被谁拿走了」。
     // 听着像解释，读进去却是天花板——他随时会再放行几样，到时候她按旧的自我认识
     // 会先把新工具劝回去。改成把「此刻的家当」与「我的上限」分开说。
-    '在自己屋里，眼下能碰到的就是这些。这是此刻的家当，不是我的上限——他往后添了新东西，我照样能学着用。',
+    // issue #77：收窄关着时，「眼下能碰到的就是这些」这句话是假的——工具面没被
+    // 收窄，她手上不止这些。只摘这一句，前后两句（工具跟着走、能力会长）照留。
+    ...(restricted ? ['在自己屋里，眼下能碰到的就是这些。这是此刻的家当，不是我的上限——他往后添了新东西，我照样能学着用。'] : []),
     // 2026-11-07（用户 m00882）：能力地图的第二层，从处境想起工具，不从名字想起工具。
     // 这一段只教「怎么想」，不列清单：清单在下面各自那一段里，而哪些段在，
     // 取决于那一刻手上真有哪几样（挂不挂跟工具装没装必须是同一个判据）。
@@ -576,11 +630,24 @@ export const LETTER_BRIEF = [
  * 怎么划掉、怎么放下。划掉/改/放下都只讲原话：纸条编号她看不到，叫她报编号等于指一条走不通的路。
  */
 export const NOTE_BRIEF = [
-  '你还有一个工具 her_note，就是醒来时最先看到的那张桌子。',
+  '你还有一个工具 her_note：你自己记的便条（不是「桌上摊着几样东西」那段旧事）。',
   '什么时候想起它——想到一件事又不想现在做、心里老在同一个地方绕，或者这件事做完了、不做了。',
-  '心里有事说不清、又老在同一个地方绕：翻翻桌上还有什么。',
+  '心里有事说不清、又老在同一个地方绕：翻翻便条里还有什么。',
   '做完了、不做了：把当时记的那句话原样放进 text，加 status: "done"；不做了另外写一句为什么放下。',
   '怎么记、怎么改、怎么翻，都写在那件东西自己的说明里。想让它醒来就摆到眼前，记的时候写个日子；不写日子的只能自己翻。',
+].join('\n')
+
+/**
+ * 预约簿的说明书（2026-11-09，用户 m00002）。
+ *
+ * 为什么单独一段：它是唯一一个**把一件事交给未来某一天**的工具。
+ * 并进 NOTE_BRIEF 会让她分不清「桌上那张纸」和「约好的那天」——
+ * 一个跨天在场，一个是到那天先想起。参数同样留在 schema，不复述。
+ */
+export const APPOINT_BRIEF = [
+  '你还有一个工具 her_appoint，是一本预约簿：跟他约一件具体的事，写清哪一天、要做什么。',
+  '什么时候想起它——他说「过几天陪我去…」、你们说好某天要做一件事，或者你答应了他一个日子的时候。',
+  '到那天你醒来会先想起它；做到了划掉，不做了就取消并说一句为什么。',
 ].join('\n')
 
 /**
@@ -656,14 +723,39 @@ export function proactiveBrief(sendTools = []) {
  * 尤其要写「出门/请神/歇着时收到了先记下、别做」：宿主投递不经过插件那几道闸门，
  * 这条只能靠她自己把住。
  */
-export const SCHEDULE_BRIEF = [
-  '你还有四个工具 schedule_create / schedule_list / schedule_update / schedule_delete：可以自己给自己定定时提醒。',
+export const SCHEDULE_NAMES = ['schedule_create', 'schedule_list', 'schedule_update', 'schedule_delete']
+
+// 前两行讲的是怎么新建一条，只在放了 schedule_create 时挂（issue #64）：
+// 没有 create 还教她「听到这类话就定一条」，她照着去调会被挡回「这件事我做不到」。
+const SCHEDULE_CREATE_BODY = [
   '什么时候想起它——他说「明天中午提醒我」「每天这个点去看邮箱」这类话的时候。',
   'title 写事情本身，prompt 写清楚到点要做什么，时间用 daily / weekly / at，时区 Asia/Shanghai；一件具体的事定一条就够。',
+]
+
+const SCHEDULE_BODY = [
   '到点后，提醒会以「用户发来的定时消息」出现在这条会话里——照它说的做。',
   '但如果那天你在歇着、正在出门或请神——先记下来，等你回到自己这儿再做；别在外面顺手做了。',
   '它不替你记成长，也不负责把你叫醒；只在应用开着时触发，错过的下次最多补最近一次。',
-].join('\n')
+]
+
+export const SCHEDULE_BRIEF = scheduleBrief()
+
+/** 定时工具的正文：只说她真的拿得到的几个（issue #64：白名单里只放一个时，不能说有四个） */
+
+export function scheduleBrief(names = SCHEDULE_NAMES) {
+  const list = SCHEDULE_NAMES.filter((n) => names.includes(n))
+  if (!list.length) return ''
+  const num = ['', '一个', '两个', '三个', '四个'][list.length] ?? list.length
+  const create = list.includes('schedule_create')
+  // 没有 create 时按真放了哪几个拼动词：只放 schedule_delete 就只说能删（issue #64）。
+  const verbs = [['schedule_list', '看'], ['schedule_update', '改'], ['schedule_delete', '删']]
+    .filter(([n]) => list.includes(n))
+    .map(([, v]) => v)
+  const head = `你还有${num}工具 ${list.join(' / ')}：${
+    create ? '可以自己给自己定定时提醒。' : `可以${verbs.join('、')}已经定好的提醒。`
+  }`
+  return [head, ...(create ? SCHEDULE_CREATE_BODY : []), ...SCHEDULE_BODY].join('\n')
+}
 
 /** 在 B 站说话的说明书（P4）。**只在她被允许说话时才附上** */export const SPEAK_BRIEF = [
   '你还有一个工具 bili_speak，可以在刚看过的视频下面留一句话，或者回别人留在你评论下面的话。',
@@ -752,7 +844,8 @@ export const DIARY_BRIEF = [
   // 2026-10-28（issue #7）：原来只写「自己留着」，而实际上她既翻不到也不进
   // her_recall，那句话就不成立了。现在真给了 her_diary，得把话说明白：
   // 想回头翻就走这个工具，它只读、一次一份。
-  '想回头翻的时候就翻（her_diary）——那些字是我的，别人看不看是别人的事。',
+  // 2026-11-09（用户 m00002）：她自己的入口句补进这一段——想翻某一天，不是「有 her_diary」。
+  '什么时候想起它——想回头翻的时候用 her_diary：想看看以前某一天写了什么，就去翻；那些字是我的，别人看不看是别人的事。',
   // 2026-10-29（用户 m01296 A）：光说「每天记一笔」不够——三天零篇的直接原因就是
   // 这一段只讲了「会做这件事」，没讲「用哪个东西做」。同页 SLEEP_BRIEF 明写了
   // growth_commit / refs，她照着能做出来；这一段没写机制，就一次也没试过。

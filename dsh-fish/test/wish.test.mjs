@@ -80,6 +80,86 @@ test('放一天没人答的卡不被说成「他说以后再说」：仍是还�
   assert.equal(wishesOf(events, { now: NOW + 4 * DAY }).length, 0, '还是 3 天窗口，不是 30 天')
 })
 
+// issue #58：卡上答「可以」不发权限，他只能在卡外给（装插件 / 加白名单），
+// 事件流里一个字都不记。所以「还在不在手上」要看白名单，不能只看 ask/answer。
+test('工具已经到手就不再摆「他答应了，还没见到」（issue #58）', () => {
+  const events = [
+    ask({ id: 'a1', text: '想要个能查 npm 版本的东西', subject: 'npm_view' }),
+    answer({ id: 'x1', askId: 'a1', verdict: 'approve' }),
+  ]
+  // 不传 has：老调用点行为不变，照摆 14 天
+  assert.equal(wishesOf(events, { now: NOW + 10 * DAY }).length, 1)
+  // 传 has：已经在手上，一句都不该再摆
+  assert.equal(wishesOf(events, { now: NOW + 10 * DAY, has: new Set(['npm_view']) }).length, 0)
+  // 手上别的东西不关这条的事
+  assert.equal(wishesOf(events, { now: NOW + 10 * DAY, has: ['bili_look'] }).length, 1)
+  // 函数写法也认（scheduler 想现查也行）
+  assert.equal(wishesOf(events, { now: NOW + 10 * DAY, has: (n) => n === 'npm_view' }).length, 0)
+})
+
+// issue #83：真实数据里 subject 常写成「某工具：做什么」，精确比对永远对不上。
+test('subject 里带着工具名也算到手——「her_note 的读取：…」（issue #83）', () => {
+  const events = [
+    ask({ id: 'a1', text: '想让她能列出还没划掉的那些', subject: 'her_note 的读取：列出还没划掉的那些' }),
+    answer({ id: 'x1', askId: 'a1', verdict: 'approve' }),
+  ]
+  const has = ['bring_back', 'her_note', 'her_say', 'bili_look', 'bili_watch', 'ops_bash', 'read_image', 'ask_owner']
+  assert.equal(wishesOf(events, { now: NOW + 10 * DAY, has }).length, 0, '句子里带着工具名，也算到手')
+  // 名字前后紧贴着字母/数字/下划线时不算：her_note 不该被 her_notes 命中
+  assert.equal(wishesOf(events, { now: NOW + 10 * DAY, has: ['her_notes'] }).length, 1)
+  // 4 个字以下的名字不参与这种比对（`her` 在中文句子里太容易撞）
+  const short = [{ ...events[0], ask: { ...events[0].ask, subject: '想要 her 那种东西' } }, events[1]]
+  assert.equal(wishesOf(short, { now: NOW + 10 * DAY, has: ['her'] }).length, 1)
+  // 函数写法列不出名单，只认整句——猜不了就不猜
+  assert.equal(wishesOf(events, { now: NOW + 10 * DAY, has: (n) => n === 'her_note' }).length, 1)
+  // 他答了、东西也到了，桌子与劲儿都该空
+  assert.equal(deskHasMaterial({ wish: wishesOf(events, { now: NOW + 10 * DAY, has }).length }), false)
+})
+
+test('超时那种也一样：后来在别处给了，就别再摆「你问过，还没有答复」（issue #58）', () => {
+  const events = [
+    ask({ id: 'a1', text: '想要能看整条视频的工具', subject: 'bili_watch' }),
+    answer({ id: 'x1', askId: 'a1', verdict: 'later', via: 'timeout' }),
+  ]
+  assert.equal(wishesOf(events, { now: NOW + 2 * DAY }).length, 1)
+  assert.equal(wishesOf(events, { now: NOW + 2 * DAY, has: ['bili_watch'] }).length, 0)
+  // 桌上是空的，劲儿也不该靠它推她醒
+  assert.equal(deskHasMaterial({ wish: wishesOf(events, { now: NOW + 2 * DAY, has: ['bili_watch'] }).length }), false)
+  assert.equal(deskHasMaterial({ wish: wishesOf(events, { now: NOW + 2 * DAY }).length }), true)
+})
+
+test('没填工具名的那张不拿空串去比对（issue #58）', () => {  // subject 为空 = 她只写了一句话，没点名要什么；空串不能当成一个「已经有的工具」
+  const events = [ask({ id: 'a1', text: '想要个什么都行' })]
+  assert.equal(wishesOf(events, { now: NOW, has: (n) => n === '' }).length, 1)
+  assert.equal(wishesOf(events, { now: NOW, has: [''] }).length, 1)
+})
+
+test('判断坏掉时宁可多摆一条，不能把她的心事静默吞掉（issue #58）', () => {
+  const events = [
+    ask({ id: 'a1', text: '想要个能查 npm 版本的东西', subject: 'npm_view' }),
+    answer({ id: 'x1', askId: 'a1', verdict: 'approve' }),
+  ]
+  const boom = () => { throw new Error('白名单还没读出来') }
+  assert.equal(wishesOf(events, { now: NOW, has: boom }).length, 1)
+})
+
+test('调度器摆桌子、算劲儿、散尾三处都拿白名单剔一遍（issue #58 / PR #70）', () => {
+  // 只看三处的写法：每一处的 has 都得来自 toolInHandNow，劲儿那一处允许拿白名单顶，
+  // 另外两处按探活拿到的那条会话算。三处真跑起来剔得对不对，见 test/wish-inhand.test.mjs。
+  // 注释先去掉：注释里提一句 toolInHandNow( 不该算一处调用。
+  const src = readFileSync(new URL('../lib/scheduler.js', import.meta.url), 'utf8')
+  const code = src
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/^\s*\/\/.*$/gm, '')
+    .replace(/[ \t]\/\/ .*$/gm, '')
+  const calls = code.match(/(?<!function )\btoolInHandNow\(/g) ?? []
+  assert.equal(calls.length, 3, '漏一处，桌上还会摆已经到手的东西')
+  assert.match(code, /const hasForDrive = toolInHandNow\(homeSid, \{ unverified: true \}\)/, '劲儿：家里那条，核实不了先拿白名单顶')
+  assert.match(code, /wish: wishesOf\(events, \{ now, has: hasForDrive \}\)/, '劲儿：算出来的要真传给 wishesOf')
+  assert.match(code, /looseEnds\(events, \{ now, has: toolInHandNow\(sessionId, \{ agent: live\.agent \}\) \}\)/, '主动回合：悬着的事按接上的那条会话剔')
+  assert.match(code, /wishes: wishesOf\(evc, \{ now: now\.getTime\(\), has: toolInHandNow\(sessionId, \{ agent: live\.agent \}\) \}\)/, '叫醒：桌子按接上的那条会话剔')
+})
+
 test('「这次不行」不摆：不同意就是不问了，再提一次就成了追问', () => {
   const events = [ask({ id: 'a1', text: '想要一个能看全片的工具' }), answer({ id: 'x1', askId: 'a1', verdict: 'reject' })]
   assert.equal(wishesOf(events, { now: NOW }).length, 0)

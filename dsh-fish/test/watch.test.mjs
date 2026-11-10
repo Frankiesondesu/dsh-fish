@@ -65,19 +65,23 @@ test('registerWatch：注册一个叫 bili_watch 的工具，参数是合法 JSO
 
 test('registerWatch：开关关着时拒，且不暴露"管理员不让看"', async () => {
   await withRoot(async (root) => {
-    await updateConfig({ browse: { enabled: false } }, root)
+    // 2026-11-07（用户反馈）：这道闸门改看 bili.enabled——browse.enabled 是「刷站」，
+    // 0.9.0 起默认关；拿它当闸门会让 bili_look 能翻、bili_watch 永远打不开。
+    await updateConfig({ bili: { enabled: false } }, root)
     const ctx = fakeCtx()
     registerWatch(ctx, { root })
     const out = await ctx._tools[0].execute({ bvid: 'BV1ED4y1Y7dc' })
     assert.equal(out.ok, false)
     assert.equal(out.note, '现在打不开。')
     assert.doesNotMatch(out.note, /管理员|权限|设置/)
+    // 导出包里要能判案：这一条也得留一行。
+    assert.match(readLog(root), /看画面：设置里关掉了 B 站/)
   })
 })
 
 test('registerWatch：给的不是视频号就直说，不去联网', async () => {
   await withRoot(async (root) => {
-    await updateConfig({ browse: { enabled: true }, video: { enabled: true } }, root)
+    await updateConfig({ bili: { enabled: true }, video: { enabled: true } }, root)
     const ctx = fakeCtx()
     registerWatch(ctx, { root })
     const out = await ctx._tools[0].execute({ bvid: '不是视频号' })
@@ -88,7 +92,7 @@ test('registerWatch：给的不是视频号就直说，不去联网', async () =
 
 test('registerWatch：画面功能关掉时拒，理由与"打不开"分开', async () => {
   await withRoot(async (root) => {
-    await updateConfig({ browse: { enabled: true }, video: { enabled: false } }, root)
+    await updateConfig({ bili: { enabled: true }, video: { enabled: false } }, root)
     const ctx = fakeCtx()
     registerWatch(ctx, { root })
     const out = await ctx._tools[0].execute({ bvid: 'BV1ED4y1Y7dc' })
@@ -101,7 +105,7 @@ test('registerWatch：额度已经用完时只说"不想看了"，不报数字',
   await withRoot(async (root) => {
     // fork.12：额度按峰谷分开算，测试不知道跑的时候是峰还是谷——
     // 两档各塞满一条，无论现在是什么时段，额度都是满的。
-    await updateConfig({ browse: { enabled: true }, video: { enabled: true, perDay: 1, offPeakPerDay: 1 } }, root)
+    await updateConfig({ bili: { enabled: true }, browse: { enabled: true }, video: { enabled: true, perDay: 1, offPeakPerDay: 1 } }, root)
     const { dateKey } = await import('../lib/settings.js')
     const dk = dateKey()
     await appendEvent({ type: 'meta', text: `watched:${dk} BV1xx411c7mD ${JSON.stringify({ tariff: 'peak' })}` }, { source: 'system' }, root)
@@ -151,7 +155,7 @@ function fakeWatch(ok = true) {
 
 test('bili_watch：额度满了，但他递过来的那条照样能看，账本里带 free', async () => {
   await withRoot(async (root) => {
-    await updateConfig({ browse: { enabled: true }, video: { enabled: true, perDay: 1, offPeakPerDay: 1 } }, root)
+    await updateConfig({ bili: { enabled: true }, browse: { enabled: true }, video: { enabled: true, perDay: 1, offPeakPerDay: 1 } }, root)
     const { dateKey } = await import('../lib/settings.js')
     const dk = dateKey()
     // 两档各塞满一条：无论此刻是峰是谷，额度都满了
@@ -178,7 +182,7 @@ test('bili_watch：额度满了，但他递过来的那条照样能看，账本�
 
 test('bili_watch：额度满了，她自己翻到的另一条仍然被挡（免额度不扩散）', async () => {
   await withRoot(async (root) => {
-    await updateConfig({ browse: { enabled: true }, video: { enabled: true, perDay: 1, offPeakPerDay: 1 } }, root)
+    await updateConfig({ bili: { enabled: true }, browse: { enabled: true }, video: { enabled: true, perDay: 1, offPeakPerDay: 1 } }, root)
     const { dateKey } = await import('../lib/settings.js')
     const dk = dateKey()
     await appendEvent({ type: 'meta', text: `watched:${dk} BV1xx411c7mD ${JSON.stringify({ tariff: 'peak' })}` }, { source: 'system' }, root)
@@ -225,7 +229,7 @@ function readLog(root) {
 
 test('看画面被设置关掉时，日志里留下「关掉了看视频」', async () => {
   await withRoot(async (root) => {
-    await updateConfig({ browse: { enabled: true }, video: { enabled: false } }, root)
+    await updateConfig({ bili: { enabled: true }, video: { enabled: false } }, root)
     const ctx = fakeCtx()
     registerWatch(ctx, { root })
     await ctx._tools[0].execute({ bvid: 'BV1ED4y1Y7dc' })
@@ -235,7 +239,7 @@ test('看画面被设置关掉时，日志里留下「关掉了看视频」', as
 
 test('视频号不合法时，日志里留下「视频号不合法」和原样的入参', async () => {
   await withRoot(async (root) => {
-    await updateConfig({ browse: { enabled: true }, video: { enabled: true } }, root)
+    await updateConfig({ bili: { enabled: true }, video: { enabled: true } }, root)
     const ctx = fakeCtx()
     registerWatch(ctx, { root })
     await ctx._tools[0].execute({ bvid: '不是视频号' })
@@ -248,7 +252,7 @@ test('视频号不合法时，日志里留下「视频号不合法」和原样�
 test('额度用完时日志写数字（1/1），好追额度怎么用掉的', async () => {
   await withRoot(async (root) => {
     // fork.12：两档各塞满一条，见上一条测试的注释
-    await updateConfig({ browse: { enabled: true }, video: { enabled: true, perDay: 1, offPeakPerDay: 1 } }, root)
+    await updateConfig({ bili: { enabled: true }, browse: { enabled: true }, video: { enabled: true, perDay: 1, offPeakPerDay: 1 } }, root)
     const { dateKey } = await import('../lib/settings.js')
     const dk = dateKey()
     await appendEvent({ type: 'meta', text: `watched:${dk} BV1xx411c7mD ${JSON.stringify({ tariff: 'peak' })}` }, { source: 'system' }, root)

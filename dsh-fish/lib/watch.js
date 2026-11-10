@@ -11,9 +11,10 @@
  */
 
 import { readEvents, appendEvent, rootDir, readOwner } from './store.js'
-import { loadConfig, dateKey } from './settings.js'
+import { loadConfig, dateKey, biliOn } from './settings.js'
 import { createClient } from './bili.js'
 import { watchViaStoryboard } from './vs.js'
+import { avoidHit } from './browse.js'
 import { logLine } from './log.js'
 import { isHanded } from './intent.js'
 
@@ -101,6 +102,71 @@ async function enrichInfo(root, r, bvid) {
 }
 
 /**
+ * issue #62（上游 0.9.5，从 lib/video.js 的 grabFrames 移植过来）：点名看的这条
+ * 过不过屏蔽名单。原版判定住在 lite 引擎里，fork.22 删了 lite 后这段跟着搬来给 vs 用，
+ * 判定逻辑与上游逐字一致（avoidHit + 标签补取；最短时长只管列表，点名不查，传 0）。
+ * view/tags 取不到就放行：vs 不依赖这两次请求，别让网络抖动变成「没看成」。
+ */
+async function namedWatchBlock(bvid, config, root) {
+  let meta = null
+  try {
+    const cookie = (await readOwner(root))?.cookie ?? ''
+    const info = await createClient({ cookie }).view(bvid)
+    if (info?.ok) {
+      const d = info.data ?? {}
+      // bili.js 的 view 没把 owner 摊平（enrichInfo 读的是 d.owner.name），两种形状都认
+      meta = {
+        title: String(d.title ?? ''),
+        up: String(d.up ?? d.owner?.name ?? ''),
+        mid: d.mid ?? d.owner?.mid,
+        duration: Number(d.duration) || 0,
+        tags: [],
+      }
+    }
+  } catch {
+    /* 取不到信息就放行 */
+  }
+  if (!meta) return { note: '', hit: '' }
+  let block = watchBlockHit(meta, config, 0)
+  // 标签不在详情里，另取一次：只在设了关键词、标题和 UP 又都没中时才值得多发这一回。
+  if (!block.note && hasKeywords(config?.avoid)) {
+    try {
+      const cookie = (await readOwner(root))?.cookie ?? ''
+      const t = await createClient({ cookie }).tags(bvid)
+      if (t?.ok && Array.isArray(t.data)) meta.tags = t.data
+    } catch { /* 取不到标签只按标题与 UP 判 */ }
+    if (meta.tags.length) block = watchBlockHit(meta, config, 0)
+  }
+  return block
+}
+
+/** avoidHit 只回命中的那个词（或 `up:<mid>`）；日志里要看得出是 UP、标题、UP 名还是标签。 */
+function hitLabel(v, tags, hit) {
+  const mid = String(v?.mid ?? '')
+  if (mid && hit === `up:${mid}`) return `屏蔽的 UP ${mid}`
+  const where = String(v?.title ?? '').includes(hit) ? '标题'
+    : String(v?.up ?? '').includes(hit) ? 'UP 名'
+      : tags.some((t) => t.includes(hit)) ? '标签'
+        : ''
+  return `${where ? `${where}含` : '含'}屏蔽词「${hit}」`
+}
+
+function watchBlockHit(v, cfg, minDuration = 0) {
+  const tags = Array.isArray(v?.tags) ? v.tags.map((t) => String(t ?? '')).filter(Boolean) : []
+  const hit = avoidHit(v, { avoid: cfg?.avoid }, tags)
+  if (hit) return { note: '这条我不想看。', hit: hitLabel(v, tags, hit) }
+  const min = Number(minDuration ?? 0)
+  const dur = Number(v?.duration ?? 0)
+  if (min > 0 && dur > 0 && dur < min) return { note: '这条太短了，不想看。', hit: `时长 ${dur} 秒，短于 ${min} 秒` }
+  return { note: '', hit: '' }
+}
+
+/** 设了屏蔽关键词才值得为标签多发一次请求。 */
+function hasKeywords(avoid) {
+  return (avoid?.keywords ?? []).some((k) => String(k ?? '') !== '')
+}
+
+/**
  * 没有 tenancy（单测、老调用）时自己拼一个，理由同 look.js 的 tenancyOf。
  */
 export function tenancyOf(root, tenancy) {
@@ -160,7 +226,14 @@ export function registerWatch(ctx, deps = {}) {
 
         const bvid = String(args?.bvid ?? '').trim()
         const { config } = await loadConfig(root)
-        if (!config?.browse?.enabled) return { ok: false, path: '', text: '', note: '现在打不开。' }
+        // 2026-11-07（用户反馈）：原来这里看的是 browse.enabled——那是「刷站」的开关，
+        // 0.9.0 起默认关。于是设置页开着「允许她上网」，bili_look 能翻、bili_watch
+        // 却永远「现在打不开」，用户看到的是「说能看，结果看不了画面」。
+        // 与 lib/look.js 统一：能不能用由 bili.enabled 决定（issue #62 收进 biliOn()）。
+        if (!biliOn(config)) {
+          logLine('info', ['看画面：设置里关掉了 B 站'], root)
+          return { ok: false, path: '', text: '', note: '现在打不开。' }
+        }
         if (config?.video?.enabled === false) {
           // 2026-10-28 起每个失败分支都写一行日志。以前这里一个字都没有，
           // 用户那边「看不到画面」时导出包里完全查不出是被哪一条挡下的
@@ -202,6 +275,17 @@ export function registerWatch(ctx, deps = {}) {
           // 日志里可以写数字：这是给人看的，不是给她看的。
           logLine('info', ['看画面：今日额度已满', `${used}/${cap}`, bvid], root)
           return { ok: false, path: '', text: '', note: '今天看不成了。' }
+        }
+
+        // issue #62（上游 0.9.5 移植）：点名看的那条也要过屏蔽名单——屏蔽的 UP，
+        // 标题 / UP 名 / 标签里的关键词。放在抽帧之前：被拦下时不该先去取画面。
+        // lite 已删（fork.22），拦截就自己做。view/tags 取不到就放行：vs 不依赖
+        // 这两次请求，别让网络抖一下变成「没看成」（与 enrichInfo 同一个取舍）。
+        const block = await namedWatchBlock(bvid, config, root)
+        if (block.note) {
+          // 命中屏蔽不是没看成：单记一行，写清命中了哪一项。她听到的仍只是那句理由。
+          logLine('info', ['看画面：命中屏蔽，没取画面', bvid, block.hit], root)
+          return { ok: false, path: '', text: '', note: block.note }
         }
 
         // fork.22（2026-11-02，用户定案）：**只走 vs，lite 已删。**

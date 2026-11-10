@@ -46,6 +46,10 @@ const UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
 
 const API = 'https://api.bilibili.com'
+
+// issue #67：排队状态提到模块级。翻视频、查回复、看画面各自 new 一个 client，
+// 原来各排各的，等于没排队；现在共用一条链。
+const PACE_STATE = { lastReq: 0, chain: Promise.resolve() }
 /**
  * 建一个客户端。fetch 可注入（单测不打真网）。
  */
@@ -74,19 +78,20 @@ export function createClient(opts = {}) {
   let buvidFailAt = 0
   let mk = ''
   let mkAt = 0
-  let lastReq = 0
-  let chain = Promise.resolve()
 
   /** 串行 + 最小间隔 + 随机抖动：所有请求排队，避免并发把 IP 刷红 */
   function throttle(fn) {
-    const run = chain.then(async () => {
+    const run = PACE_STATE.chain.then(async () => {
       const gap = minInt() + Math.floor(rnd() * Math.max(0, jitInt()))
-      const wait = gap - (now() - lastReq)
-      if (wait > 0) await new Promise((r) => setTimeout(r, wait))
-      lastReq = now()
+      const wait = gap - (now() - PACE_STATE.lastReq)
+      // PR #75：队列共用之后，上一条可能是另一个时钟的客户端发的（测试注入 now、
+      // 系统时间回拨），算出的间隔会是负的。那时只等一个间隔，不照差值等满。
+      const pause = wait > 0 ? Math.min(wait, gap) : 0
+      if (pause > 0) await new Promise((r) => setTimeout(r, pause))
+      PACE_STATE.lastReq = now()
       return fn()
     })
-    chain = run.catch(() => {})
+    PACE_STATE.chain = run.catch(() => {})
     return run
   }
 
@@ -359,10 +364,14 @@ export function createClient(opts = {}) {
   /**
    * 某条评论下面的楼中楼（只支持两层，B 站就两层）。
    * root 是**那条主评论的 rpid**（不是 aid）。
+   *
+   * 回包里的 `data.root` 是那条主评论本身，这里带出 `root: { rpid, mid }`（issue #63）：
+   * 下面 `data` 换成了回复数组，不单独带出来，调用方就再也拿不到楼主。查她自己的
+   * 评论楼时，楼主就是她发那条评论用的号，没记下登录号时靠它认她自己。回包里没有就是 null。
    */
   async function subReplies(aid, rootRpid, { ps = 20, pn = 1 } = {}) {
     const r = await api('/x/v2/reply/reply', { type: 1, oid: aid, root: rootRpid, ps: Math.min(20, ps), pn })
-    if (!r.ok) return { ...r, data: [] }
+    if (!r.ok) return { ...r, data: [], root: null }
     const list = (r.data?.replies ?? []).map((x) => ({
       rpid: Number(x.rpid) || 0,
       mid: Number(x.mid) || 0,
@@ -370,7 +379,9 @@ export function createClient(opts = {}) {
       text: String(x.content?.message ?? ''),
       ctime: Number(x.ctime) || 0,
     }))
-    return { ...r, data: list, total: r.data?.page?.count ?? 0 }
+    const top = r.data?.root
+    const root = top && typeof top === 'object' ? { rpid: Number(top.rpid) || 0, mid: Number(top.mid) || 0 } : null
+    return { ...r, data: list, root, total: r.data?.page?.count ?? 0 }
   }
 
   /**

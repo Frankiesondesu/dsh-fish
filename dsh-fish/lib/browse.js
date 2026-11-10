@@ -19,6 +19,8 @@ import { appendEvent, readEvents } from './store.js'
 import { dateKey } from './settings.js'
 // 评论区里别人的话（2026-10-24，用户 m02454）：一轮浏览最多留 1 条给她读。
 import { recordVoice } from './voices.js'
+// 素材旁边的那一行钩子（2026-11-09，0.9.6 S2）：把她以前说过的话挂在对得上的那一条上。
+import { buildHooks, hookStats } from './hook.js'
 
 /**
  * 每阶段从哪拿东西：早期看老片（时间感），后期看热门/排行（世界的动静）。
@@ -231,7 +233,10 @@ export function renderItem(p, i) {
   if (p.desc) lines.push(`     简介：${p.desc}`)
   for (const c of p.comments) lines.push(`     [热评 ${c.like}] ${c.text}`)
   if (p.danmaku.length) {
-    const parts = p.danmaku.slice(0, 8).map((d) => {
+    // issue #67：弹幕是按时间均匀抽的，这里再截前 8 条就只剩开头；等距挑 8 条。
+    const all = p.danmaku
+    const picked = all.length <= 8 ? all : Array.from({ length: 8 }, (_, i) => all[Math.round(i * (all.length - 1) / 7)])
+    const parts = picked.map((d) => {
       const m = Math.floor(d.t / 60)
       const s = String(Math.floor(d.t % 60)).padStart(2, '0')
       return `${m}:${s} ${d.text}`
@@ -244,7 +249,14 @@ export function renderItem(p, i) {
 /** 拼成整块素材（最后统一套一次 debrief，而不是每条套一层——省 token） */
 export function renderMaterial(packs, o = {}) {
   if (!packs.length) return ''
-  const body = packs.map((p, i) => renderItem(p, i)).join('\n\n')
+  // 钩子是**附属的一行**，不是结论：它只说「你以前说过这句」，不替她下判断。
+  // 放在这一条素材的最下面——先看见东西，再看见自己说过什么（设计 §8.2）。
+  const body = packs.map((p, i) => {
+    const lines = [renderItem(p, i)]
+    const h = o.hooks?.get?.(p?.video?.bvid)
+    if (h?.text) lines.push(`     ${h.text}`)
+    return lines.join('\n')
+  }).join('\n\n')
   const head = o.head === undefined
     ? `${packs.length} 条。平台按它的算法推的，没有经过你的同意。`
     : String(o.head)
@@ -289,6 +301,32 @@ export function seenBvids(events, o = {}) {
   return s
 }
 
+/**
+ * 自动刷翻到过、但**没摆到她面前**的那些（meta `browsed:<bvid>`，同样只认最近
+ * SEEN_TTL_DAYS 天）。
+ *
+ * 和 `looked:` 分开记：安静刷不投递会话，翻到的东西她一条都没看见——记成「看过」，
+ * 她自己去看时就会被 `seenBvids` 挡掉，得到一句「翻到的 N 条都看过了」（issue #62
+ * 第 3 条，2026-11-09 用户拍板）。这份只给自动刷自己去重用，不进她看的路。
+ * @param {object[]} events
+ * @param {{now?:number, days?:number}} [o]
+ */
+export function browsedBvids(events, o = {}) {
+  const days = Number(o.days ?? SEEN_TTL_DAYS)
+  const now = Number(o.now ?? Date.now())
+  const ttl = days > 0 ? days * 86400000 : 0
+  const s = new Set()
+  for (const e of events ?? []) {
+    if (e?.type !== 'meta') continue
+    const t = String(e.text ?? '')
+    if (!t.startsWith('browsed:')) continue
+    const at = tsMs(e)
+    if (ttl > 0 && at > 0 && now - at > ttl) continue
+    s.add(t.slice(8).trim())
+  }
+  return s
+}
+
 /** 今天已经刷过几次（meta `browse:YYYY-MM-DD`） */
 export function browseCountToday(events, dk = dateKey()) {
   let n = 0
@@ -298,6 +336,29 @@ export function browseCountToday(events, dk = dateKey()) {
     if (t.startsWith('browse:') && t.includes(dk)) n++
   }
   return n
+}
+
+/** 最近一次刷站是什么时候（毫秒；没有就是 0）。安静刷用来摊开一天里的几次。 */
+export function lastBrowseAt(events = []) {
+  let last = 0
+  for (const e of events ?? []) {
+    if (e?.type !== 'meta') continue
+    if (!String(e.text ?? '').startsWith('browse:')) continue
+    const at = tsMs(e)
+    if (at > last) last = at
+  }
+  return last
+}
+
+/**
+ * 两次「安静刷」之间至少要隔多久（2026-11-07，用户 m00365）。
+ *
+ * 一天刷 4 次不等于 08:00 连着刷 4 回：把 12 小时按次数摊开，最少 30 分钟。
+ * 配额（perDay）仍然是硬上限，这里只管节奏。
+ */
+export function browseGapMs(perDay = 1) {
+  const n = Math.max(1, Math.min(24, Number(perDay) || 1))
+  return Math.max(30, Math.floor((12 * 60) / n)) * 60_000
 }
 
 /**
@@ -471,7 +532,12 @@ export async function gather(client, model, cfg, o = {}) {
   try {
     const dk = o.dk ?? dateKey()
     const events = o.events ?? (await readEvents(o.root).then((r) => r.events).catch(() => []))
-    const seen = o.seen ?? seenBvids(events)
+    // `mark`：这一趟翻到的该怎么记账。安静刷（mark: 'browsed'）没有把东西摆到她面前，
+    // 不能记 `looked:`；`voice: false` 同理——没看见的字不替她记（2026-11-09 用户拍板）。
+    const mark = o.mark === 'browsed' ? 'browsed' : 'looked'
+    const seen = o.seen ?? (mark === 'browsed'
+      ? new Set([...seenBvids(events), ...browsedBvids(events)])
+      : seenBvids(events))
     const stats = { hiddenSeen: 0 }
     const list = await candidates(client, model, cfg, { seen, sources: o.sources, stats })
     if (!list.length) {
@@ -498,24 +564,37 @@ export async function gather(client, model, cfg, o = {}) {
     }
     if (!packs.length) return { ok: false, text: '', picks: [], note: note.join('；') || '没有可看的' }
 
-    // 记"看过"，下次不再推同一条（只在真正拼进素材时才算看过）
+    // 记账，下次不再推同一条（只在真正拼进素材时才算）。`browsed:` 是自动刷自己的账：
+    // 它挡住的只有别的自动刷，不挡她自己去看（见 seenBvids / browsedBvids）。
     for (const p of packs) {
       try {
         await appendEvent(
-          { type: 'meta', text: `looked:${p.video.bvid}` },
+          { type: 'meta', text: `${mark}:${p.video.bvid}` },
           { day: Number(model?.day ?? 0), stage: Number(model?.stage ?? 1), source: 'system' },
           o.root,
         )
       } catch { /* 记账失败不影响这次浏览 */ }
     }
 
+    // 钩子（2026-11-09，0.9.6 S2，设计 §8.2）：只在**真摆到她面前**的时候算。
+    // 安静刷不投递会话、她一条都没看见，挂上钩子只是白记一笔。
+    const hooks = mark === 'browsed' ? null : buildHooks(model, packs, o.now ?? Date.now())
+    if (hooks?.size) {
+      const st = hookStats(hooks)
+      await appendEvent(
+        { type: 'meta', text: `hook:${st[1] > 0 ? 1 : 2}` },
+        { day: Number(model?.day ?? 0), stage: Number(model?.stage ?? 1), source: 'system' },
+        o.root,
+      ).catch(() => {})
+    }
+
     // 评论区里别人的话：从刚读到的一堆热评里挑一条留给她（可能挑不到）。
     // 挑不到是正常的——占比要小是用户明确要求的，不是每次都非得有。
-    const voice = await recordVoice({ packs, events, model, root: o.root, cfg })
+    const voice = o.voice === false ? null : await recordVoice({ packs, events, model, root: o.root, cfg })
 
     return {
       ok: true,
-      text: renderMaterial(packs),
+      text: renderMaterial(packs, hooks?.size ? { hooks } : {}),
       voice: voice ? { text: voice.text, why: voice.why, across: voice.across ?? 1 } : null,
       picks: packs.map((p) => ({
         bvid: p.video.bvid,
@@ -535,7 +614,9 @@ export async function gather(client, model, cfg, o = {}) {
 
 /** 她的说明书里要加的一段（她不认识配置文件，只知道"有这么个工具"） */
 export const LOOK_BRIEF = [
-  '你还有一个工具 bili_look，可以在你想看的时候去看一眼：',
+  '你还有一个工具 bili_look，可以去看一眼 B 站：',
+  // 2026-11-09（用户 m00002）：能力地图第二层补到它自己身上——先给处境，再列 what。
+  '什么时候想起它——想看点什么、或者想知道平台这会儿在把什么推到你面前的时候。',
   '  what=home    首页把什么推到你面前',
   '  what=search  搜一个词（要带 keyword）',
   '  what=related 看某个视频之后，平台又接着推什么（要带 bvid）',

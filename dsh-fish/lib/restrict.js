@@ -43,14 +43,26 @@
  */
 
 import { resolve } from 'node:path'
+import { homeFishTools, liveFishTools, sceneFishTools } from './toolreg.js'
 
-/** 插件自己注册的工具。顺序无意义，但**必须全部真实存在**（名字错会抛错）。 */
+/**
+ * 插件自己注册的、家里随时能用的工具。顺序无意义，但**必须全部真实存在**（名字错会抛错）。
+ *
+ * 这份表不只是「没有注册记录时的兜底」：真实启动里收窄先于工具注册
+ * （`lib/index.js` 先 `registerToolRestrict`，工具到后面的 `withUseDuringRegistration` 才注册），
+ * 那一刻注册记录必然是空的，她那条会话的 allow 就是照这份表算的。
+ * 所以每一件无条件注册、家里能用的工具都得在这里——漏一件，她每次重启都够不着它
+ * （0.9.5 的 her_say 就是这样：身份文档说她有，伸手却被守卫挡回来）。
+ * 场景工具（`lib/toolreg.js` 的 `SCENE_TOOLS`，如 bring_back）不进这份表。
+ * `test/restrict-boot.test.mjs` 按真实启动顺序钉着这件事。
+ */
 export const FISH_TOOLS = Object.freeze([
   'growth_commit', // 记下自己的想法（唯一的写入口）
   'her_recall', // 翻自己的旧事
   'her_diary', // 翻自己的日记（只读，issue #7）
   'her_leave', // 留一句话给他
   'her_note', // 把没做的事记到桌上（issue #22 乙档，2026-11-04）
+  'her_appoint', // 跟他约一件几天后的事（通用预约簿，2026-11-08）
   'bili_look', // 看 B 站的列表
   'bili_watch', // 看一条视频的画面
   'bili_zoom', // 把某一格放大重看（fork.35）
@@ -66,6 +78,7 @@ export const FISH_TOOLS = Object.freeze([
   'her_draw', // 白板画笔：线/矩形/圆/箭头/写字，构图由她定（2026-11-08，她的 ask_owner 申请）
   'her_formula', // 把「文字 + $公式$」排成一页图，成段推导用它（2026-11-09）
   'her_dream', // 醒来记一句梦（本机实验 A 案，2026-10-30 m02837）
+  'her_say', // 自己想说一句的时候用（0.9.0 起无条件注册，不看主动搭话开关）
 ])
 
 /**
@@ -93,6 +106,38 @@ export const SCHEDULE_TOOLS = Object.freeze([
  * 定时任务默认不在里面——要就由用户加进 `config.tools.allow`（`SCHEDULE_TOOLS`）。
  */
 export const HER_TOOLS = Object.freeze([...FISH_TOOLS, 'read_image'])
+
+/**
+ * 这一版**真的注册了**哪些工具（2026-11-08，用户 m00002）。
+ *
+ * 上面那两份常量是「没有活体注册记录时的基线」：注册走完之后清单由
+ * `lib/toolreg.js` 在注册期记账，这里现算。注意收窄注册那一刻还没有记录，
+ * 那时用的就是基线（见 `FISH_TOOLS` 的说明）。为什么不再以常量当唯一真源——
+ * 手抄的表一定会漏（`bring_back`、`her_say` 就是这么漏的），漏了之后
+ * 她自己那两件进不了 allow、设置页与自检也都不显示，看起来像「没这个工具」。
+ *
+ * @returns {string[]}
+ */
+export function fishToolsNow() {
+  return liveFishTools(FISH_TOOLS)
+}
+
+/**
+ * 设置页「她自己本来就有的（不用放行）」那一组，含宿主给的 `read_image`。
+ * 只列**家里随时能用**的；出门才用得上的那几样由 {@link herSceneToolsNow} 单列。
+ * @returns {string[]}
+ */
+export function herToolsNow() {
+  return [...new Set([...homeFishTools(FISH_TOOLS), 'read_image'])]
+}
+
+/**
+ * 「只在特定场合才交给她」的那几样，带场合说明（设置页单列一组，不进家里 allow）。
+ * @returns {{name: string, scene: string, why: string}[]}
+ */
+export function herSceneToolsNow() {
+  return sceneFishTools(liveFishTools(FISH_TOOLS))
+}
 
 /**
  * 「手边到底有什么」——写进 system prompt 的那一段（2026-10-29，用户 m01276）。
@@ -138,6 +183,93 @@ export function toolSurfaceText(names = HER_TOOLS) {
 let surfaceNow = toolSurfaceText()
 
 /**
+ * 「到手」要用的两样东西（2026-11-08，issue #58）。
+ *
+ * - `inHandAllow`：这一次注册的白名单（配置里的全量，守卫按它放行）。收窄关着、
+ *   还没注册过时是 `null`——「不知道」与空数组（一个都没有）严格分开：收窄关着时
+ *   她能看见全部工具，按空数组过滤会把所有愿望都当成「已经到手」。
+ * - `herAgents`：她的 agent，按会话 id 记（`session-` 前缀抹掉，见 {@link sidKey}）。
+ *   群聊分房也是她（cwd 一样），只记最后一个的话，叫醒用的就成了某间群房的工具表。
+ *   `latestHer` 是最近建的那个，只给不指定会话的调用方用；指定了会话就只认那一条。
+ * - `herSeen`：这一次注册见过的她（不按 id，按 agent 本身）。调度器探活时宿主把那条
+ *   会话的 agent 交回来，是这一次见过的就直接按它算，不经过 id 写法与上限淘汰。
+ *
+ * 不存「到手」的快照，查的时候现算（见 {@link currentAllowTools}）：别的插件常在
+ * agent 建好之后才挂工具（dsh-ops attach 时才 publish ops_*），快照会一直漏掉它们。
+ * agent 只弱引用着：会话关了、宿主放手了，这里不替它留着一整条会话。
+ */
+let inHandAllow = null
+const herAgents = new Map() // sidKey(sessionId) -> WeakRef<agent>，最近问到/建的在末尾
+let latestHer = null // WeakRef<agent> | null
+let herSeen = new WeakSet()
+const HER_AGENTS_MAX = 16
+
+/**
+ * 会话 id 的统一写法：宿主两处给的不一定一样（带不带 `session-` 前缀），
+ * 与 identity.js 的 `wakeKey`、sessionnote.js 的比对同一个抹法。
+ */
+function sidKey(id) {
+  return String(id ?? '').replace(/^session-/, '')
+}
+
+function agentSessionId(agent) {
+  try {
+    return sidKey(agent?.session?.header?.id ?? agent?.session?.id ?? '')
+  } catch {
+    return ''
+  }
+}
+
+/** 记下一个新建的她（会话轮换、重启、群房）。同一条会话再建一次就换成新的。 */
+function rememberHer(agent) {
+  if (!agent) return
+  herSeen.add(agent)
+  const sid = agentSessionId(agent)
+  const ref = new WeakRef(agent)
+  herAgents.delete(sid)
+  herAgents.set(sid, ref)
+  latestHer = ref
+  if (herAgents.size <= HER_AGENTS_MAX) return
+  // 超了：先丢宿主已经放手的；还超，再丢最久没被问到的（查到时会挪到末尾，
+  // 家里那条叫醒、劲儿常问，不会先被一串群房挤掉）。
+  for (const [k, r] of herAgents) if (!r.deref()) herAgents.delete(k)
+  while (herAgents.size > HER_AGENTS_MAX) herAgents.delete(herAgents.keys().next().value)
+}
+
+/**
+ * 按会话找她。指定了会话就只认那一条：没见到返回 `null`，**不**拿最近建的那个顶——
+ * 重启后家里那条冷着、群房先活着时，最近建的是群房；群房不带家里的 preset，工具表不一样，
+ * 拿它顶会把家里没有的东西算成到手、家里有的算成没到手。
+ * 只有调用方什么都没指定时，才按最近建的那个答。
+ */
+function herFor(sessionId, agent) {
+  if (agent && herSeen.has(agent)) return agent
+  const sid = sidKey(sessionId)
+  if (sid) {
+    const ref = herAgents.get(sid)
+    const got = ref?.deref()
+    if (!got) {
+      if (ref) herAgents.delete(sid)
+      return null
+    }
+    herAgents.delete(sid)
+    herAgents.set(sid, ref)
+    return got
+  }
+  if (agent) return null
+  return latestHer?.deref() ?? null
+}
+
+/**
+ * 启动时白名单里额外放行的那几个名字（身份文档「还放行了这几样」那句用，issue #64 的后半）。
+ *
+ * 跟 `inHandAllow` 同一刻定下，`null` 同样是「收窄这一局没在管」。
+ * 不拿 `inHandAllow` 减去「她自己的」现算：她自己的那份按注册记录现算，工具注册前后不一样
+ * （新进程里 her_say 注册之前不在基线里），同一个进程里那句话会先念 her_say、后来又不念。
+ */
+let allowExtra = null
+
+/**
  * 被挡住时她读到的那句话（0.9.3，issue #54）。
  *
  * 以前只有一句「这件事我做不到。」——issue #54 里那位宿主把 preset 工具塞进 agent
@@ -172,6 +304,89 @@ export function blockedTalk(names = []) {
  */
 export function currentToolSurface() {
   return surfaceNow
+}
+
+/**
+ * 她此刻手上有的工具名（issue #58，2026-11-08）。
+ *
+ * 为什么「有没有到手」只能拿白名单回答：`need-tool` 卡本身不落实任何权限
+ * （见 `lib/ask.js` 文件头第 2 条）。他真要给，只能在卡外面给——装插件、把这
+ * 个名字加进白名单——事件流里一个字都不会记。所以摆那张桌子时按这份清单对一遍，
+ * 已经到手的那几条就不用再摆「他答应了，还没见到」。
+ *
+ * 但白名单里写了不等于手上有：宿主没装 `read_image`、白名单里的桥工具没装上，
+ * 这些名字都不会下给宿主（见 onCreated 的 `skipped`）。0.9.5 直接拿配置当答案，
+ * 她要一样还没来的东西，那张卡一开就从桌上撤掉了。
+ *
+ * 所以按她那个 agent **此刻**的工具表现算：白名单 ∩ `view(agent).visible`。
+ * 收窄下去以后 visible 就是她真看得见的；守卫放行的是白名单全量，两者的交集就是
+ * 她伸手够得着的。收窄还在重试、或一直没收窄成时，visible 是宿主的全部工具，
+ * 交集同样对。晚挂上的 own 层工具（ops_*）查的那一刻在 visible 里，也就算进来了。
+ *
+ * 拿不到就返回 `null`（收窄关着、还没注册过、指定的那条会话还没见到、宿主给不出工具表）：
+ * 调用方那时不做任何过滤。反过来，空数组是「真的一件都没有」，不能当成「不知道」。
+ *
+ * 重新注册（插件在同一个进程里再跑一次）之后，之前的她一个都不认：那些 agent 身上
+ * 挂的守卫与收窄是上一次注册下的（或已随插件卸掉），这一份白名单说不准她们够得着什么——
+ * 比如白名单新加了一个 own 层的名字，旧守卫照样拦它。这时返回 `null`，宁可多摆一条，
+ * 等下一个她建出来再答。
+ *
+ * @param {string} [sessionId] 按哪条会话的 agent 算（叫醒、主动回合、劲儿传家里那条）。
+ *   指定了就只认这一条，没见到返回 `null`；不指定时按最近建的那个她。
+ * @param {{agent?: object}} [opt] 宿主刚交回来的那条会话的 agent（探活拿到的）。
+ *   这一次注册见过它就直接按它算，不经过会话 id。
+ * @returns {string[]|null}
+ */
+export function currentAllowTools(sessionId = '', { agent = null } = {}) {
+  if (!inHandAllow) return null
+  const her = herFor(sessionId, agent)
+  if (!her) return null
+  const seen = visibleToolsOf(her)
+  if (!seen) return null
+  const got = new Set(seen)
+  return inHandAllow.filter((n) => got.has(n))
+}
+
+/**
+ * 这一局她真看得见的工具名（收窄关着时就是宿主给她的全部）。
+ *
+ * 只给「已经见到她的 agent」时用：收窄关着时 {@link currentAllowTools} 返回 `null`
+ * （不知道该不该按白名单筛），可「她手上有没有这件东西」仍然有答案——她这一局的
+ * 工具表就是答案。2026-11-09 用户拍板的 #58 遗留：以前这里把 `null` 当成「没有」，
+ * 心事卡要的东西明明已经能用了，还摆到窗口过期。
+ *
+ * 拿不到她的 agent 仍返回 `null`：不知道就不筛，宁可多摆一条。
+ * @param {string} [sessionId] 按哪条会话的 agent 算。
+ * @param {{agent?: object}} [opt] 宿主刚交回来的那条会话的 agent。
+ * @returns {string[]|null}
+ */
+export function visibleAllowTools(sessionId = '', { agent = null } = {}) {
+  const her = herFor(sessionId, agent)
+  if (!her) return null
+  const seen = visibleToolsOf(her)
+  return seen ? [...seen] : null
+}
+
+/**
+ * 配置里放行的那份白名单（收窄关着、还没注册过时是 `null`）。
+ *
+ * 只给「还核实不了」时当临时答案用：重启后她那条会话是冷的，agent 要等第一次被叫起来
+ * 才建，在那之前 {@link currentAllowTools} 给不出答案。劲儿那一处拿它顶（见
+ * scheduler.js 的 `toolInHandNow`），桌上摆什么仍旧只按核实过的算。
+ *
+ * @returns {string[]|null}
+ */
+export function configuredAllowTools() {
+  return inHandAllow ? inHandAllow.slice() : null
+}
+
+/**
+ * 这一局收窄名单里来自白名单的那几个（按配置里的顺序，去重去空白）。
+ * 收窄关着、或还没注册过时是 `null`。
+ * @returns {string[]|null}
+ */
+export function currentAllowExtra() {
+  return allowExtra ? allowExtra.slice() : null
 }
 
 /** 归一化一份工具名：去重、去空白、排序（顺序稳定，提示词前缀才对得上缓存）。 */
@@ -326,7 +541,7 @@ export function isHerAnywhere(agent, herDir, extraDirs = []) {
  * @param {(msg: string, err?: unknown) => void} [opts.log]
  * @param {(info: object) => void} [opts.onResult] 记录"这次真的挂上没有"（给自检用）
  */
-export function registerToolRestrict(ctx, { herDir, extra = [], enabled = true, log, onResult, retryMs = 200, retryMax = 15, dream = false, proactive = false } = {}) {
+export function registerToolRestrict(ctx, { herDir, extra = [], enabled = true, log, onResult, retryMs = 200, retryMax = 15, dream = false } = {}) {
   // 无论调用方传不传 onResult，模块级单例都要更新——自检读的是它。
   const __raw = onResult
   onResult = (r) => { report(r); try { __raw?.(r) } catch { /* ignore */ } }
@@ -335,18 +550,58 @@ export function registerToolRestrict(ctx, { herDir, extra = [], enabled = true, 
     say('[dsh-fish] 工具面收窄：关闭（配置里关掉了）')
     // 收窄关掉时，提示词里也不能说「只有这几样」——那会跟她眼前看到的对不上。
     surfaceNow = ''
+    // 她这时能看见全部工具：「不知道」与「一件都没有」必须分开（issue #58）。
+    allowExtra = null
+    inHandAllow = null
+    herAgents.clear()
+    latestHer = null
+    herSeen = new WeakSet()
     onResult?.({ ok: false, applied: 0, why: 'disabled', allow: [] })
-    return () => {}
+    // 收窄关着也照旧记下她这一局的 agent（2026-11-09，用户 m01451 的 ①）：
+    // 心事卡问「要的东西到手没有」不走白名单，直接看她这一局真看得见的工具
+    // （`visibleAllowTools()`）；不收窄就一个 agent 都不记，那边永远答「不知道」，
+    // 卡照旧摆到窗口过期——这正是 issue #58 关掉收窄后复现的那一半。
+    const off = ctx.on?.('agent/created', ({ agent } = {}) => {
+      try {
+        if (isHerAgent(agent, herDir)) rememberHer(agent)
+      } catch { /* 认不出就算了，界面会退回只查拼写 */ }
+    })
+    return () => {
+      try { off?.() } catch { /* ignore */ }
+    }
   }
 
-  // 本机实验工具（2026-10-30 m02837 / m04610）：只有 .dev 存在时才进白名单。
-  // 与 index.js 的注册、selfdoc 的提示词段共用同一个判据，三处不能各判各的。
-  const herNow = HER_TOOLS.filter((n) => n !== 'her_dream' || dream)
-  if (proactive) herNow.push('her_say')
-  const allow = [...new Set([...herNow, ...extra.map((s) => String(s).trim()).filter(Boolean)])]
+  // 家里随时能用的那些：**从注册记录现算**，不再照抄 FISH_TOOLS
+  // （2026-11-08，用户 m00002：手抄的表会漏——bring_back 与 her_say 就是这么漏掉的，
+  // 界面永远显示旧的那几样，她自己那两件也进不了 allow）。
+  // 还没有注册记录时退回 FISH_TOOLS 那份基线。**生产上走的就是这一支**：
+  // index.js 先调这里、后注册工具，这一刻注册记录还是空的。她的会话可能在工具注册之前
+  // 就建好（bootstrapHome 早于注册），这时宿主还没有这些名字——基线里的名字算「我方的」，
+  // 下面 bucket() 把没到的归进 missing，restrict 延后重试到它们注册上为止；
+  // 守卫在第一拍就按这份 allow 放行。所以 allow 对不对只看基线全不全，跟时序无关。
+  // 梦（issue #64）：关掉「允许她记梦」时 her_dream 不进 allow。
+  const live = liveFishTools(FISH_TOOLS)
+  // 用 herToolsNow() 而不是 homeFishTools()：宿主给的 read_image 也在 allow 里
+  // （她看画面要靠它）。以前这里拿的是 HER_TOOLS，含 read_image；换成现算时漏掉的话，
+  // 她会突然看不了图，而白名单界面还写着「read_image 也留着」。
+  //
+  // her_say 不看主动搭话开关（0.9.0 起它无条件注册）：那个开关管的是「系统替她开一轮」，
+  // 不是这个工具本身。0.9.5 这里只在注册记录里有 her_say 时才补它，可这一刻记录是空的，
+  // 每次重启她都够不着 her_say；现在它在 FISH_TOOLS 基线里，不用再单独补。
+  const herNow = herToolsNow().filter((n) => n !== 'her_dream' || dream)
+  const extraNames = [...new Set(extra.map((s) => String(s).trim()).filter(Boolean))]
+  const allow = [...new Set([...herNow, ...extraNames])]
   // 先让提示词跟上这一次的白名单，再谈 restrict 挂没挂上：
   // 就算 restrict 因名字没登记而延后，这一段也已经说清了「多出来的不是你的」。
   surfaceNow = toolSurfaceText(allow)
+  // 「到手」不在这里定（issue #58）：配置里写了，宿主上不一定有。这里只记白名单，
+  // 到手多少等查的时候按她的 agent 现算。之前记下的 agent 不是这一次的守卫与收窄管的，
+  // 替它们担保不了，忘掉，等下一个她建出来。
+  inHandAllow = allow.slice()
+  allowExtra = extraNames.slice()
+  herAgents.clear()
+  latestHer = null
+  herSeen = new WeakSet()
   let applied = 0
   let failed = ''
 
@@ -366,6 +621,8 @@ export function registerToolRestrict(ctx, { herDir, extra = [], enabled = true, 
     } catch { /* 拿不到就算了，界面会退回只查拼写 */ }
     try {
       if (!isHerAgent(agent, herDir)) return
+      // 记下这个她（issue #58）：「到手」按她这条会话的工具表现算，不沿用上一个 agent 的。
+      rememberHer(agent)
       const scopedTools = agent?.ctx?.tools
       // ---- 分两桶（2026-10-29）----
       // `restrict()` 只认 `restrictableNames`（inherited 层）。own 层看得见却点不了名
@@ -385,17 +642,48 @@ export function registerToolRestrict(ctx, { herDir, extra = [], enabled = true, 
           // 顺手把此刻的工具表记进快照：这一刀落下时它认得的名字，就是白名单该认的名字。
           if (v) rememberFromView(v)
         } catch { /* 拿不到就退回全量，交给下面的 catch + 延后重试 */ }
-        // 三桶：收得窄的 / 看得见但点不了名的（own 层）/ 根本还没登记的。
+        // 四桶：收得窄的 / 看得见但点不了名的（own 层）/ 我方还没登记完的 / 别人的名字。
         // 只有第一种能下给 restrict()；第三种说明宿主还没登记完，必须延后——
         // 静悄悄只收窄一半，会让她永久少一只手（0.6.0 真机事故）。
-        // 宿主老版本（或 view 没给 visible）只报 restrictableNames：那时没法分辨
-        // 「还没登记」和「own 层」，照旧把全量交给 restrict，让它的报错走延后重试。
+        //
+        // 第四种（issue #61）：`read_image` 是宿主给的可选能力，`config.tools.allow` 里
+        // 也可能是桥工具的名字——不是我们自己注册的，这台机器上没有就是没有。
+        // 旧实现把它们也算进 missing，于是每次都抛错、延后、然后再等，一次都收不窄
+        // （`herToolsNow()` 恒含 read_image，宿主没这个工具就成了永久死结）。
+        // 现在只等「我方确实会注册的名字」，别人的名字这次剔掉、记一行日志。
+        // own 层的名字本来就不受 allow 影响，剔掉它不会让谁少一只手。
+        //
+        // 宿主老版本（或 view 没给 visible）只报 restrictableNames：那时分不清别人的名字是
+        // 「这次没注册」还是「在 own 层」。可这两种 restrict 都点不了名——交给它只会让它
+        // 每拍都抛错，15 拍后一次都没收窄（issue #61 在这种宿主上的样子）。所以不是我们自己
+        // 注册的名字，照样按 restrictableNames 剔掉：真在 own 层的，她照样看得见、守卫也放行。
+        // 剔之前先宽限几拍（见下面第一拍那段）：晚注册的外部名字等得到就收进来。
+        // 我们自己的名字不在 restrictableNames 里，仍然当「还没登记完」等下去。
+        // view 一个名字都没给时什么都判断不了，才把全量交给 restrict（老行为）。
         const split = visible.size > 0 && restrictable.size > 0
-        const forRestrict = split ? allow.filter((n) => restrictable.has(n)) : allow.slice()
-        const missing = split ? allow.filter((n) => !restrictable.has(n) && !visible.has(n)) : []
-        return { restrictable, visible, forRestrict, missing }
+        const named = restrictable.size > 0
+        const ours = new Set(live)
+        const seen = (n) => restrictable.has(n) || visible.has(n)
+        // 分不清的时候（没给 visible），我们自己的名字照旧交给 restrict 试一把：没登记它会抛错，
+        // 走下面的延后重试；重试时 missing 不空就不下，等自己的名字都进了 restrictableNames 才收。
+        const forRestrict = split
+          ? allow.filter((n) => restrictable.has(n))
+          : named ? allow.filter((n) => ours.has(n) || restrictable.has(n)) : allow.slice()
+        const missing = named ? allow.filter((n) => ours.has(n) && !seen(n)) : []
+        const skipped = named ? allow.filter((n) => !ours.has(n) && !seen(n)) : []
+        // sure：view 给了 visible，两边都没有才说得准「这台机器上这次没有」。
+        return { restrictable, visible, forRestrict, missing, skipped, sure: split }
       }
-      let { forRestrict: allowForRestrict, missing: missingNow } = bucket()
+      let { forRestrict: allowForRestrict, missing: missingNow, skipped: skippedNow, sure: skippedSure } = bucket()
+      // 只念一次：重试时同一批名字会再算一遍，别把日志刷满（issue #61）。
+      let skippedTold = false
+      const noteSkipped = (names) => {
+        if (skippedTold || !names.length) return
+        skippedTold = true
+        say(skippedSure
+          ? `[dsh-fish] 工具面收窄：这几个名字这台机器上没有，这次不列进去（${names.join('、')}）`
+          : `[dsh-fish] 工具面收窄：这几个名字不在 restrict 认得的名单里，没交给它（${names.join('、')}；可能这次没注册，也可能在她自己那一层，照常收窄）`)
+      }
       if (!scopedTools?.restrict) {
         failed = '宿主的 agent.ctx 上没有 tools.restrict（版本不支持）'
         say(`[dsh-fish] 工具面收窄失败：${failed}`)
@@ -475,15 +763,27 @@ export function registerToolRestrict(ctx, { herDir, extra = [], enabled = true, 
         try { agent.ctx.effect?.(() => dispose) } catch { /* 拿不到 effect 就靠父级回滚，不致命 */ }
       }
       try {
-        if (missingNow.length) {
+        // 分得清（view 给了 visible）时，自己的名字还没登记就不必去碰 restrict；
+        // 分不清时交给 restrict 自己报错（老行为）。
+        if (missingNow.length && skippedSure) {
           throw new Error(`tools.restrict() names unknown global tool "${missingNow[0]}"`)
         }
+        // 分不清的宿主（没给 visible）上，不在 restrictableNames 里的别人的名字可能在她自己那一层，
+        // 也可能只是比 agent/created 晚到、还没注册。以前整份交给 restrict，它抛错、走延后重试，
+        // 晚到的名字注册了就收进来；第一拍就剔掉的话，它这一局再也进不来（restrict 只能减）。
+        // 所以这时也走下面的重试，从「自家名字到齐」那一拍起宽限几拍，等不到才剔。守卫已经挂着，不会漏。
+        // 给了 visible 的宿主分得清「这次没有」，第一拍就剔（跟原来一样）。
+        if (!skippedSure && skippedNow.length) {
+          throw new Error(`这几个名字 restrict 还不认得：${skippedNow.join('、')}`)
+        }
         applyRestrict(allowForRestrict)
+        noteSkipped(skippedNow)
         applied += 1
         say(`[dsh-fish] 工具面收窄：她这条会话只留 ${allowForRestrict.length} 个工具${guardOk ? '，另有兜底守卫' : ''}`)
         // 真的挂上了才算数——"注册了"和"生效了"必须分开报，否则自检会说谎。
         // effective 记的是**这次真下给宿主的那份名单**，导出里要跟配置的 allow 分开写。
-        onResult?.({ ok: true, applied, failed, why: 'applied', allow, effective: [...allowForRestrict], guard: guardOk })
+        // skipped 是这次没交给 restrict 的别人的名字（issue #61）：自检不能再拿「allow 里有」当宿主认过它。
+        onResult?.({ ok: true, applied, failed, why: 'applied', allow, effective: [...allowForRestrict], skipped: [...skippedNow], skippedSure, guard: guardOk })
         return
       } catch (err) {
         // 2026-10-25 真机：宿主先建了她的 agent，插件自己的工具还没在全局层登记完，
@@ -500,24 +800,41 @@ export function registerToolRestrict(ctx, { herDir, extra = [], enabled = true, 
         const msg = String(err?.message ?? err)
         adoptKnownFromError(msg) // 顺手捡回全量名单，重试判断也用得上
         say(`[dsh-fish] 工具面收窄延后：宿主还没登记完（${msg.slice(0, 120)}）`)
+        // 2026-11-08（issue #61，@BBleae 追问的时序）：插件自己的名字到齐之后，
+        // 别人的名字（宿主的 read_image、白名单里的桥工具）可能还差几十毫秒才注册。
+        // 一到齐就收窄的话，晚到的那一个这一局就再也进不来——restrict 只能减不能加，
+        // 她调它会是 unknown tool，要等下一次会话。所以到齐后再宽限几拍，等不到才剔掉。
+        const absentGrace = 3
         let tries = 0
+        let readyTick = -1
         const attempt = () => {
           const again = bucket()
           allowForRestrict = again.forRestrict
           missingNow = again.missing
-          if (!again.missing.length) {
+          skippedNow = again.skipped
+          skippedSure = again.sure
+          const ready = !again.missing.length
+          if (ready && readyTick < 0) readyTick = tries
+          // 自己的到了、外部名字还有没到的 → 从「到齐那一拍」起再宽限几拍。
+          const waitingAbsent = ready && again.skipped.length > 0 && tries - readyTick < absentGrace
+          if (ready && !waitingAbsent) {
             try {
               applyRestrict(allowForRestrict)
+              noteSkipped(skippedNow)
               applied += 1
               say(`[dsh-fish] 工具面收窄：她这条会话只留 ${allowForRestrict.length} 个工具${guardOk ? '，另有兜底守卫' : ''}`)
-              onResult?.({ ok: true, applied, failed, why: 'applied-late', allow, effective: [...allowForRestrict], guard: guardOk })
+              onResult?.({ ok: true, applied, failed, why: 'applied-late', allow, effective: [...allowForRestrict], skipped: [...skippedNow], skippedSure, guard: guardOk })
               return
             } catch (err2) {
               say(`[dsh-fish] 收窄重试没成：${String(err2?.message ?? err2).slice(0, 160)}`)
             }
           }
           tries += 1
-          if (tries < retryMax) {
+          // 宽限从「自家名字到齐」那一拍起算（不是从这次会话开头算），而且只在
+          // 「确实有外部名字没到」时才给；一直不齐就还按原来的 retryMax 收尾。
+          // 多留一拍是给「宽限用满的那一拍」真正落地收窄。
+          const limit = readyTick >= 0 && again.skipped.length ? readyTick + absentGrace + 1 : retryMax
+          if (tries < limit) {
             const t = setTimeout(attempt, retryMs)
             try { agent?.ctx?.effect?.(() => clearTimeout(t)) } catch { /* ignore */ }
           } else {
@@ -773,6 +1090,10 @@ function report(r) {
     // 只有真的下过 restrict 才有值。空数组 = 这一局她看见的是**全部**工具，
     // 而不是「允许 0 个」——读导出的人必须能一眼分清这两种情况。
     effective: eff,
+    // 这次没交给 restrict 的别人的名字（issue #61）。skippedSure 为 false 时（view 没给 visible）
+    // 说不准是这次没注册还是在她自己那一层，自检不能说成「这台机器上没有」。
+    skipped: Array.isArray(r?.skipped) ? r.skipped.map((x) => String(x)) : [],
+    skippedSure: r?.skippedSure !== false,
     failed: r?.failed ? String(r.failed) : '',
     guard: Boolean(r?.guard),
   }

@@ -17,9 +17,11 @@ import { createClient } from './bili.js'
 import { readMyReplies, renderMyReplies } from './comment.js'
 import { absorb, renderMaterial, rankVideos, seenBvids, LOOK_BRIEF, WATCH_RULE } from './browse.js'
 import { readEvents, rootDir, appendEvent } from './store.js'
-import { loadConfig, dateKey } from './settings.js'
+import { loadConfig, dateKey, biliOn } from './settings.js'
 // 评论区里别人的话（2026-10-24，用户 m02454）
 import { recordVoice } from './voices.js'
+// 素材旁边的那一行钩子（2026-11-09，0.9.6 S2）
+import { buildHooks } from './hook.js'
 import { toJsonSchema } from './toolschema.js'
 import { guardWrite } from './tenant.js'
 
@@ -195,12 +197,19 @@ export async function lookOnce(o = {}) {
 
     // 评论区里别人的话（2026-10-24，用户 m02454）：她自己去看的时候也可能读到一句。
     const voice = await recordVoice({ packs, events, model: o.model, root, cfg, sessionId })
+    // 钩子（2026-11-09，0.9.6 S2）：她自己点名看的那条也挂——她主动去看的东西，
+    // 恰恰最可能是「和以前想过的事有关」才去看的。
+    const hooks = buildHooks(o.model, packs)
+    if (hooks.size) {
+      const lv = [...hooks.values()].some((h) => h.level === 1) ? 1 : 2
+      await appendEvent({ type: 'meta', text: `hook:${lv}` }, { ...who }, root).catch(() => {})
+    }
 
     return {
       ok: true,
       text: single
-        ? renderMaterial(packs, { head: '这一条。是你自己点名要看的那条。' })
-        : renderMaterial(packs),
+        ? renderMaterial(packs, { head: '这一条。是你自己点名要看的那条。', ...(hooks.size ? { hooks } : {}) })
+        : renderMaterial(packs, hooks.size ? { hooks } : {}),
       note: '',
       voice: voice ? { text: voice.text, why: voice.why, across: voice.across ?? 1 } : null,
       picks: packs.map((p) => ({
@@ -311,7 +320,8 @@ export function registerLook(ctx, deps = {}) {
 
         const { config } = await loadConfig(root)
         // 2026-11-05（用户 m02562）：能不能看由 bili.enabled 决定，不再借 browse 那个刷站开关。
-        if (config?.bili?.enabled === false) {
+        // issue #62：这个判据收进 settings.js 的 biliOn()，看画面 / 说话 / 查回复都认同一处。
+        if (!biliOn(config)) {
           return { ok: false, text: '', note: '现在打不开。' }
         }
         const r = await lookOnce({

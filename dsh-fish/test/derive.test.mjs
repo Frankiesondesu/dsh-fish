@@ -98,6 +98,37 @@ test('他主动给的名字、她自己改口的叫法都算称呼', () => {
   assert.equal(pickName('以后叫他他吧'), null)
 })
 
+// issue #81（2026-11-08）：她说过「说你让我叫你老大——可这句不是我从你嘴里听见的」。
+// 排除集里原来只有空白和常见标点，没有破折号，{1,8} 正好抓满 8 个字 →
+// 「老大——可这句不」。破折号与省略号都是「话说到一半」的标记，名字不可能跨过去。
+test('称呼不会跨过破折号截成半句话（issue #81）', () => {
+  assert.equal(pickName('说你让我叫你老大——可这句不是我从你嘴里听见的'), '老大')
+  assert.equal(pickName('所以叫你阿岸–行吗'), '阿岸')
+  assert.equal(pickName('就叫他阿岸…算了'), '阿岸')
+  // 「他的名字是 X」用的是同一份排除集
+  assert.equal(pickName('他给的名字是阿岸——你记着'), '阿岸')
+  // 顺手不能改坏的两条：尾巴语气词照剥，「的」不剥
+  assert.equal(pickName('我叫你老张好了'), '老张')
+  assert.equal(pickName('我想叫他“开灯的”。'), '开灯的')
+  // 整条链路：身份文档里那句称呼也要跟着变对
+  const evs = [
+    ev('ev_seed', 'seed', 1, '你是个好奇心重、不太会表达的存在。', { source: 'system' }),
+    ev('ev_a', 'utterance', 2, '说你让我叫你老大——可这句不是我从你嘴里听见的'),
+  ]
+  assert.equal(deriveSelf(evs, { now: T0 + 2 * DAY_MS }).name, '老大')
+})
+
+// issue #97（2026-11-09，外部用户真机）：她说「我想好了怎么叫你——叫「某名字」」。
+// 破折号挡在「叫你」和名字中间，0.9.5 的壳吃不下，整句认不出来（name 变成 null）。
+test('破折号后面带引号的称呼能认出来（issue #97）', () => {
+  assert.equal(pickName('我想好了怎么叫你——叫「小岸」'), '小岸')
+  assert.equal(pickName('我想好了怎么叫你——「小岸」'), '小岸')
+  // 反过来的保护：破折号后面没带引号时，不能把半句话当名字。
+  assert.equal(pickName('我叫你——可这句不是我从你嘴里听见的'), null)
+  // issue #81 的截断保护不能因此回退
+  assert.equal(pickName('说你让我叫你老大——可这句不是我从你嘴里听见的'), '老大')
+})
+
 test('needs 只有三个键，且绝不出现好感度类字段', () => {
   const evs = [ev('ev_seed', 'seed', 1, '种', { source: 'system' }), ev('ev_a', 'utterance', 2, '我不喜欢被催。')]
   const m = deriveSelf(evs, { now: T0 + 2 * DAY_MS })
@@ -296,4 +327,18 @@ test('stability 对同一批事件只算一次（issue #3 缓存）', () => {
   const b = stability(events, { growthDays: 30 })
   assert.deepEqual(a, b)
   assert.ok(a.sample > 0, '有判断时应该真的抽过样')
+})
+
+// 2026-11-09（issue #86 第 4 条，用户拍板「N、M 都去重」）：
+// 界面上「在用的判断」与「记得很牢的」两个数都按**原话**算。
+// 同一句话说三遍时，矛盾数与体检早就是按原话去重的，这里跟上——
+// 否则一处判断被说三遍，界面上看着像她记得三件事。
+test('判断计数按原话去重：同一句话说三遍只算一条（issue #86 第 4 条）', () => {
+  const same = '我不喜欢被催。'
+  const events = [1, 2, 3].map((i) => ev(`ev_s${i}`, 'utterance', i, same))
+  events.push(ev('ev_other', 'utterance', 4, '我喜欢夜里干活。'))
+  const m = deriveSelf(events)
+  assert.equal(m.beliefCount, 2, '三遍那句 + 另一句 = 两条原话')
+  assert.equal(m.solidTotal, 1, '三遍那句够格固化，但还是一句话')
+  assert.equal(m.solid.length, 1, '摆出来的列表里也只有一条')
 })

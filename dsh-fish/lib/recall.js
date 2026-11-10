@@ -25,11 +25,17 @@
  *      以及被 revise/test/answer 引用过的条目，排在同样字面命中的前面。
  *      原来「最重要」和「刚好提到这个字」同分，只按时间新旧排——等于没有排序。
  *   4. `kind` 可以只看一类（比如只听他说过的话）。不加这个参数就是全部。
+ *
+ * 2026-11-08（用户 m00187）又改了三处，仍然只动排序、不碰存储：
+ *   5. idf 加权：到处都是的词（事情 / 说过）不再跟罕见的词一样值分。
+ *   6. 字面量整串比：`0.9.3` / `snapshot.json` 不再被切成碎片到处误撞。
+ *   7. 新旧折算：字面命中相同时，昨天的先于三个月前的；判断类永不折。
  */
 
 import { toJsonSchema } from './toolschema.js'
 import { rootDir, readEvents } from './store.js'
 import { deriveSelfCached } from './derive.js'
+import { normalizeScene } from './schema.js'
 import { dateKey } from './settings.js'
 import { anchorOf } from './anchor.js'
 
@@ -215,9 +221,13 @@ const oneLine = (text) => text.replace(/\s+/g, ' ').trim()
 const USE_LINE = /^use:(\S+)\s+(ok|fail)\s*(.*)$/
 
 /** 不是她自己写下的，要说清来路 */
-function labelled(type, text) {
+function labelled(type, text, scene = '') {
   // heard 是旁听来的：明确写成「他说」，别让她误以为是自己说的。
-  if (type === 'heard') return `他说：${text}`
+  // 2026-11-08（用户 m00394）：群聊里他本人的那句也记，但要读得出来是在哪儿说的——
+  // 不标的话，她翻到会以为那是只对她一个人说的。
+  if (type === 'heard') {
+    return normalizeScene(scene) === 'group' ? `他在群里说：${text}` : `他说：${text}`
+  }
   // voice、answer 同理：一句是读到的陌生人的话，一句是别人回她的。
   if (type === 'voice') return `读到别人说：${text}`
   if (type === 'answer') return `回复：${text}`
@@ -282,6 +292,97 @@ export function looseScore(text, query) {
   for (const c of chars) if (lower.includes(c)) hit++
   if (hit / chars.length < 0.6) return 0
   return Math.min(1.5, hit * 0.3)
+}
+
+/**
+ * 字面量：版本号、文件名、命令、路径、工具名（2026-11-08，用户 m00187 第 2 条）。
+ *
+ * 为什么单拎出来：中文二字切片会把「0.9.3的坑」切成 `0.` / `.9` / `9.` / `.3` /
+ * `3的` / `的坑` 六片，把 `snapshot.json` 切成 snapshot / json。碎片到处误撞，
+ * 真正记着这件事的那条反而只拿两分，被一堆不相干的条目挤到八条以外。
+ * 所以先把这些「不该被切开的东西」整串抽出来，按整串比。
+ */
+const LITERAL_RE = /[A-Za-z0-9][A-Za-z0-9_.\-/:#]{1,}/g
+
+export function literalsOf(text) {
+  const out = new Set()
+  for (const m of String(text ?? '').matchAll(LITERAL_RE)) {
+    const w = m[0]
+    // 纯数字不算：年份、条数、「第 3 条」到处都是，当字面量只会误伤。
+    if (/^\d+$/.test(w)) continue
+    // 普通英文单词不算（ok / deepseek）：它们靠整词与二字切片就够，
+    // 只有带数字或分隔符的才真有「不能切开」的价值。
+    if (!/[0-9._\-/:#]/.test(w)) continue
+    out.add(w.toLowerCase())
+  }
+  return [...out]
+}
+
+/** 整串命中一个字面量值多少分：压得过一个两字切片，压不过「她问的那件事整句都在里面」。 */
+export const LITERAL_BONUS = 3
+/** 查询里带着字面量却一个都没对上时的折算：多半不是这一条。 */
+export const LITERAL_MISS = 0.3
+
+/** 把字面量从查询里抠掉，剩下的再切二字——免得碎片再进候选池。 */
+function stripLiterals(text, lits) {
+  let s = String(text ?? '')
+  for (const l of lits) {
+    const safe = l.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    s = s.replace(new RegExp(safe, 'gi'), ' ')
+  }
+  return s
+}
+
+/**
+ * 一个词的分量（2026-11-08，用户 m00187 第 1 条）。
+ *
+ * 原来「长片段算长度、两字切片算 1」，于是「事情」「说过」这种几乎每条都有的词
+ * 和「疤」一样值 1 分。并列时按时间倒序排——最后赢的永远是最新的那条，
+ * 三个月的真话被昨天的闲话挤掉。
+ *
+ * idf 的做法：越少条目里出现的词越值钱。取值压到 [0.6, 1.0]：
+ * 常见词打六折，罕见词不打折。地板不再压低——压到 0.4 会把整条的分一起
+ * 缩掉，显著性那 +4 就变相变重，把「她问的那件事整句都在里面」盖过去了。
+ */
+export const IDF_FLOOR = 0.6
+export const IDF_CEIL = 1.0
+
+function idfWeight(df, n) {
+  if (!(n > 1)) return 1
+  const raw = Math.log(1 + n / (1 + Math.max(0, df))) / Math.log(1 + n)
+  const v = IDF_FLOOR + (IDF_CEIL - IDF_FLOOR) * raw
+  return Math.min(IDF_CEIL, Math.max(IDF_FLOOR, v))
+}
+
+/**
+ * 旧事该折多少（2026-11-08，用户 m00187 第 3 条）。
+ *
+ * 她要的是「昨天做的和三个月前说的，在字面命中相同时，昨天先」——
+ * 不是「旧事消失」。所以有地板 0.55：再旧也留一半多，八条里挤得进去。
+ *
+ * 半衰期分两档：工具账、旁听、别人的话（meta / heard / voice）是快消品，45 天；
+ * 她自己的话、日记、叙事、梦是长存的，180 天。
+ * 检验、改口、拒绝、答话永不折——那几类记的是判断本身，不该因为旧了就让位。
+ */
+export const FRESH_FLOOR = 0.55
+export const HALF_LIFE_FAST_MS = 45 * DAY_MS
+export const HALF_LIFE_SLOW_MS = 180 * DAY_MS
+
+const NEVER_FADE = new Set(['test', 'revise', 'refusal', 'answer'])
+
+export function halfLifeOf(ev) {
+  const t = String(ev?.type ?? '')
+  return t === 'meta' || t === 'heard' || t === 'voice' ? HALF_LIFE_FAST_MS : HALF_LIFE_SLOW_MS
+}
+
+export function freshnessOf(ev, { now = Date.now(), ts, solid } = {}) {
+  const at = Number.isFinite(ts) ? ts : Date.parse(String(ev?.ts ?? ''))
+  if (!Number.isFinite(at)) return 1
+  if (NEVER_FADE.has(String(ev?.type ?? ''))) return 1
+  // 固化过的那几条是她的判断，不随时间让位（它另有 +3，这里不重复加）。
+  if (solid?.has?.(String(ev?.id))) return 1
+  const age = Math.max(0, now - at)
+  return FRESH_FLOOR + (1 - FRESH_FLOOR) * Math.exp(-age / halfLifeOf(ev))
 }
 
 /**
@@ -365,10 +466,13 @@ export function solidIdsOf(events = [], growthDays = 30) {
  * @returns {{rows:{id:string,date:string,type:string,text:string,ago:number}[]}}
  */
 export function searchEvents(events, query, o = {}) {
-  const toks = tokensOf(query)
-  if (!toks.length) return { rows: [] }
+  const lits = literalsOf(query)
+  // 字面量先抠掉再切二字：不然 `0.9.3` 的碎片照样进候选池（上游 m00187）。
+  const toks = tokensOf(stripLiterals(query, lits))
+  // 只有字面量、没有可切片的词（比如她只问一句「0.9.3」）也要能翻。
+  if (!toks.length && !lits.length) return { rows: [] }
   // fork.36：可及性门槛只认她自己给的词，不认近义扩展出来的（见 tokensOf）。
-  const rawSet = new Set(tokensOf(query, { expand: false }))
+  const rawSet = new Set(tokensOf(stripLiterals(query, lits), { expand: false }))
   const now = Number(o.now ?? Date.now())
   const daysRaw = o.days === undefined || o.days === null ? RECALL_DAYS : Number(o.days)
   const days = Number.isFinite(daysRaw) ? daysRaw : RECALL_DAYS
@@ -396,7 +500,8 @@ export function searchEvents(events, query, o = {}) {
     return 1 + jitterAmt * (2 * hash01(`${dayKey}:${id}`) - 1)
   }
 
-  // ---- 先过一遍筛，把候选挑出来（后面算稀有度要用整批当分母） ----
+  // 先把候选筛出来。同一份候选既用来算 df 又用来打分——两个口径必须一致，
+  // 否则 idf 是拿另一批事件算出来的，词的分量就成了猜的。
   const cand = []
   for (const ev of events ?? []) {
     if (!usable(ev)) continue
@@ -447,9 +552,19 @@ export function searchEvents(events, query, o = {}) {
         if (n > cue) cue = n
       }
     }
+
+    // 字面量按整串比，不切碎片（上游 m00187）：0.9.3 这类标识符整串命中才给分。
+    let litHits = 0
+    for (const l of lits) {
+      if (!lower.includes(l)) continue
+      litHits++
+      score += LITERAL_BONUS
+    }
     // 一个整词都没对上时，再试字面重合（fork.10）——换了个说法也能翻到
     if (score <= 0) score = looseScore(text, query)
     if (score <= 0) continue
+    // 她问的那句带着版本号 / 文件名，却一个都没对上——多半不是这一条。
+    if (lits.length && litHits === 0) score *= LITERAL_MISS
 
     // ---- 遗忘（fork.11）：越久越难想起，但**不删除**，翻得到 ----
     // 半衰期按"这条有多重要"分开：被检验过的 180 天，被引用过的 90 天，
@@ -500,7 +615,7 @@ export function searchEvents(events, query, o = {}) {
     id: String(ev.id ?? ''),
     verdict: verdict ?? null,
     // 引用也要说清来路：不然别人的话引出来就像她自己说过的。字数只算原话，来路另算。
-    text: labelled(String(ev.type ?? ''), clip(oneLine(String(ev.text ?? '')), RECALL_BRIEF_SNIPPET)) + (chatOnly(ev) ? CHAT_MARK : ''),
+    text: labelled(String(ev.type ?? ''), clip(oneLine(String(ev.text ?? '')), RECALL_BRIEF_SNIPPET), ev.scene) + (chatOnly(ev) ? CHAT_MARK : ''),
   })
   const rows = scored.slice(0, limit).map(({ ts, ev, text }) => {
     const next = revisions.get(String(ev.id))
@@ -518,6 +633,8 @@ export function searchEvents(events, query, o = {}) {
       clock: localClock(ts),
       ago: Math.max(0, Math.floor((now - ts) / DAY_MS)),
       type: String(ev.type ?? ''),
+      // 场次（2026-11-08，用户 m00394）：群聊里他说的那句要在渲染时读得出来。
+      scene: String(ev.scene ?? ''),
       // 她动手之前说的那句话（2026-11-07，用户 m00493 的 ⑤）。
       // 只对工具账算：别的行本身就是话，不需要来路。
       anchor: String(ev.type) === 'meta' ? anchorOf(events, ev.sessionId, ts) : '',
@@ -547,7 +664,9 @@ export function searchEvents(events, query, o = {}) {
  */
 function displayOf(r) {
   const text = String(r.text ?? '')
-  if (r.type === 'heard') return `他说：${text}`
+  // heard 的来源标注走 labelled：群里他本人那句要读成「他在群里说」（上游 #51/#96），
+  // 在这儿写死「他说：」会把群聊和私聊混成一种。
+  if (r.type === 'heard') return labelled('heard', text, r.scene)
   if (r.type !== 'meta') return text
 
   if (text.startsWith('saw:')) return `你看过：${text.slice(4).trim()}`
@@ -612,12 +731,9 @@ export function renderRecall(rows, o = {}) {
     const at = r.clock ? `${r.date} ${r.clock}` : r.date
     // 先翻成人话（fork.10 的 displayOf：heard 的「他说：」+ 记账原文的翻译），再按 brief 档截头——
     // 截的是翻好之后的正文，别让她看到截了一半的记账原文。
-    // voice / answer 的来源标注（0.8.8 的 labelled）在翻译之后补上；heard 已由 displayOf 处理。
     let body = displayOf(r)
-    // voice/answer 的来源标注（0.8.8 的 labelled）在翻译之后补上；heard 已由 displayOf 处理。
-    // meta 也要过一遍（上游 0.9.3）：labelled 只认 use: 行，watched:/browse:/talk: 已由
-    // displayOf 翻过、不会再被它动。
-    if (r.type === 'voice' || r.type === 'answer' || r.type === 'meta') body = labelled(r.type, body)
+    // 来源标注（heard / voice / answer / meta）在翻译之后补上；scene 进 labelled（上游 #51）。
+    if (r.type === 'voice' || r.type === 'answer' || r.type === 'meta') body = labelled(r.type, body, r.scene)
     if (brief) body = clip(body, RECALL_BRIEF_SNIPPET)
     // 当时那句话跟在后面：认得出「那次是为了什么」，就不必再猜。
     if (r.anchor) body += `——当时你在说「${r.anchor}」`

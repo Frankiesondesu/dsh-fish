@@ -16,11 +16,12 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { pickHearSentence, hearTurn, HEAR_SNIPPET, HEAR_MIN_CHARS } from '../lib/hear.js'
+import { pickHearSentence, hearTurn, rememberGroupWord, HEAR_SNIPPET, HEAR_MIN_CHARS } from '../lib/hear.js'
 import { hearMark, bumpTurns } from '../lib/home.js'
 import { readEvents } from '../lib/store.js'
-import { validateEvent } from '../lib/schema.js'
+import { validateEvent, isContactEvent } from '../lib/schema.js'
 import { searchEvents, renderRecall, RECALL_LIMIT, RECALL_DAYS } from '../lib/recall.js'
+import { eventsSince } from '../lib/outing.js'
 
 const DAY = 86_400_000
 
@@ -54,6 +55,24 @@ test('旁听：太长截断到上限', () => {
   const s = pickHearSentence('我' + '很'.repeat(500) + '。')
   assert.ok(s.length <= HEAR_SNIPPET)
   assert.ok(s.endsWith('…'))
+})
+
+test('旁听：桥加在开头的来源抬头不会被当成「他说」的那句（issue #96）', () => {
+  // 2026-11-09：桥把群聊原样递进来时，正文前常有一行「（群聊 · 示例群 · im:group:10001）」。
+  // 那一行比人说的话还长，取最长句就记成了抬头——她翻回忆读到的是频道名。
+  const s = pickHearSentence(
+    '（群聊 · 示例群 · im:group:10001）\n这句话我觉得挺有意思的，你怎么看？',
+  )
+  assert.equal(s, '这句话我觉得挺有意思的，你怎么看')
+  // 多行抬头、方括号、空行一起出现也认得
+  assert.equal(
+    pickHearSentence('[渠道：im:group:10001]\n\n（群聊 · 示例群）\n今天外面下雨了，你那边呢？'),
+    '今天外面下雨了，你那边呢',
+  )
+  // 只裁「整行被括号包住、且带群/渠道/频道的」，普通人说的话一个字都不动：
+  // 误裁等于把他的话从记忆里抹掉，宁可少裁。
+  assert.equal(pickHearSentence('（其实我觉得这件事）没那么简单吧，再想想。'), '（其实我觉得这件事）没那么简单吧，再想想')
+  assert.equal(pickHearSentence('群聊里有人说了一句很长的话，我也记不清了。'), '群聊里有人说了一句很长的话，我也记不清了')
 })
 
 // ---------------------------------------------------------------- 写事件
@@ -264,4 +283,62 @@ test('回忆：认领的 +4 不能盖过字面命中差很多的情况', () => {
   ]
   const { rows } = searchEvents(events, q, { now })
   assert.equal(rows[0].id, 'chat', '字面命中差得多的时候，认领的加权不该盖过它')
+})
+
+// ---------------------------------------- 2026-11-08（用户 m00394）群里他本人的话
+
+test('群里他本人说的一句：记成 heard + scene:group，只留最长的一句', async () => {
+  await withRoot(async (root) => {
+    const r = await rememberGroupWord(root, {
+      text: '嗯。这个版本我打算先发一版试试看，后面有问题再说。', day: 3, stage: 2, sessionId: 's-group-1',
+    })
+    assert.equal(r.written, true)
+    const { events } = await readEvents(root)
+    const ev = events.find((e) => e.type === 'heard')
+    assert.ok(ev, '要真的落进事件流')
+    assert.equal(ev.scene, 'group', '场次必须留下：她翻到时才知道这是在群里说的')
+    assert.equal(ev.text, '这个版本我打算先发一版试试看，后面有问题再说')
+    assert.equal(ev.sessionId, 's-group-1', '群聊那句要知道是哪间房说的')
+    assert.equal(ev.source, 'system', '她不能写 heard——那就等于能凭空造一句「他说过」')
+    // 进记忆 ≠ 他来找过她
+    assert.equal(isContactEvent(ev), false)
+  })
+})
+
+test('群里那句没有值得留的句子就不写，也不抛', async () => {
+  await withRoot(async (root) => {
+    const r = await rememberGroupWord(root, { text: '嗯。好的。', day: 1, stage: 1 })
+    assert.equal(r.written, false)
+    const { events } = await readEvents(root)
+    assert.equal(events.length, 0, '「嗯」「好」记下来也翻不出什么')
+  })
+})
+
+test('家里记下的那句也带会话 id：出门/请神算「这一趟多了什么」时分得清（issue #68）', async () => {
+  await withRoot(async (root) => {
+    const cfg = { memory: { hearEvery: 1 } }
+    const a = await hearTurn(root, {
+      text: '今天我在想一件事，想了很久',
+      turns: 1,
+      sessionId: 'session-home',
+      day: 2,
+      stage: 1,
+      config: cfg,
+    })
+    assert.equal(a.written, true)
+    // 调用方没给会话 id 时照旧不写这个字段：老调用点（单测、脚本）不用跟着改
+    const b = await hearTurn(root, { text: '今天我在想一件事，想了很久', turns: 2, day: 2, stage: 1, config: cfg })
+    assert.equal(b.written, true)
+
+    const { events } = await readEvents(root)
+    const heard = events.filter((e) => e.type === 'heard')
+    assert.equal(heard.length, 2)
+    assert.equal(heard[0].sessionId, 'session-home')
+    assert.equal('sessionId' in heard[1], false)
+
+    // 在外面那一趟的账里：别的会话记的句子不算这趟的（没有 id 的仍会按时间兜底，这是已知的取舍）
+    const list = eventsSince(join(root, 'events.jsonl'), Date.now() - 60_000, { sessionId: 'session-away' })
+    assert.equal(list.ok, true)
+    assert.equal(list.items.some((x) => x.id === a.id), false, '家里那句不该被算进外头那一趟')
+  })
 })

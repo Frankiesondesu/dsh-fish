@@ -20,6 +20,9 @@ import {
   glancedItems,
   handedUnseen,
   seenOn,
+  parseDigestLine,
+  digestMentioned,
+  DIGEST_PREFIX,
 } from '../lib/whatseen.js'
 import { buildReport } from '../lib/report.js'
 import { historyFromEvents } from '../lib/history.js'
@@ -184,6 +187,81 @@ test('历史：同一条既被记账又被抽帧时，只留一份且算看过',
   assert.equal(items[0].how, 'watch')
 })
 
+// 2026-11-07（用户反馈）：0.9.0 起刷站不再挂在唤醒上，她自己翻的记录写在 look: 里。
+// 以前 historyFromEvents 只认 watched: 与 browse:，于是 0.9.x 之后她看过的东西
+// 一条都不进列表——用户看到的是「记录停在几个月前」。
+test('历史：她自己翻的（look:）也要进列表，带标题、算翻到过', () => {
+  const events = [
+    meta(`look:${DK} ${B1} {"title":"她自己点开的","up":"某个UP"}`),
+  ]
+  const groups = historyFromEvents(events, { days: 7 })
+  assert.equal(groups[0].date, DK)
+  assert.equal(groups[0].items.length, 1)
+  assert.equal(groups[0].items[0].bvid, B1)
+  assert.equal(groups[0].items[0].title, '她自己点开的')
+  assert.equal(groups[0].items[0].how, 'glance')
+})
+
+test('历史：look: 与 watched: 撞同一条时，只留「看过画面」的那份', () => {
+  const events = [
+    meta(`look:${DK} ${B1} {"title":"翻的"}`),
+    meta(`watched:${DK} ${B1} {"title":"看的"}`),
+  ]
+  const items = historyFromEvents(events, { days: 7 })[0].items
+  assert.equal(items.filter((x) => x.bvid === B1).length, 1)
+  assert.equal(items[0].how, 'watch')
+})
+
+// issue #69：v0.8.0–v0.8.7 写的 look: 只有 BV 号。它排在 browse: 前面，去重留下的是它，
+// 列表就只剩裸 BV 号；glancedItems 对同一条给的却是 browse: 里的标题，两处对不上。
+test('历史：老的 look:（只有 BV 号）和同一天 browse: 撞同一条时，标题和 UP 从 browse: 补上，和 glancedItems 一致', () => {
+  const events = [
+    meta(`look:${DK} ${B1}`),
+    meta(`browse:${DK} [{"bvid":"${B1}","title":"有标题","up":"某UP","duration":61,"view":9}]`),
+    // 别的天的同一条不算：展示信息只在同一天里补
+    meta(`browse:2026-10-29 [{"bvid":"${B2}","title":"前一天的"}]`),
+    meta(`look:${DK} ${B2}`),
+  ]
+  const items = historyFromEvents(events, { days: 400 }).find((g) => g.date === DK).items
+  assert.equal(items.filter((x) => x.bvid === B1).length, 1)
+  const one = items.find((x) => x.bvid === B1)
+  assert.deepEqual([one.title, one.up, one.duration, one.view, one.how], ['有标题', '某UP', 61, 9, 'glance'])
+  const g = glancedItems(events, DK).find((x) => x.bvid === B1)
+  assert.deepEqual([one.title, one.up], [g.title, g.up], '历史列表和翻到过的清单给同一个标题')
+  assert.equal(items.find((x) => x.bvid === B2).title, '', '别的天的记账不拿来补')
+
+  // look: 自己带了标题、当天又没有记账：照用自己的
+  const own = historyFromEvents([meta(`look:${DK} ${B3} {"title":"自己带的","up":"某个UP"}`)], { days: 7 })[0].items[0]
+  assert.deepEqual([own.title, own.up], ['自己带的', '某个UP'])
+})
+
+test('历史：look: 自己带了展示信息、同一天 browse: 也有时，优先取 browse: 的；browse: 那项是空的才用 look: 自己的', () => {
+  const events = [
+    meta(`look:${DK} ${B1} {"title":"look 带的","up":"look 的UP","duration":5,"view":1}`),
+    meta(`look:${DK} ${B2} {"title":"look 带的二","up":"look 的UP二","duration":7,"view":2}`),
+    meta(`browse:${DK} [{"bvid":"${B1}","title":"记账的","up":"记账的UP","duration":61,"view":9},`
+      + `{"bvid":"${B2}","title":"  ","up":"","duration":0,"view":0}]`),
+  ]
+  const items = historyFromEvents(events, { days: 400 }).find((g) => g.date === DK).items
+  const one = items.find((x) => x.bvid === B1)
+  assert.deepEqual([one.title, one.up, one.duration, one.view], ['记账的', '记账的UP', 61, 9])
+  const g = glancedItems(events, DK).find((x) => x.bvid === B1)
+  assert.deepEqual([one.title, one.up, one.duration, one.view], [g.title, g.up, g.duration, g.view])
+  // browse: 那一项标题、UP 是空的（recordBrowse 拿不到就记空串、记 0）：不拿空的盖掉 look: 带的
+  const two = items.find((x) => x.bvid === B2)
+  assert.deepEqual([two.title, two.up, two.duration, two.view], ['look 带的二', 'look 的UP二', 7, 2])
+})
+
+test('历史：天数的上限放到 366，选「一年」不再被砍成半年', () => {
+  const events = []
+  for (let i = 0; i < 400; i++) {
+    const d = new Date(Date.UTC(2026, 0, 1 + i)).toISOString().slice(0, 10)
+    events.push(meta(`browse:${d} [{"bvid":"${B1}"}]`))
+  }
+  assert.equal(historyFromEvents(events, { days: 365 }).length, 365)
+  assert.equal(historyFromEvents(events, { days: 400 }).length, 366)
+})
+
 test('不在的时候：看过画面与翻到过分开数', () => {
   const now = Date.parse('2026-10-30T12:00:00.000Z')
   const events = [
@@ -193,4 +271,30 @@ test('不在的时候：看过画面与翻到过分开数', () => {
   const away = summarizeAway(events, { now })
   assert.equal(away.watched, 1)
   assert.equal(away.videos, 2)
+})
+
+// ------------------------------------------------ 2026-11-08（用户 m00187）便条不重复念
+
+test('便条：提到过谁的记录能读回来，认不出的一行返回 null', () => {
+  assert.equal(DIGEST_PREFIX, 'digest:')
+  assert.deepEqual(parseDigestLine(`${DIGEST_PREFIX}${DK} ${B1} ${B2}`), { dk: DK, ids: [B1, B2] })
+  assert.equal(parseDigestLine(`${DIGEST_PREFIX}${DK}`), null, '一件都没念的当天不记')
+  assert.equal(parseDigestLine(`browse:${DK} []`), null)
+  assert.equal(parseDigestLine('digest:2026-10-30 不是 BV 号'), null, '日子不对就当不是这一行')
+})
+
+test('便条：七天内提过的还算「提过」，更早的放回去重念', () => {
+  const now = Date.parse('2026-11-08T12:00:00+08:00')
+  const day = 86_400_000
+  const events = [
+    { type: 'meta', ts: new Date(now - day).toISOString(), text: `${DIGEST_PREFIX}2026-11-07 ${B1} ${B2}` },
+    { type: 'meta', ts: new Date(now - 8 * day).toISOString(), text: `${DIGEST_PREFIX}2026-10-31 ${B3}` },
+    { type: 'meta', ts: new Date(now - day).toISOString(), text: `browse:2026-11-07 [{"bvid":"BV1zz411c7mF"}]` },
+  ]
+  const said = digestMentioned(events, { now })
+  assert.ok(said.has(B1))
+  assert.ok(said.has(B2))
+  assert.ok(!said.has(B3), '七天以前提过的不再拦，可以再念一次')
+  assert.ok(!said.has('BV1zz411c7mF'), '只翻到过、没念过的不算提过')
+  assert.equal(digestMentioned(events, { now, days: 0 }).size, 0)
 })

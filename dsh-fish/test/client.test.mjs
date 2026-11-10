@@ -212,7 +212,7 @@ test('组件在"有数据"时把关键信息渲染出来', async () => {
   const srcAll = await readFile(CLIENT, 'utf8')
   assert.ok(!/\[\s*'all'\s*,/.test(srcAll), '源码里不该再留 all 页签')
   assert.ok(src.includes('让我看日记'), '日记可见性开关必须在')
-  assert.ok(src.includes('黑名单（逗号分隔'), '黑名单可追加必须在')
+  assert.ok(src.includes('屏蔽关键词'), '黑名单可追加必须在（PR #59 E18：原「视频内容黑名单（逗号分隔，可随时加）」）')
   assert.ok(src.includes('允许她上网（B 站）'), '上网总开关必须在')
   delete globalThis.fetch
 })
@@ -296,9 +296,9 @@ test('quality 是宿主那套 {score} 结构体时也要能渲染（2026-10-23 �
   // 现在样本不足一律写人话，数字只在真能测时才印。
   assert.ok(txt.includes('还没攒到判断，测不出来'), `没有判断时要说测不出来，实际: ${txt.slice(0, 300)}`)
   assert.ok(txt.includes('还没有跨阶段的话可比'), '说话不足两条时要说还没得比')
-  // 新鲜：这个夹具里最近一周一条没说（recent=0），先说「没说过话」；
+  // 新鲜：这个夹具里最近一周一条没写（recent=0，只数她自己写下的，聊天不算），先说「没写下自己的话」；
   // 有近期没历史时才说「还没有七天前的老话可比」。两者都不是 0.00。
-  assert.ok(txt.includes('最近一周没说过话'), '最近没说话时要说没说过话')
+  assert.ok(txt.includes('最近一周没写下自己的话'), '最近没写下自己的话时要照实说（对话里回的不算）')
   assert.ok(!txt.includes('稳定 0.00'), '样本不足时不许再印 0.00 冒充读数')
   assert.ok(!txt.includes('undefined'), '不许把 undefined 渲染到界面上')
   assert.ok(!txt.includes('NaN'), '不许把 NaN 渲染到界面上')
@@ -551,7 +551,7 @@ test('状态卡把「认知矛盾」和「记得很牢」露出来（2026-10-24 
 test('互动计数的问号写清四个数字的口径（用户定稿）', async () => {
   const src = await readFile(CLIENT, 'utf8')
   assert.ok(src.includes('说=她写过几句自己的判断（含留话）'))
-  assert.ok(src.includes('改口=按照规则推翻历史认知并指明改的是哪条'))
+  assert.ok(src.includes('改口=按照规则推翻或修正历史认知并指明改的是哪条（确认还成立也算一次）'))
   assert.ok(src.includes('拒绝=她明确登记拒绝过什么'))
   assert.ok(src.includes('重聚=久别之后她自己写下的感受'))
   assert.ok(!src.includes('她自己写下的事件条数，不含系统记的。'), '旧口径已作废')
@@ -821,8 +821,10 @@ test('设置页切页不能把判据 showTab 当成开关用（issue #12）', as
 
 test('时段控件下面补一行 24 小时制：00:00 不会被读成中午十二点', async () => {
   // 「每天几点醒」在「生长」页（lib/client.js 里 growPage 那张卡），默认停在「状态」页，
-  // 得把 tab 拨过去。tab 是本组件第 45 个 useState（2026-11-09 加 rotateWhenKB 后从 44 挪到 45，0 基下标 44）。
-  const react = fakeReact({ 44: 'grow' })
+  // 得把 tab 拨过去。tab 是本组件第 46 个 useState（0 基下标 45）。
+  // 下标挪过两次：本 fork 加 rotateWhenKB 时 44→45，0.9.7 又在白名单那组加了一个
+  // state（只在特定场合才给她的工具）顶到 45。以后再往它前面加 state，这里要跟着挪。
+  const react = fakeReact({ 45: 'grow' })
   const { exports } = await loadClient({ react })
   react.resetCursor()
   const txt = textOf(exports.FishSection()).join(' ')
@@ -830,4 +832,38 @@ test('时段控件下面补一行 24 小时制：00:00 不会被读成中午十�
   // 用户看到窗口 00:00–23:00 里凌晨五点醒来，很容易当成 bug（2026-11-06 反馈）。
   assert.ok(txt.includes('每天几点醒'), '生长页得真的渲染出来（tab 下标漂了就改这里）')
   assert.ok(txt.includes('24 小时制：20:00 → 23:00'), '默认时段要按 24 小时写出来')
+})
+
+// ---------------------------------------------------------------------------
+// 2026-11-08：issue #69 —— 数字框范围、提醒开关、历史天数
+// ---------------------------------------------------------------------------
+
+test('数字框的范围跟 settings.js 的 LIMITS 对齐：事件/问题能到 6，旁听间隔也在表里（issue #69）', async () => {
+  const src = await readFile(CLIENT, 'utf8')
+
+  // 0–5 会把用户选的「6」判成非法：保存按钮一直红着，却说不出是哪一项。
+  assert.ok(src.includes("['每天最多几条事件', eventsPerDay, 0, 6]"), '事件条数上限是 6')
+  assert.ok(src.includes("['每天最多几个问题', questionsPerDay, 0, 6]"), '问题条数上限是 6')
+
+  // 这个框一直有（growPage 里那行），但不在 NUM_BOUNDS 里 —— 清空或越界时不会被拦。
+  // 表标签跟控件同名（上游原来写「每几轮记一句」，越界报错会和控件对不上）。
+  assert.ok(src.includes("['记你原话的间隔', hearEvery, 0, 50]"), '旁听间隔要参与范围校验')
+})
+
+test('桌面提醒有开关：界面写 /notify，不再只靠配置里那个永远 false 的键（issue #69）', async () => {
+  const src = await readFile(CLIENT, 'utf8')
+
+  assert.ok(src.includes("group('桌面提醒'"), '设置页要有这张卡')
+  assert.ok(src.includes("await jpost('/notify', { enabled: v })"), '开关要真的写到服务端')
+  assert.ok(src.includes('允许浏览器通知'), '没有权限时得能给一个申请入口')
+  // 服务端 GET 只回答 due/text；页面拿不到 pending 标记时，别把默认关着的键当开着
+  assert.ok(src.includes("setNotifyOn(cfg.notify?.enabled === true)"), '读配置时只认明确的 true')
+})
+
+test('回家/请神「等核对」看 tampered，不再看一个响应里根本不存在的 status（issue #69）', async () => {
+  const src = await readFile(CLIENT, 'utf8')
+
+  assert.ok(src.includes('(r?.tampered || r?.status === \'pending\')'), '出门要认 tampered')
+  assert.ok(src.includes('r?.tampered'), '请神同一套判据')
+  assert.ok(src.includes('histDaysRef.current'), '历史天数走 ref，load 的闭包读不到新 state')
 })

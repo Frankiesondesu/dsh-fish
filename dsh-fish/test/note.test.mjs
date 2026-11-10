@@ -96,7 +96,7 @@ test('到期的摆出来：按日子排，写「晚了几天」，不催人', ()
   ]
   const text = renderNotes(list, new Date(2026, 10, 4))
   const lines = text.split('\n')
-  assert.equal(lines[0], '（桌上压着两张）')
+  assert.equal(lines[0], '（压着两张便条）')
   assert.equal(lines[1], '11-01 说要看的那篇，晚了三天。')
   assert.equal(lines[2], '11-03 答应给他的那张图，晚了一天。')
   assert.doesNotMatch(text, /逾期|请尽快|紧急/)
@@ -113,7 +113,7 @@ test('一次最多五张，剩下的只报数', () => {
   )
   const text = renderNotes(many, new Date(2026, 10, 20))
   const lines = text.split('\n')
-  assert.equal(lines[0], '（桌上压着八张）')
+  assert.equal(lines[0], '（压着八张便条）')
   // 标题 + 5 张 + 一句「还有…」
   assert.equal(lines.length, 1 + NOTE_SHOW_MAX + 1)
   assert.match(lines[lines.length - 1], /还有三条没列出来/)
@@ -325,10 +325,10 @@ test('重名时先划最早记下的那张，一次只划一张', async () => {
     const now = new Date(2026, 10, 5)
     await call({ text: '交水费', due: '2026-11-01' })
     await call({ text: '交水费', due: '2026-11-02' })
-    assert.match(await wakeOf(root, now), /桌上压着两张/)
+    assert.match(await wakeOf(root, now), /压着两张便条/)
 
     assert.equal(await call({ text: '交水费', status: 'done' }), '[划掉了]')
-    assert.equal(await wakeOf(root, now), '（桌上压着一张）\n11-02 交水费，晚了三天。')
+    assert.equal(await wakeOf(root, now), '（压着一张便条）\n11-02 交水费，晚了三天。')
 
     assert.equal(await call({ text: '交水费', status: 'done' }), '[划掉了]')
     assert.equal(await wakeOf(root, now), '')
@@ -405,7 +405,7 @@ test('id 这条路还在：回执同样写划掉，没对上 id 但给了原话�
 
     assert.equal(await call({ id: a.id, status: 'done' }), '[划掉了]')
     assert.equal(await call({ id: a.id }), '[划掉了]', '只给 id 也算划掉，判据没变')
-    assert.match(await call({ id: 'note-nope', status: 'done' }), /^\[没划掉：桌上没有这一张/)
+    assert.match(await call({ id: 'note-nope', status: 'done' }), /^\[没划掉：便条里没有这一张/)
 
     // 她可能猜一个 id 再带上原话：id 对不上不该把原话也废掉
     assert.equal(await call({ id: 'note-nope', text: '第二件', status: 'done' }), '[划掉了]')
@@ -525,7 +525,7 @@ test('翻桌子看得到划掉的和放下的，行里带日期和理由（issue
     const all = await call({ action: 'list', filter: 'all' })
     assert.match(all, /✓ 已经做完的（\d\d-\d\d 划掉）/)
     assert.match(all, /✗ 没去成的展（\d\d-\d\d 放下）—— 后来不想去了/)
-    assert.equal(await call({ action: 'list' }), '桌上没有还没划掉的。')
+    assert.equal(await call({ action: 'list' }), '便条里没有还没划掉的。')
   })
 })
 
@@ -585,7 +585,7 @@ test('改一句：按原话找到同一张，日子能给空串去掉，改过�
     assert.ok(!n.due, '空串就是没有日子')
     assert.ok(n.revisedAt, '改过要留个痕，不然事件流里看不出改了什么')
     assert.equal(await call({ action: 'list' }), '（没日子）周一交那份东西')
-    assert.match(await call({ action: 'update', text: '没这句', newText: '别的' }), /^\[没改：桌上没有这一张/)
+    assert.match(await call({ action: 'update', text: '没这句', newText: '别的' }), /^\[没改：便条里没有这一张/)
   })
 })
 
@@ -596,5 +596,40 @@ test('划掉的那张改不了也放不下——回翻里留着的是当时那�
     await call({ id: a.id, status: 'done' })
     assert.match(await call({ action: 'update', text: '已经做完的', newText: '改一下' }), /^\[没改：这张已经划掉了/)
     assert.match(await call({ action: 'drop', text: '已经做完的', reason: '改主意' }), /^\[没放下：这张已经划掉了/)
+  })
+})
+
+test('放下的那张按原话找得到——回执说「已经放下了」，不是「没有这一张」（issue #82）', async () => {
+  await withRoot(async (root) => {
+    const { def, call } = herTool(root)
+    await def.execute({ text: '明天把字幕看完' }, { session: {} })
+    assert.equal(await call({ action: 'drop', text: '明天把字幕看完', reason: '那条已经看过了' }), '[放下了]')
+
+    assert.match(
+      await call({ action: 'update', text: '明天把字幕看完', newText: '后天看' }),
+      /^\[没改：这张已经放下了/,
+      '看得到的纸条不能说「没有」',
+    )
+    assert.equal(await call({ action: 'drop', text: '明天把字幕看完', reason: '再放一次' }), '[放下了]', '重复放下不算错')
+
+    const [n, ...rest] = await readNotes(root)
+    assert.equal(rest.length, 0, '放下不是删除')
+    assert.equal(n.status, 'dropped')
+    assert.equal(n.text, '明天把字幕看完', '改不了就不该改')
+    assert.equal(n.reason, '那条已经看过了', '重复放下不改当时那句为什么')
+  })
+})
+
+test('放下的那张用 id 也划不掉，状态还是放下（issue #82）', async () => {
+  await withRoot(async (root) => {
+    const { def, call } = herTool(root)
+    const a = await def.execute({ text: '看那场展' }, { session: {} })
+    assert.equal(await call({ action: 'drop', id: a.id, reason: '不想去了' }), '[放下了]')
+
+    assert.match(await call({ id: a.id, status: 'done' }), /^\[没划掉：这张已经放下了/)
+    const [n, ...rest] = await readNotes(root)
+    assert.equal(rest.length, 0)
+    assert.equal(n.status, 'dropped', '放下不该被改写成划掉')
+    assert.equal(n.reason, '不想去了')
   })
 })

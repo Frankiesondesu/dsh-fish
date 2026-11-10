@@ -10,10 +10,15 @@
  * 2026-10-30 改（客户反馈）：原来只读 `browse:`，于是"真的看了画面"的那几条
  * 和"只扫了眼标题"的混在一起，一律叫"看过"。现在 `watched:` 那一档单独标出来
  * （`how:'watch'`），并且排在当天最前面——它是唯一有画面的凭证。
+ *
+ * 2026-11-07 改（用户反馈）：0.9.0 起刷站不再挂在唤醒上，她自己去翻的记录写在
+ * `look:` 里，而这个函数以前只认 `watched:` 与 `browse:`——于是 0.9.x 之后她
+ * 自己点开看过的东西**一条都不进历史列表**，用户看到的永远是 9 月底那批旧记录。
+ * 现在补上 `look:`（她那轮真的读过这一条，但没有画面，归到 `how:'glance'`）。
  */
 
 import { parseBrowseLine } from './browse.js'
-import { videoUrl, parseWatchedLine } from './whatseen.js'
+import { videoUrl, parseWatchedLine, parseLookLine } from './whatseen.js'
 
 export { videoUrl }
 
@@ -25,7 +30,7 @@ export { videoUrl }
  * @returns {Array<{date:string, items:Array<{bvid,title,up,duration,view,url,how:'watch'|'glance'}>}>}
  */
 export function historyFromEvents(events, opts = {}) {
-  const days = Math.max(1, Math.min(180, Number(opts.days) || 14))
+  const days = Math.max(1, Math.min(366, Number(opts.days) || 14))
   const limit = Math.max(1, Math.min(500, Number(opts.limit) || 200))
   const groups = new Map()
   const bucketOf = (dk) => {
@@ -49,6 +54,45 @@ export function historyFromEvents(events, opts = {}) {
       view: Number(i.view) || 0,
       url: videoUrl(got.bvid),
       how: 'watch',
+    })
+  }
+
+  // 同一天 browse: 记账里每条的展示信息（同一 BV 先到先得）。下面 look: 那一轮要用：
+  // v0.8.0–v0.8.7 写的 look: 只有 BV 号，它排在 browse: 前面、去重时留下的是它，
+  // 列表就只剩裸 BV 号（issue #69）。展示信息优先取同一天 browse: 的（和 glancedItems 一样）；
+  // browse: 那一项是空串或 0（recordBrowse 拿不到就这么记）时才用 look: 自己带的——
+  // 这一点比 glancedItems 的 `??` 宽，那种情况两处给的标题会不一样。
+  const shown = new Map()
+  for (const e of events ?? []) {
+    if (e?.type !== 'meta') continue
+    const got = parseBrowseLine(e.text)
+    if (!got) continue
+    for (const it of Array.isArray(got.arr) ? got.arr : []) {
+      const key = `${got.dk} ${String(it?.bvid ?? '')}`
+      if (it?.bvid && !shown.has(key)) shown.set(key, it)
+    }
+  }
+  const firstText = (a, b) => String((String(a ?? '').trim() ? a : b) ?? '')
+  const firstCount = (a, b) => Number(a) || Number(b) || 0
+
+  // 她自己点开看的那几条（0.9.x 起的正常来源）。没有画面，所以排在 watched 之后、
+  // browse 之前，并且同样按 bvid 去重——同一条先看过画面就不再重复出现。
+  for (const e of events ?? []) {
+    if (e?.type !== 'meta') continue
+    const got = parseLookLine(e.text)
+    if (!got) continue
+    const bucket = bucketOf(got.dk)
+    if (bucket.some((x) => x.bvid === got.bvid)) continue
+    const i = got.info ?? {}
+    const b = shown.get(`${got.dk} ${got.bvid}`) ?? {}
+    bucket.push({
+      bvid: got.bvid,
+      title: firstText(b.title, i.title).slice(0, 120),
+      up: firstText(b.up, i.up).slice(0, 60),
+      duration: firstCount(b.duration, i.duration),
+      view: firstCount(b.view, i.view),
+      url: videoUrl(got.bvid),
+      how: 'glance',
     })
   }
 

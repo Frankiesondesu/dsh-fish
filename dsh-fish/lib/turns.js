@@ -15,12 +15,20 @@
  *         2. talkmem 记一轮原话（换会话时搬过去的那几句）
  *         3. 到 rotateAfter 就换会话，和 /say 走同一套 rotateTalkSession
  *
- * 为什么必须先认来源（真机会话事件里三种都出现过）：
+ * 为什么必须先认来源（真机会话事件里几种都出现过）：
  *   - 人打的       source = { kind:'user', rpcId:<uuid>, clientTimeZone:'Asia/Shanghai' }
- *   - 我们 prompt 的 source.kind 也是 'user'，但 rpcId 带 wake-/say- 前缀、**没有** clientTimeZone
+ *   - 我们 prompt 的 source.kind 也是 'user'，rpcId 带 wake-/say- 前缀、**没有** clientTimeZone
+ *   - 桥注入的     source = { kind:'user', rpcId:'wechat-<uuid>' }，也可能没有 clientTimeZone
  *   - 宿主拼的上下文 kind = 'runtime-context' / 'skill-catalog' / 'plugin:xxx'
  * 认错任何一种都会让轮数失真：把唤醒当人说话 → 每晚白涨一轮；
  * 把上下文当人说话 → 一轮涨好几次，rotateAfter 提前触发，她频繁失忆。
+ *
+ * 2026-11-08（用户转来的微信桥反馈）：宿主 `sessionController.prompt()` **写死**
+ * `source.kind = 'user'`，调用方只能给 requestId（落成 rpcId）和可选的
+ * clientTimeZone，传不进 source（`dsh-api-session-controller/lib/index.js` 的 prompt）。
+ * 微信桥/dsh-im-connect 都没传时区，于是桥来的话全掉进 unknown：不涨轮、不写
+ * heard、不算他来过。现在把「带 rpcId」也认作人；我们自己的 prompt 都带
+ * PLUGIN_RPC 前缀，先被挡掉，没有 rpcId 的 append（交接句/便条）仍留在 unknown。
  *
  * 2026-11-03（github:ssamurias/dsh-fish#18）第四种来源：**外渠道注入**。
  * QQ 桥（dsh-qq-link）之类注入的消息 source = { kind:'qq' }，原来被第一个
@@ -43,7 +51,7 @@
  * 打了 uncommitted 的句子只留证，不算信念（derive.js 里与 selfmod 同一处理）。
  */
 
-import { rootDir, readEvents, appendEvent } from './store.js'
+import { rootDir, readEvents, readState, appendEvent } from './store.js'
 import { loadConfig, dateKey } from './settings.js'
 import { parseWatchIntent, handText, extractBvids } from './intent.js'
 import { recordHandFromLink } from './hand.js'
@@ -55,19 +63,77 @@ import { newHerEventsSince } from './inbox.js'
 import { HER_TYPES, normalizeScene } from './schema.js'
 import { refreshSelfDoc } from './selfdoc.js'
 import { growthDay, stageOf } from './derive.js'
-import { hearTurn } from './hear.js'
+import { hearTurn, rememberGroupWord } from './hear.js'
 import { stripToolMarkup, hasToolMarkup } from './markup.js'
 import { clearWakeSectionFor } from './identity.js'
 
 /**
  * 我们自己 prompt 进去的消息，rpcId 会带这些前缀。
- * 只是"多一道保险"：真正的判据是 clientTimeZone（见 classifyMessage）。
  *
- * `carry` 是换会话前请她留话那条（home.js 的 `carry-ask-`）。少了它，那条
- * 消息会掉进 `kind === 'user'` 且没有 clientTimeZone 的 `unknown` 分支：不进
- * 轮数（行为正确），但每换一次会话就往日志里多一行「认不出来源」（2026-11-06）。
+ * 这些消息走宿主的 `sessionController.prompt()`，宿主把 kind 写死成 'user'；
+ * rpcId 是它们唯一的记号（见 classifyMessage）。名单漏一个，那条消息就会：
+ * 在日志里多一行「认不出来源」；如果它来自别的会话，还会被当成「他来过」。
+ *
+ * `carry` 是换会话前请她留话那条（home.js 的 `carry-ask-`，2026-11-06）。
+ * `outing` 是出门首轮（observe.js 的 `outing-<sessionId>-`，2026-11-08）。
  */
-const PLUGIN_RPC = /^(wake|say|boot|report|letter|sleep|nudge|probe|turn|sys|carry)[-_]/i
+const PLUGIN_RPC = /^(wake|say|boot|report|letter|sleep|nudge|probe|turn|sys|carry|outing)[-_]/i
+
+/**
+ * 桥登记来源（2026-11-09，issue #96）。
+ *
+ * 走宿主 `prompt()` 的桥没法把 `scene` 写进 `source`——`prompt()` 的 source 由
+ * 宿主填，桥只能定 requestId。于是群聊、群友私聊、桥自己发起的定时提醒全都
+ * 长成 `{ kind:'user', rpcId }`，被当成「他本人在说话」。
+ *
+ * 约定：桥在调 `prompt()` **之前**先发一条 `dsh-fish/source`：
+ *   { rpcId, scene:'group'|'private'|'desk', owner:true, guest:true, machine:true }
+ *
+ * 这里按 rpcId 存一份短命表（5 分钟、最多 200 条），`classifyMessage` 先查它。
+ * 不发的桥保持老行为（带 rpcId 的当人），不倒退。
+ */
+const SOURCE_TTL_MS = 5 * 60_000
+const SOURCE_MAX = 200
+const declaredSources = new Map()
+
+/** 记下一条 rpcId 的来历。同步、永不抛；返回是否记住了。 */
+export function declareSource(o = {}) {
+  try {
+    const rpcId = String(o?.rpcId ?? '').trim()
+    if (!rpcId || rpcId.length > 200) return false
+    const now = Date.now()
+    for (const [k, v] of declaredSources) if (now - v.at > SOURCE_TTL_MS) declaredSources.delete(k)
+    const scene = normalizeScene(o?.scene)
+    declaredSources.set(rpcId, {
+      scene: scene === 'group' || scene === 'private' ? scene : '',
+      owner: o?.owner === true,
+      guest: o?.guest === true,
+      machine: o?.machine === true,
+      at: now,
+    })
+    if (declaredSources.size > SOURCE_MAX) {
+      declaredSources.delete(declaredSources.keys().next().value)
+    }
+    return true
+  } catch {
+    return false
+  }
+}
+
+function declaredFor(rpcId) {
+  const hit = declaredSources.get(rpcId)
+  if (!hit) return null
+  if (Date.now() - hit.at > SOURCE_TTL_MS) {
+    declaredSources.delete(rpcId)
+    return null
+  }
+  return hit
+}
+
+/** 只给测试用：清空登记表。 */
+export function clearDeclaredSources() {
+  declaredSources.clear()
+}
 
 /**
  * 宿主/我们这边自己拼的、**确定不是人打的** source.kind。
@@ -141,17 +207,48 @@ const TURN_MSGS_MAX = 5
  * 原来第一句是 `if (src.kind !== 'user') return 'context'`，外渠道（qq 之类）
  * 一律被静默降级成 context，一整条链路（turns / talkmem / heard / seen）全断。
  *
- * 为什么 kind='user' 仍要求 clientTimeZone：
- * 我们自己也会往会话里塞 kind:'user' 的消息（possess.js 的交接句、
- * sessionnote.js 的便条），它们没有 rpcId、也没有时区。放宽成「user 就算人」
- * 会把这几句交接当成「他来过」。所以 user 这一支保持原样，其余 kind 走黑名单。
+ * 为什么 kind='user' 不再一律要求 clientTimeZone（2026-11-08）：
+ * 宿主 `sessionController.prompt()` 给每条请求都写 rpcId，并把来源硬写成
+ * kind:'user'；桥接插件只能走这个入口，传不进 source。要求时区等于要求每个桥
+ * 都记得一个「可选」字段，忘了就静默不算他来过。
+ * 现在「有 rpcId」也认作人：我们自己的 prompt 都带 PLUGIN_RPC 前缀，先被上面
+ * 那条挡掉；possess.js 的交接句和 sessionnote.js 的便条直接 append，没有 rpcId，
+ * 仍留在 unknown。
  *
  * 2026-11-03（一条鱼多间房）多一档 'group'：外渠道可以在 source.scene 里
  * 声明这是群聊。群聊里的话不是他来找过她，总线那一层直接丢掉，不写 seen、
  * 不涨轮数——否则群一热闹，冷落检测就永远不触发。
  *
- * @returns {'human'|'group'|'plugin'|'context'|'unknown'}
+ * 2026-11-08（用户 m00394）再分一档 'group-owner'：桥可以在 source 里标
+ * `owner:true`，说明**这条是主人本人说的**（桥按 QQ 号判，插件不猜昵称）。
+ * 群里他的话要进记忆，但边界不挪——仍然不算他来找过她。所以单独一档，
+ * 只写一条 heard，不碰 seen / 轮数 / 交接。
+ *
+ * @returns {'human'|'group'|'group-owner'|'plugin'|'context'|'unknown'}
  */
+/**
+ * 群聊里他自己说的那句：只写一条 `heard`（scene:group），永不抛。
+ *
+ * day/stage 从 state.json 取：群聊不进轮数、不结账，没有现成的 model 可借；
+ * state 是派生品，读它不会造成真相源分叉（读不到就用 0/1，和系统侧写别的
+ * 事件时的兜底一致）。
+ */
+async function rememberOwnerGroupLine(root, sessionId, text) {
+  const body = String(text ?? '').trim()
+  if (!body) return { written: false, why: 'empty' }
+  try {
+    const st = await readState(root).catch(() => null)
+    return await rememberGroupWord(root, {
+      text: body,
+      sessionId,
+      day: Number(st?.day ?? 0),
+      stage: Number(st?.stage ?? 1),
+    })
+  } catch {
+    return { written: false, why: 'failed' }
+  }
+}
+
 export function classifyMessage(data) {
   const src = data?.source
   if (!src || typeof src !== 'object') return 'context'
@@ -161,20 +258,33 @@ export function classifyMessage(data) {
   // 群聊里的话**不是他来找过她**——群里一天几百句，要是每条都算，
   // 冷落检测就永远不会触发。所以先于 kind 判定，直接归到 'group'。
   // 桥注入时把 scene 写进 source 即可（AGENTS.md §7）；不写就等于私聊。
-  if (normalizeScene(src.scene) === 'group') return 'group'
+  if (normalizeScene(src.scene) === 'group') {
+    return src.owner === true && src.guest !== true ? 'group-owner' : 'group'
+  }
+  // 外客不必非得写在群聊里：桥能写 source 时，{ scene:'private', guest:true }
+  // 也是群友私聊（2026-11-09，issue #96）。/say 一直认这个字段，这里对齐。
+  if (src.guest === true) return 'group'
   // 宿主拼的上下文 / 定时消息 / 工具回灌 / 她自己说的话：都不是他
   if (MACHINE_KINDS.has(kind) || kind.startsWith('plugin:')) return 'context'
   if (MACHINE_FORMS.has(src.form)) return 'context'
   const rid = String(src.rpcId ?? '')
   if (rid && PLUGIN_RPC.test(rid)) return 'plugin'
+  // 桥登记过这条 requestId 的来历，就按它说的算（2026-11-09，issue #96）。
+  // 这一条必须排在「带 rpcId 就当人」前面：prompt() 送来的群聊和定时提醒
+  // 也只有 rpcId 能认，不查登记就全被算成他本人。
+  const decl = rid ? declaredFor(rid) : null
+  if (decl) {
+    if (decl.machine) return 'plugin'
+    if (decl.guest) return 'group'
+    if (decl.scene === 'group') return decl.owner ? 'group-owner' : 'group'
+    return 'human'
+  }
   if (kind === 'user') {
     // 客户端（桌面/网页侧栏）打的字一定带时区——宿主从浏览器那边取的。
-    if (src.clientTimeZone) return 'human'
-    // fork.6（2026-11-01）：IM 网关注入的 user 消息既不带 rpcId 也不带时区。
-    // 上游 0.8.7 把这种形状判成 unknown（宁可少算一轮）；我们的桥正是这种形状，
-    // 所以保留 fork.6 的兜底：**完全不带 rpcId** 才算人。
-    // 带 uuid 的那种仍按老样子算 unknown——分不清是老客户端还是别的插件灌的。
-    if (!rid) return 'human'
+    // 桥走宿主 prompt 时不带时区，但每条都有 rpcId（宿主把 kind 写死成
+    // 'user'）；fish 自己的 possess/sessionnote 直接 append，没有 rpcId ——
+    // 只有它们继续落到 unknown。
+    if (src.clientTimeZone || rid) return 'human'
     return 'unknown'
   }
   // 两张表都没挡住的 kind = 外渠道（qq / telegram / 别的桥自己起的名字）。
@@ -205,6 +315,27 @@ export function messageText(data) {
   }
   if (typeof data.message?.content === 'string') return data.message.content
   return ''
+}
+
+/**
+ * 去掉桥塞在正文末尾的「渠道提示」段落（2026-11-08）。
+ *
+ * dsh-wechat-plugin 每条消息都拼一段 `[渠道：微信] 你在和微信上的用户对话…`
+ * 说明，首条消息还会单独再发一条只有提示的。那是给她看的运行提示，不是他
+ * 说的话；整段写进 talk-recent / heard，下次换会话搬过去的「上次我们说到这」
+ * 就会带着一段微信配置说明。
+ *
+ * 只认**独立段落**（空行隔开、整段以 `[渠道：…]` / `[Channel: …]` 开头），
+ * 正文中间引用这类文字不动；整条只剩提示时返回空，让它当没听见。
+ */
+export function stripChannelNote(text) {
+  const s = String(text ?? '').trim()
+  if (!s) return ''
+  const paras = s.split(/\n{2,}/)
+  while (paras.length && /^\[(?:渠道|channel)\s*[:：]/i.test(paras[paras.length - 1].trim())) {
+    paras.pop()
+  }
+  return paras.join('\n\n').trim()
 }
 
 /**
@@ -395,7 +526,7 @@ export function registerTurns(ctx, deps = {}) {
       )
       if (!ok) return
     }
-    const text = cut(messageText(data))
+    const text = cut(stripChannelNote(messageText(data)))
     if (!text) return
     // fork.6（2026-11-01）曾在这里写 `seen:`（冷落检测 absence.js 的唯一依据）。
     // v0.8.6 合并（2026-11-03）：上游 m01280 在**结账时**写了同一个标记，而且
@@ -519,6 +650,9 @@ export function registerTurns(ctx, deps = {}) {
       await hearTurn(root, {
         text: p.msgs.join('\n'),
         turns,
+        // 记下的那句要带这条会话的 id（2026-11-08，用户 m01199）：出门/请神算「这一趟多了什么」
+        // 时按会话过滤，没有 id 的条目会被当成这趟的东西。
+        sessionId: p.sessionId,
         day,
         stage: stageOf(day, Number(config?.growthDays ?? 30)),
         config,
@@ -599,6 +733,14 @@ export function registerTurns(ctx, deps = {}) {
         if (cls === 'group') {
           // 2026-11-03（一条鱼多间房）：群聊里的话不进轮数、不写 seen。
           // 一条日志都不打——群聊一天几百条，每条打一行会把日志冲掉。
+          // 群友的话也**一条都不进记忆**（2026-11-08，用户 m00394 的边界）。
+          return
+        }
+        if (cls === 'group-owner') {
+          // 2026-11-08（用户 m00394）：群里他自己说的那句进记忆——只留一句原话，
+          // 带 scene:group；不写 seen、不涨轮数、不进书房桶、不触发轮换。
+          // 走 setImmediate 之外不额外排队：只是多读一次 state.json，失败全吞。
+          void rememberOwnerGroupLine(root, sessionId, messageText(event?.data))
           return
         }
         if (cls !== 'human') {
@@ -662,12 +804,19 @@ export function registerTurns(ctx, deps = {}) {
     }
   })
 
+  // 桥在调 prompt() 之前先报一句「这条是谁说的」（2026-11-09，issue #96）。
+  // 同步收下、不等不挡；不报的桥保持老行为。
+  const offSource = ctx.on?.('dsh-fish/source', (o) => {
+    declareSource(o)
+  })
+
   return () => {
     stopped = true
     pending = null
     TURNS_BOUND.delete(ctx)
     try {
       if (typeof off === 'function') off()
+      if (typeof offSource === 'function') offSource()
     } catch {
       /* ignore */
     }

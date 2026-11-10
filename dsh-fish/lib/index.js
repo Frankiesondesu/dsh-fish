@@ -17,7 +17,7 @@ import { loadConfig } from './settings.js'
 import { deriveSelfCached } from './derive.js'
 import { registerCapture } from './capture.js'
 import { registerLook } from './look.js'
-import { registerSpeak } from './speak.js'
+import { registerSpeak, speakOn } from './speak.js'
 import { registerRecall } from './recall.js'
 import { registerHerDiary } from './herdiary.js'
 import { registerWatch } from './watch.js'
@@ -26,6 +26,7 @@ import { registerHerOpen } from './herfile.js'
 import { registerLocalWatch } from './localwatch.js'
 import { registerLetter } from './letter.js'
 import { registerNote } from './note.js'
+import { registerAppoint } from './appoint.js'
 import { registerBringBack } from './keep.js'
 import { registerAsk } from './ask.js'
 import { registerAlarm } from './alarm.js'
@@ -68,7 +69,7 @@ export const name = 'dsh-fish'
  * 版本号，必须和 package.json 的 version 一样（test/boot.test.mjs 盯着）。
  * 不只是日志：升级自检和设置页的「检查更新」拿它当「正在跑的版本」。
  */
-export const VERSION = '0.9.3'
+export const VERSION = '0.9.6'
 
 // ⚠️ 一个数组写全，不要拆成对象
 // 2026-10-30（m02961）：`userQuestions` **不再写进 inject**。写进 inject 的东西缺一个，
@@ -271,9 +272,10 @@ export function apply(ctx, baseConfig = {}) {
         herDir,
         extra: config?.tools?.allow ?? [],
         enabled: config?.tools?.restrict !== false,
-        // 0.9.0 起公开：梦与主动说话不再是本机实验。
-        dream: true,
-        proactive: true,
+        // 0.9.0 起公开：梦默认开。issue #64：关掉「允许她记梦」时
+        // 工具面也要跟着收——否则身份文档说她有、伸手却是空的。
+        // her_say 不看开关，在 FISH_TOOLS 基线里（以前这里传的 proactive 早就没人读了）。
+        dream: config?.dream?.enabled !== false,
         log: (...a) => logger.info(...a),
         onResult: (r) => { restrictState = r },
       })
@@ -401,13 +403,15 @@ export function apply(ctx, baseConfig = {}) {
           // 看过就是永久判决，而按下判决的人不留名字。现在与 growth_commit 同一条闸。
           () => registerLook(ctx, { root, client: baseConfig.client, tenant: tenancy }),
           // 工具说明随说话开关走（2026-10-29）：关着时说明里不该许诺"可以留评论"，
-          // 只说「这会儿还说不出去」（上游 P3：这一节本身不再消失）。
-          // 启动时按当时读到的配置定一次，之后由 execute 同步。
+          // 只说「这会儿还说不出去」（P3，2026-11-07：这一节本身不再消失）。
+          // 启动时按当时读到的配置定一次，之后设置页保存（observe.js 的 POST /config）
+          // 和她每次调用时同步（speak.js 的 noteSpeakEnabled）。
           () => registerSpeak(ctx, {
             root,
             client: baseConfig.client,
             tenant: tenancy,
-            speakEnabled: config?.comment?.enabled === true,
+            // issue #62：断网时也按关着写，和身份文档同一个判据（speak.js 的 speakOn）。
+            speakEnabled: speakOn(config),
           }),
           // fork.36（2026-11-04）：把「可及性门槛」的系数带进去。
           // 账本不动，遗忘发生在取用这一层——线索不够就调不出来。
@@ -426,6 +430,9 @@ export function apply(ctx, baseConfig = {}) {
           () => registerLetter(ctx, { root, tenant: tenancy }),
           // issue #22 乙档（2026-11-04）：醒来看的那张便条。**常驻注册**，不像梦与主动说话那样要 .dev。
           () => registerNote(ctx, { root, tenant: tenancy }),
+          // （2026-11-08，用户 m00442）：通用预约簿。她约他几天后做一件事，
+          // 到那天醒来先想起它；只存 appointments.json，不进事件流（同 notes，不污染成长计数）。
+          () => registerAppoint(ctx, { root, tenant: tenancy }),
           // 0.6.17：纪念品。她只能「问」，真带回去要那个人在出门页点头。
           () => registerBringBack(ctx, { root, tenant: tenancy }),
           // 0.7.6（2026-10-30 m01274）：请求事件。每天 1 次、每周 3 次；只有 time / rest 真会改东西。
