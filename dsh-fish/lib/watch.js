@@ -176,6 +176,23 @@ export function tenancyOf(root, tenancy) {
   return { root, herDir: '', tenant: { ok: true } }
 }
 
+/**
+ * 贴图提示直接给成品（issue #99）。
+ *
+ * 原来只给裸路径、让模型自己转成 markdown。四次实测里三次蒙对、一次在前面
+ * 加了 `/`（`/G:/…`），客户端把它当绝对路径 → `/api/file?path=/G:/…` →
+ * Windows 上解成 `G:\G:\…` → 404 →「图片无法预览」。这一步转换对模型本来就是
+ * 随机的，索性不给它转换的机会：要它贴的时候，整行照抄这一行就行。
+ */
+export function pasteLine(path) {
+  // 真传了 `/G:/…` 也顺手去掉那一个斜杠：这一步不该靠模型记规矩。
+  const p = String(path ?? '')
+    .trim()
+    .replace(/^\/+(?=[A-Za-z]:[\\/])/, '')
+  if (!p) return ''
+  return `![画面](${p})`
+}
+
 export function registerWatch(ctx, deps = {}) {
   const root = deps.root ?? rootDir()
   // fork.22：引擎可注入（单测用）。默认就是 vs——lite 已删，没有第二个选择。
@@ -356,7 +373,9 @@ export function registerWatch(ctx, deps = {}) {
           root,
         )
         // 说明文字由 vs 那边拼（每张图 + 每格时刻 + 那一格的台词），原样给她。
-        return { ok: true, path: posix, text: String(r.text ?? ''), note: '' }
+        // 0.9.7：再补一行「怎么把它贴进 her_say」——上游的 pasteLine，不跟 vs 的说明打架。
+        const body = String(r.text ?? '').trim()
+        return { ok: true, path: posix, text: `${body}\n${pasteLine(posix)}`, note: '' }
       },
     }),
   )

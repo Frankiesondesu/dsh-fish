@@ -142,7 +142,11 @@ const NAME_SAY_RE = new RegExp(
     `|[—–‒―~～…]+\\s*(?:叫)?\\s*[「“"']` +
   `)([^${NAME_STOP_CHARS}]{1,8})`,
 )
-const NAME_GIVE_RE = new RegExp(`他(?:给(?:了)?)?(?:自己)?的?名字\\s*(?:是|叫|：|:)?\\s*[「“"']?([^${NAME_STOP_CHARS}]{1,8})`)
+// issue #98（2026-11-09，0.9.6 真机）：上一版把「他名字」裸着也认。
+// 她在讲这件事本身时写「我从他名字上切下来的一块」，截出来就是「上切下来的一块」，
+// 状态栏从此挂着一句半句话。他给的名字一定带「给的 / 他自己的」，
+// 裸的「他名字」多半是在讨论名字，不是给名字。
+const NAME_GIVE_RE = new RegExp(`他(?:(?:给(?:了)?)(?:自己)?的?|自己的)名字\\s*(?:是|叫|：|:)?\\s*[「“"']?([^${NAME_STOP_CHARS}]{1,8})`)
 // 截出来的常常带尾巴：「我叫你老张好了」会截到「老张好了」。
 // 只剥语气词和「了/好」这类收尾——**不剥「的」**，「开灯的」剥掉就成了「开灯」。
 const NAME_TAIL = /[了吧呢啊嘛哦诶欸呀哈哇哦嘞好]+$/
@@ -445,16 +449,40 @@ export function similarity(a, b) {
   return dice(bigrams(A), bigrams(B))
 }
 
+// issue #98（2026-11-09，0.9.6 真机）：状态栏显示「的称呼」。
+// 她解释「怎么称呼你」这件事时，句子里本来就有「称呼你」三个字，
+// {1,8} 就把后半句当成了称呼；而状态栏取**最近一次**，于是越解释越离谱。
+// 判据只加一条：截出来的得像一个名字。名字不会以「的/是/在/把…」开头，
+// 「的」也只有收尾才可能是名字的一部分（「开灯的」）。
+// issue #100（2026-11-09，0.9.6 真机）：「叫他走开」「叫他闭嘴」是祈使句，不是起名。
+// 这类动词补语天然就是 1~4 个非标点字符，功能词判据（去/来/起）挡不全，
+// 整词否决最省事：它们永远不可能是称呼。
+const NAME_VERB = new Set([
+  '出去', '出来', '进来', '起来', '下去', '上来', '过去', '回来', '过来', '上去', '下来',
+  '离开', '走开', '滚开', '闭嘴', '坐下', '躺下', '停下', '住手', '别闹',
+])
+
+const NAME_FUNCTION_HEAD = /^[的了吗呢吧啊呀嘛哦诶欸是在从把被给和就都也还又很太这那我你他她它去来对跟与及或但而]/
+const NAME_FUNCTION_CHAR = /[了是在从把被给就都也还又很太这那我你他她它去来对跟与及或但而]/
+
+function looksLikeName(name) {
+  if (!name) return false
+  // 代词不算称呼；她自己的名字（「他给我起了名字：大肥鱼」）由 NAME_GIVE_RE 限定排除
+  if (NAME_STOP.has(name) || NAME_BAD_HEAD.test(name)) return false
+  if (NAME_VERB.has(name)) return false
+  if (NAME_FUNCTION_HEAD.test(name)) return false
+  // 「的」夹在中间就是一句话的中段，不是名字
+  if (/的./.test(name)) return false
+  return !NAME_FUNCTION_CHAR.test(name)
+}
+
 export function pickName(text) {
   const s = String(text ?? '')
   for (const re of [NAME_SAY_RE, NAME_GIVE_RE]) {
     const m = re.exec(s)
     if (!m) continue
-    let name = String(m[1] ?? '').trim().replace(NAME_TAIL, '')
-    // 代词/空串不算称呼；她自己的名字（「他给我起了名字：大肥鱼」）由 NAME_GIVE_RE 的
-    // 「他的/自己的」限定排除，这里只兜住明显的非名字。
-    if (!name || NAME_STOP.has(name) || NAME_BAD_HEAD.test(name)) continue
-    return name
+    const name = String(m[1] ?? '').trim().replace(NAME_TAIL, '')
+    if (looksLikeName(name)) return name
   }
   return null
 }
@@ -519,6 +547,10 @@ export function deriveSelf(events = [], opts = {}) {
   const refuted = []
   const selfmod = []
   const refusals = []
+  // 0.9.7 T1：「你最近说过的几句话」只收**带锚点**的未认领话（她自己说出口、
+  // 但没调 growth_commit 认领）。没锚点的闲聊不进——那是把每轮聊天复述进身份文档，
+  // 和 2026-10-23 删掉 focus 段是同一条错路。
+  const looseSaid = []
   const reunions = []
   const corrected = []
   let name = null
@@ -568,7 +600,12 @@ export function deriveSelf(events = [], opts = {}) {
         // 这个 bug 就还在。
         // 必须排在 selfmod 前面：schema.js 落库时正则命中就自动补 selfmod，
         // 聊天里一句「别把我改成那样」不能算她想让人改自己。
-        if (flags.includes('uncommitted')) break
+        if (flags.includes('uncommitted')) {
+          if (flags.includes('anchored')) {
+            looseSaid.push({ id: ev.id, at: ev.ts, text: ev.text, refs: Array.isArray(ev.refs) ? ev.refs : [] })
+          }
+          break
+        }
         // 她试过改自己：落库留证，但不计入信念（B §5，对应自我服务偏差）
         // 双保险：落库时打的 flag 与文本复检，任一命中即算（防止旧数据/手工注入绕过）
         if (flags.includes('selfmod') || detectSelfMod(ev.text)) {
@@ -1087,6 +1124,8 @@ export function deriveSelf(events = [], opts = {}) {
     beliefCount: textCount(active),
     refuted,
     refusals,
+    // 0.9.7 T1：带锚点的未认领话（最多留最近的 20 条；渲染时再挑 1 条）。
+    looseSaid: looseSaid.slice(-20),
     selfmodAttempts: selfmod,
     reunions,
     corrected: corrected.length,
@@ -1184,6 +1223,15 @@ export function deriveSelf(events = [], opts = {}) {
   // issue #67：forced 只在 day > growthDays 时产生，那时的 stage 恒等于 elapsedStage，
   // 原来的 && model.stage < elapsedStage 永远为假——「（时间兜底）」从不出现。
   model.stageForced = forced.length > 0
+  // 阶段按**当前** growthDays 现算，天数又不重置（从 seed 起算）：把成长周期改长，阶段会退回去
+  // ——7 天跑到第 14 天是阶段 4，改成 30 天只剩阶段 2，界面上像她退步了。
+  // 事件里本来记着写下当时的 stage，取最大值当「曾到过」；界面写「当前 2 · 曾到第 4 阶段」。
+  let peak = model.stage
+  for (const ev of events) {
+    const was = Number(ev?.stage)
+    if (Number.isFinite(was) && was > peak) peak = Math.min(4, was)
+  }
+  model.stagePeak = peak
 
   return model
 }

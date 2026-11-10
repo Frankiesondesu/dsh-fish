@@ -380,6 +380,8 @@ window.__ModuleLoader__.load({
       const [rotateAfter, setRotateAfter] = useState(40)
       const [rotateWhenKB, setRotateWhenKB] = useState(1024)
       const [docBudget, setDocBudget] = useState(2400)
+      // 0.9.7 T1：身份段里摆不摆「你最近说过的几句话」（默认开）
+      const [echoOn, setEchoOn] = useState(true)
       const [beliefsShown, setBeliefsShown] = useState(3)
       // 旁听（A2，2026-10-30）：每几轮记一句你说过的话（0 = 不记）
       const [hearEvery, setHearEvery] = useState(3)
@@ -798,6 +800,7 @@ window.__ModuleLoader__.load({
           setInterestOn(s.config?.interest?.enabled !== false)
           setDreamEnabled(s.config?.dream?.enabled !== false)
           setSelfWakeOn(s.config?.memory?.selfWake !== false)
+          setEchoOn(s.config?.memory?.echo !== false)
 
           // 不再拉 /events（2026-11-02，用户 m00335）：这里取回来的 e.rows 只进了
           // setEvents，全文件没有一处渲染它——每 30 秒白拉 25 条事件（九成是后台记账）。
@@ -878,6 +881,7 @@ window.__ModuleLoader__.load({
           setInterestOn(cfg.interest?.enabled !== false)
           setDreamEnabled(cfg.dream?.enabled !== false)
           setSelfWakeOn(cfg.memory?.selfWake !== false)
+          setEchoOn(cfg.memory?.echo !== false)
           setNotifyOn(cfg.notify?.enabled === true)
           setCommentOn(cfg.comment?.enabled === true)
           setCommentPerDay(Number(cfg.comment?.perDay ?? 1))
@@ -1053,7 +1057,7 @@ window.__ModuleLoader__.load({
         notify: { enabled: notifyOn },
         chat: { rotateAfter: Number(rotateAfter), rotateWhenKB: Number(rotateWhenKB), replyChars: Number(replyChars) },
         tools: { restrict: Boolean(toolsRestrict), allow: toolsAllowSaved },
-        memory: { docBudget: Number(docBudget), sleepEveryDays: Number(sleepEvery), sleepKeep: Number(sleepKeep), beliefsShown: Number(beliefsShown), hearEvery: Number(hearEvery) },
+        memory: { docBudget: Number(docBudget), sleepEveryDays: Number(sleepEvery), sleepKeep: Number(sleepKeep), beliefsShown: Number(beliefsShown), hearEvery: Number(hearEvery), echo: Boolean(echoOn) },
         comment: {
           enabled: commentOn,
           perDay: Number(commentPerDay),
@@ -2534,7 +2538,13 @@ window.__ModuleLoader__.load({
         s ? group('状态',
           '从她的事件流算出来；阶段、瓶颈和计数她看不见，天数和冷落她知道。',
           rowTip('已成长天数', `${s.day} / ${s.growthDays} 天`, '从开局那一刻起，每满 24 小时加一天。'),
-          rowTip('当前阶段', `${s.stage} · ${s.stageName}${s.stageForced ? '（时间兜底）' : ''}`, STAGE_HELP),
+          rowTip('当前阶段',
+            `${s.stage} · ${s.stageName}${s.stageForced ? '（时间兜底）' : ''}${Number(s.stagePeak) > Number(s.stage) ? `（曾到第 ${s.stagePeak} 阶段）` : ''}`,
+            // 阶段按当前成长周期现算、天数不重置：改长周期（比如 7 天改成 30 天）阶段会退回去。
+            // 这不是她退步了，所以把「曾到过」一起写出来。
+            STAGE_HELP + (Number(s.stagePeak) > Number(s.stage)
+              ? `\n\n成长周期改过之后，阶段会按新周期重算，所以这里可能比之前低；第 ${s.stagePeak} 阶段是她真实到过的，没有丢。`
+              : '')),
           // 成长期满、有瓶颈是按时间放行的：值也不能写「已走完」，那读起来像她自己都走完了。
           // 放行的门立场不认，所以后面跟上立场还在等哪几道。
           rowTip('下一个成长瓶颈',
@@ -2646,7 +2656,12 @@ window.__ModuleLoader__.load({
           null,
           h('div', { className: 'grid2' },
             Num({ label: '成长周期', value: growthDaysUi, onChange: setGrowthDaysUi, min: 7, max: 180, unit: '天',
-              hint: '四个阶段按这个天数分段；期满后没过的瓶颈自动放行。14 天及以下时，自主、主动两道瓶颈各只要一次。' }),
+              // 改动当场就说清后果：天数不重置、阶段按新周期重算，改长会退回去；
+              // 「曾到过的阶段」记在事件里，状态页会写出来，不会丢。
+              hint: '四个阶段按这个天数分段；期满后没过的瓶颈自动放行。14 天及以下时，自主、主动两道瓶颈各只要一次。'
+                + (Number(growthDaysUi) !== Number(s?.growthDays)
+                  ? ` 改完保存：已过的天数不重置，阶段按新的 ${growthDaysUi} 天重算，可能比现在低；到过的阶段不会丢，状态里会标「曾到第几阶段」。`
+                  : '') }),
             Num({ label: '冷落天数', value: absent, onChange: setAbsent, min: 1, max: 30, unit: '天',
               hint: '你连着这么多天没来，就记下一次冷落。' }))),
         group('定时醒来',
@@ -2771,7 +2786,7 @@ window.__ModuleLoader__.load({
           '隔几天提醒她把最近的事写成一段对自己的说法。',
           h('div', { className: 'grid2' },
             Num({ label: '回头想间隔', value: sleepEvery, onChange: setSleepEvery, min: 0, max: 60, unit: '天',
-              hint: '到那天醒来时提醒她，那次没派事件卡就不提；0 为不提醒。' }),
+              hint: '到那天醒来时提醒她。这一天不再判空醒（旧句子那一摊顺延到下一次醒来），所以不会被摆料吃掉。0 为不提醒。' }),
             Num({ label: '总共留几条自述', value: sleepKeep, onChange: setSleepKeep, min: 0, max: 100, unit: '条',
               hint: '超出后最早的折进「更早以前」，原文还在事件流里、她用 her_recall 翻得到。0 = 不限制（都留着）。' }))),
         groupFull('四个阶段与三道瓶颈',
@@ -3299,6 +3314,9 @@ window.__ModuleLoader__.load({
               hint: '每轮逐条给她看几条最显著的判断，其余折成一行。要消耗更多 token，默认推荐 3。' }),
             Num({ label: '记你原话的间隔', value: hearEvery, onChange: setHearEvery, min: 0, max: 50, unit: '轮',
               hint: '每隔这么多轮，记下你那一轮最长的一句原话，不加解释、不改写。群聊不按间隔：你在群里说的每条都记最长的一句。0 为不记，群聊里也一样。' })),
+          Toggle({ label: '摆一句她最近说过的话', on: echoOn,
+            onChange: (v) => { setEchoOn(v); patchGroup('memory', { echo: v }) },
+            hint: '身份段末尾摆一句她自己说过、但没认领的话，最多 1 条、21 天内。关掉只是这一节消失，那些话仍在事件流里，她用 her_recall 翻得到。' }),
           !mem ? h('p', { className: 'empty' }, '读取中…')
             : h('div', null,
                 h('div', { className: 'row', style: { alignItems: 'center', gap: '10px' } },

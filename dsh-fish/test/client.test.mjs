@@ -327,6 +327,46 @@ test('quality 能测出稳定值时，数字和判读一起给（用户 m06350�
   assert.ok(txt.includes('0.35'), '新鲜仍然显示数字')
 })
 
+// 2026-11-09（用户 m00925）：改长成长周期会让阶段退回去（7 天跑到第 14 天是 4，改成 30 天只剩 2）。
+// 界面必须把「到过第几阶段」一起写出来，否则读起来像她退步了。
+test('阶段回落时显示「曾到第几阶段」，并在提示语里说明原因（用户 m00925）', async () => {
+  const react = fakeReact({
+    0: {
+      day: 14, growthDays: 30, stage: 2, stageName: '自主', stagePeak: 4,
+      stageForced: false, pendingGate: 'autonomy',
+      name: '梦尘', beliefCount: 6, absenceDays: 0,
+      counts: { utterance: 40, revise: 0, refusal: 0, reunion: 1, total: 60 },
+      quality: { stability: { sample: 0, beliefs: 6 }, consistency: { pairs: 0 }, novelty: { recent: 0, older: 0 } },
+      config: { window: ['20:00', '23:00'], daily: { events: 1, questions: 1 }, diary: { enabled: true, visible: false }, absenceAfterDays: 2 },
+    },
+  })
+  const { exports } = await loadClient({ react })
+  react.resetCursor()
+  const tree = exports.FishSection()
+  const txt = textOf(tree).join(' ')
+  assert.ok(txt.includes('2 · 自主'), `当前阶段照常印，实际: ${txt.slice(0, 300)}`)
+  assert.ok(txt.includes('（曾到第 4 阶段）'), `阶段回落时必须写「曾到第 4 阶段」，实际: ${txt.slice(0, 300)}`)
+  const tips = titlesOf(tree).join('\n')
+  assert.ok(tips.includes('第 4 阶段是她真实到过的，没有丢'), `提示语要说明不是退步，实际: ${tips.slice(0, 400)}`)
+})
+
+test('没改过周期时，不画蛇添足写「曾到第几阶段」', async () => {
+  const react = fakeReact({
+    0: {
+      day: 30, growthDays: 30, stage: 2, stageName: '自主', stagePeak: 2,
+      stageForced: false, pendingGate: null,
+      name: '梦尘', beliefCount: 6, absenceDays: 0,
+      counts: { utterance: 40, revise: 3, refusal: 2, reunion: 1, total: 60 },
+      quality: { stability: { score: 0.41, sample: 24, k: 3, beliefs: 6, band: '全压在这几条上' }, consistency: { score: 0.72, pairs: 12 }, novelty: { score: 0.35, recent: 9, older: 20 } },
+      config: { window: ['20:00', '23:00'], daily: { events: 1, questions: 1 }, diary: { enabled: true, visible: false }, absenceAfterDays: 2 },
+    },
+  })
+  const { exports } = await loadClient({ react })
+  react.resetCursor()
+  const txt = textOf(exports.FishSection()).join(' ')
+  assert.ok(!txt.includes('曾到第'), `peak 与当前阶段相同时不该出现「曾到第」，实际: ${txt.slice(0, 300)}`)
+})
+
 /** 收集整棵树里 ⓘ 的 title（提示语挂在属性上，textOf 取不到） */
 function titlesOf(node, out = []) {
   if (node == null || node === false) return out
@@ -821,10 +861,11 @@ test('设置页切页不能把判据 showTab 当成开关用（issue #12）', as
 
 test('时段控件下面补一行 24 小时制：00:00 不会被读成中午十二点', async () => {
   // 「每天几点醒」在「生长」页（lib/client.js 里 growPage 那张卡），默认停在「状态」页，
-  // 得把 tab 拨过去。tab 是本组件第 46 个 useState（0 基下标 45）。
-  // 下标挪过两次：本 fork 加 rotateWhenKB 时 44→45，0.9.7 又在白名单那组加了一个
-  // state（只在特定场合才给她的工具）顶到 45。以后再往它前面加 state，这里要跟着挪。
-  const react = fakeReact({ 45: 'grow' })
+  // 得把 tab 拨过去。tab 是本组件第 47 个 useState（0 基下标 46）。
+  // 下标挪过几次：本 fork 加 rotateWhenKB 时 44→45；0.9.7 又在白名单那组加了一个
+  // state（只在特定场合才给她的工具）、T1 在 docBudget 后面加了 echoOn，顶到 46。
+  // 以后再往它前面加 state，这里要跟着挪。
+  const react = fakeReact({ 46: 'grow' })
   const { exports } = await loadClient({ react })
   react.resetCursor()
   const txt = textOf(exports.FishSection()).join(' ')

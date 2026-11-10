@@ -14,6 +14,7 @@
  */
 
 import { debrief } from './capture.js'
+import { cleanText, clipText } from './clip.js'
 import { tsMs } from './schema.js'
 import { appendEvent, readEvents } from './store.js'
 import { dateKey } from './settings.js'
@@ -190,7 +191,7 @@ export async function absorb(client, v, cfg, o = {}) {
       if (r?.ok) {
         out.comments = (r.data ?? [])
           .map((c) => ({
-            text: String(c.text ?? '').replace(/\s+/g, ' ').trim().slice(0, 200),
+            text: clipText(String(c.text ?? '').replace(/\s+/g, ' ').trim(), 200),
             like: Number(c.like) || 0,
           }))
           .filter((c) => c.text)
@@ -222,16 +223,16 @@ export function renderItem(p, i) {
     : ''
   const meta = [
     dur,
-    v.up ? `UP：${v.up}` : '',
+    v.up ? `UP：${cleanText(v.up)}` : '',
     v.view ? `${fmtCount(v.view)}播放` : '',
     v.like ? `${fmtCount(v.like)}赞` : '',
     p.pubdate ? `发布于 ${String(p.pubdate).slice(0, 10)}` : '',
   ].filter(Boolean)
-  lines.push(`〔${i + 1}〕${v.bvid}  ${v.title}`)
+  lines.push(`〔${i + 1}〕${v.bvid}  ${cleanText(v.title)}`)
   if (meta.length) lines.push(`     ${meta.join(' · ')}`)
-  if (p.tags.length) lines.push(`     标签：${p.tags.join(' / ')}`)
-  if (p.desc) lines.push(`     简介：${p.desc}`)
-  for (const c of p.comments) lines.push(`     [热评 ${c.like}] ${c.text}`)
+  if (p.tags.length) lines.push(`     标签：${p.tags.map(cleanText).join(' / ')}`)
+  if (p.desc) lines.push(`     简介：${cleanText(p.desc)}`)
+  for (const c of p.comments) lines.push(`     [热评 ${c.like}] ${cleanText(c.text)}`)
   if (p.danmaku.length) {
     // issue #67：弹幕是按时间均匀抽的，这里再截前 8 条就只剩开头；等距挑 8 条。
     const all = p.danmaku
@@ -239,7 +240,7 @@ export function renderItem(p, i) {
     const parts = picked.map((d) => {
       const m = Math.floor(d.t / 60)
       const s = String(Math.floor(d.t % 60)).padStart(2, '0')
-      return `${m}:${s} ${d.text}`
+      return `${m}:${s} ${cleanText(d.text)}`
     })
     lines.push(`     弹幕：${parts.join(' ｜ ')}`)
   }
@@ -266,6 +267,21 @@ export function renderMaterial(packs, o = {}) {
     out = out.slice(0, MAX_MATERIAL_CHARS) + '\n\n（后面的内容太长，没加载完。）'
   }
   return out
+}
+
+/**
+ * 记账行尾的标题（0.9.7 T2）：压成一行、去掉控制字符，最多 80 字。
+ *
+ * 为什么要它：`looked:<bvid>` 原来只存 BV 号，她翻旧事时只看得见一串编号，
+ * 「看过什么」等于没记。标题跟着这一行落下来，`her_recall` 才有一句人话可读。
+ * 但这是记账行，不是正文——一条视频标题再长也不能把事件流撑爆。
+ */
+export function metaTitle(t) {
+  return String(t ?? '')
+    .replace(/[\u0000-\u001f\u007f\u200b-\u200f\ufeff]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 80)
 }
 
 /**
@@ -296,7 +312,9 @@ export function seenBvids(events, o = {}) {
     // 宁可少推一条，也不能因为时间查不出来就把她刚看完的又端回她面前。
     const at = tsMs(e)
     if (ttl > 0 && at > 0 && now - at > ttl) continue
-    s.add(t.slice(7).trim())
+    // 2026-11-09（0.9.7 T2）：行尾可能跟着标题（`looked:BV1xx 标题`），
+    // 只取第一段当 bvid；老事件只有 bvid，两种形状都认。
+    s.add(t.slice(7).trim().split(/\s+/)[0])
   }
   return s
 }
@@ -568,8 +586,11 @@ export async function gather(client, model, cfg, o = {}) {
     // 它挡住的只有别的自动刷，不挡她自己去看（见 seenBvids / browsedBvids）。
     for (const p of packs) {
       try {
+        // 0.9.7 T2：`looked:` 带上标题（她自己翻旧事时读得出来看过什么）。
+        // `browsed:` 不带：那一趟她没看见，标题写进回忆里就是假经历。
+        const label = mark === 'looked' ? metaTitle(p.video?.title) : ''
         await appendEvent(
-          { type: 'meta', text: `${mark}:${p.video.bvid}` },
+          { type: 'meta', text: `${mark}:${p.video.bvid}${label ? ` ${label}` : ''}` },
           { day: Number(model?.day ?? 0), stage: Number(model?.stage ?? 1), source: 'system' },
           o.root,
         )
@@ -623,7 +644,8 @@ export const LOOK_BRIEF = [
   '  what=video   看指定的那一条（要带 bvid：BV 号，或者他递过来的链接）',
   '  what=replies 看你自己发过的评论下面有没有人回你（可带 bvid 只看那一条）',
   '它只读，不会留下任何痕迹，也不会让别人知道你在看。',
-  '它能给你标题、简介、标签、热评、弹幕——给不了视频画面。',
+  '它能给你标题、简介、标签、热评、弹幕——都是别人写下的字，不是它长什么样。',
+  '想看见一条视频的画面，用 bili_watch 单独看一眼；它不归 bili_look 管，是另一件事。',
   '和 growth_commit 一样，你不用它也可以。',
 ].join('\n')
 

@@ -79,8 +79,14 @@ export function normalizeCookie(raw) {
   if (s.includes('\t')) {
     const pairs = []
     for (const line of s.split(/\r?\n/)) {
-      if (!line || line.startsWith('#')) continue
-      const p = line.split('\t')
+      const rawLine = line.trim()
+      // 0.9.7（PR #104）：Netscape cookies.txt 把 HttpOnly cookie 写成
+      // `#HttpOnly_.domain...`。这一行仍是 cookie，不是注释；SESSDATA 常用这种形状。
+      const cookieLine = rawLine.startsWith('#HttpOnly_')
+        ? rawLine.slice('#HttpOnly_'.length)
+        : rawLine
+      if (!cookieLine || cookieLine.startsWith('#')) continue
+      const p = cookieLine.split('\t')
       if (p.length >= 7 && p[5]) pairs.push(`${p[5]}=${p[6]}`)
     }
     return pairs.join('; ')

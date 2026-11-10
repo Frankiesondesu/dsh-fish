@@ -15,7 +15,7 @@
 
 import { createClient } from './bili.js'
 import { readMyReplies, renderMyReplies } from './comment.js'
-import { absorb, renderMaterial, rankVideos, seenBvids, LOOK_BRIEF, WATCH_RULE } from './browse.js'
+import { absorb, renderMaterial, rankVideos, seenBvids, metaTitle, LOOK_BRIEF, WATCH_RULE } from './browse.js'
 import { readEvents, rootDir, appendEvent } from './store.js'
 import { loadConfig, dateKey, biliOn } from './settings.js'
 // 评论区里别人的话（2026-10-24，用户 m02454）
@@ -160,11 +160,12 @@ export async function lookOnce(o = {}) {
     const who = { day: Number(o.model?.day ?? 0), stage: Number(o.model?.stage ?? 1), source: 'system' }
     const stamp = sessionId ? { sessionId } : {}
     for (const p of packs) {
-      await appendEvent({ type: 'meta', text: `looked:${p.video.bvid}`, ...stamp }, { ...who }, root).catch(() => {})
-      // fork.10（2026-11-02）：`looked:` 里只有 BV 号，她日后想"那个视频叫什么"就翻不到。
-      // 单独立一行 `saw:`，带标题和作者，纯文本——`watched:` 那种 JSON 是给报表读的，
-      // 这行是给她自己回忆时读的，不该长得像机器配置。
-      // 不动 `looked:` 的格式：browse.js 靠 `t.slice(7)` 取 bvid 去重，改了会串。
+      // 0.9.7 T2：标题跟着 `looked:` 落下来（browse.js 的 seenBvids 取第一段 bvid，
+      // 兼容「只有 BV 号」和「BV 号 + 标题」两种形状）。
+      const title = metaTitle(p.video?.title)
+      await appendEvent({ type: 'meta', text: `looked:${p.video.bvid}${title ? ` ${title}` : ''}`, ...stamp }, { ...who }, root).catch(() => {})
+      // fork.10（2026-11-02）：再单独立一行 `saw:`，带标题和作者，纯文本——
+      // `watched:` 那种 JSON 是给报表读的，这行是给她自己回忆时读的。
       {
         const t = String(p.video?.title ?? p.title ?? '').trim()
         const up = String(p.video?.up ?? p.up ?? '').trim()
@@ -205,11 +206,16 @@ export async function lookOnce(o = {}) {
       await appendEvent({ type: 'meta', text: `hook:${lv}` }, { ...who }, root).catch(() => {})
     }
 
+    // 「翻到」不是「看见」（2026-11-09，外部用户反馈）：她只看列表、从不点开画面，
+    // 因为翻完这一趟就算做完了。所以把下一步放在她刚拿到素材的这一刻说，
+    // 而不是另写一条规矩。今天已经看过画面的不再念；一条都没剩就不念。
+    const material = single
+      ? renderMaterial(packs, { head: '这一条。是你自己点名要看的那条。', ...(hooks.size ? { hooks } : {}) })
+      : renderMaterial(packs, hooks.size ? { hooks } : {})
+    const hint = frameHint(events, dk, packs.map((p) => p.video?.bvid), single)
     return {
       ok: true,
-      text: single
-        ? renderMaterial(packs, { head: '这一条。是你自己点名要看的那条。', ...(hooks.size ? { hooks } : {}) })
-        : renderMaterial(packs, hooks.size ? { hooks } : {}),
+      text: hint ? `${material}\n\n${hint}` : material,
       note: '',
       voice: voice ? { text: voice.text, why: voice.why, across: voice.across ?? 1 } : null,
       picks: packs.map((p) => ({
@@ -231,6 +237,31 @@ function describeErr(r) {
   if (code === 'NO_WBI') return '连不上。等等再试。'
   if (code === 'NETWORK') return '网断了。'
   return `打不开（${code}）。`
+}
+
+/**
+ * 「翻到」不是「看见」（2026-11-09，外部用户反馈）。
+ *
+ * 列表只给字，画面要另外用 bili_watch 取。她翻完列表就把这一趟当成做完了，
+ * 一次都没想起来看画面（日志里 `browse:` 二十几条，`watched:` 一条）。
+ * 所以这句要放在她**刚拿到素材**的这一刻，且只在今天还没看过画面的那几条上说。
+ * 不劝、不报额度：看几条由她自己定。
+ */
+function frameHint(events, dk, bvids, single) {
+  const watched = new Set()
+  const head = `watched:${dk} `
+  for (const e of events ?? []) {
+    if (e?.type !== 'meta') continue
+    const t = String(e.text ?? '')
+    if (!t.startsWith(head)) continue
+    const bvid = t.slice(head.length).split(' ')[0]
+    if (bvid) watched.add(bvid)
+  }
+  const left = [...new Set((bvids ?? []).filter((b) => b && !watched.has(b)))]
+  if (!left.length) return ''
+  return single
+    ? `这一条我只翻到了标题和文字，画面还没看。它到底长什么样，用 bili_watch 看一眼——不想看也行。`
+    : `这几条我只翻到了标题和文字，画面还没看。哪条让你拿不准它到底长什么样，用 bili_watch 看一眼——不想看也行。`
 }
 
 /**

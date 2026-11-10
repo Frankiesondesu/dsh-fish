@@ -201,6 +201,22 @@ export const TURN_TEXT_MAX = 2000
 const TURN_MSGS_MAX = 5
 
 /**
+ * 轮换之后「屋子认回旧会话」的时间窗（2026-11-10，用户反馈：满 40 轮换会话，
+ * 有时候又落回旧的老会话，像是「旧会话没被用满」）。
+ *
+ * 原来只要 `home.json` 的 `rotatedFrom` 还是这条会话就无条件认回，而它会一直
+ * 留到下一次轮换。于是几天后他翻回侧栏那条「…之前」说一句，屋子就搬回去了，
+ * 而 `turns` 还是新会话的 0——那条已经满 40 轮的会话又拿到一整段预算，
+ * 上下文继续往上涨。
+ *
+ * 现在只认两种「真的卡在换房那一刻」：
+ *   - 新会话一轮都没跑过（叫醒没落地，他只能还在旧窗口里说话）；
+ *   - 换房还没超过 10 分钟（人正卡在那一刻，还在旧窗口里接着打）。
+ * 其余情况只记「他来过」，不搬屋子。
+ */
+const ADOPT_WINDOW_MS = 10 * 60_000
+
+/**
  * 这条 user 消息是谁写的？
  *
  * 2026-11-03（issue #18）改成「机器黑名单」：认得的机器 kind 挡掉，其余当人。
@@ -382,6 +398,36 @@ function cut(s) {
   return t.length > TURN_TEXT_MAX ? t.slice(0, TURN_TEXT_MAX) + '…' : t
 }
 
+/**
+ * 一轮要说的话怎么落成事件（issue #98）。
+ *
+ * 装得进一条就一条：整段原样留着。装不下才切——先按空行切段，再把小段拼到
+ * 接近 TURN_TEXT_MAX，单段本身超长的按长度硬切。切只发生在「一条事件放不下」
+ * 的时候，不再把一次回答的每个段落都变成一条事件。
+ */
+function chunkText(s) {
+  const t = String(s ?? '').trim()
+  if (!t) return []
+  if (t.length <= TURN_TEXT_MAX) return [t]
+  const out = []
+  let buf = ''
+  const flush = () => {
+    if (buf) out.push(buf)
+    buf = ''
+  }
+  for (const part of t.split('\n\n').map((x) => x.trim()).filter(Boolean)) {
+    if (part.length > TURN_TEXT_MAX) {
+      flush()
+      for (let i = 0; i < part.length; i += TURN_TEXT_MAX) out.push(part.slice(i, i + TURN_TEXT_MAX))
+      continue
+    }
+    if (buf && buf.length + 2 + part.length > TURN_TEXT_MAX) flush()
+    buf = buf ? `${buf}\n\n${part}` : part
+  }
+  flush()
+  return out
+}
+
 /** 已经挂过观察者的宿主上下文（同一进程只挂一次，见 registerTurns） */
 const TURNS_BOUND = new WeakSet()
 
@@ -518,6 +564,20 @@ export function registerTurns(ctx, deps = {}) {
         }
         return
       }
+      // 认回也要看时候（2026-11-10，用户反馈「换会话又落回旧的老会话」）：
+      // `rotatedFrom` 会一直留到下一次轮换，不设窗口的话，他几天后翻回那条
+      // 「…之前」随口说一句，屋子就搬回去，`turns` 还是新会话的 0——
+      // 那条已经满 40 轮的会话等于又重新拿到一整段预算。
+      const rotatedAt = Date.parse(String(home.rotatedAt ?? ''))
+      const stillThere = Number(home.turns ?? 0) === 0
+        || (Number.isFinite(rotatedAt) && Date.now() - rotatedAt < ADOPT_WINDOW_MS)
+      if (!stillThere) {
+        if (Date.now() - lastSeenAt > 60_000) {
+          await markSeen()
+          log(`turns · 他回到换下来那条会话里说话，但屋子已经搬走了（${sessionId}）`)
+        }
+        return
+      }
       const ok = await adoptTalkSession(root, sessionId)
       log(
         ok
@@ -621,13 +681,15 @@ export function registerTurns(ctx, deps = {}) {
       // 覆盖自我叙述、参与固化（derive.js 里与 selfmod 同一处理）。它只留证。
       //
       // 只补这一轮**新**说出口的：committed 里的已经在事件流里了，重复写会重复计数。
-      const fresh = spoken
-        ? String(spoken)
-            .split('\n\n')
-            .map((s) => s.trim())
-            .filter(Boolean)
-            .filter((s) => !committed.includes(s))
-        : []
+      // 2026-11-09（issue #98）：一轮只写一条。
+      // 原来按空行切段、逐段落库，一条带小标题和列表的回答会变成七八条事件：
+      // 他机器上一天 1326 行里有 694 行是这么来的（`**运行状态**`、`---`、一个
+      // 列表项各算一条，时间戳只差几毫秒）。切段本来是想让 REFUSE_RE 命中单独
+      // 成句的「我拒绝…」，但那条正则是拿整段文本去 test 的，切不切都不多命中。
+      // 只有整段超过 TURN_TEXT_MAX、一条事件装不下时才切。
+      const said = spoken ? String(spoken).trim() : ''
+      const committedTexts = picked.map((e) => String(e.text ?? '').trim()).filter(Boolean)
+      const fresh = said && !committedTexts.some((t) => t === said) ? chunkText(said) : []
       for (const text of fresh) {
         await appendEvent(
           { type: 'utterance', text: cut(text), flags: ['uncommitted'] },

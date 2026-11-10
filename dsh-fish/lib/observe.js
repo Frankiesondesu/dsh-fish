@@ -581,6 +581,8 @@ export function registerObserve(ctx, deps = {}) {
         dev: true,
         stage: m.stage,
         stageName: m.stageName,
+        // 事件流里到过的最高阶段：改成长周期会让 stage 退回去，这一栏不跟着退。
+        stagePeak: m.stagePeak,
         stageForced: m.stageForced,
         pendingGate: m.stageGate?.pending ?? null,
         // 每道瓶颈要几次（成长周期 14 天及以下时自主、主动各一次）：界面照这个写「一次 / 两次」，
@@ -1100,7 +1102,8 @@ export function registerObserve(ctx, deps = {}) {
       for (const e of events) {
         if (e?.type !== 'meta') continue
         const t = String(e.text ?? '')
-        if (t.startsWith('looked:')) lookedAll.push(t.slice(7))
+        // 0.9.7 T2：行尾可能跟着标题；状态窗只要 BV 号（与上面的口径一致）。
+        if (t.startsWith('looked:')) lookedAll.push(t.slice(7).trim().split(/\s+/)[0])
       }
       send(res, 200, {
         enabled: Boolean(config?.browse?.enabled),

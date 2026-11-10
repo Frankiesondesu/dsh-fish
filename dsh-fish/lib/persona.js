@@ -10,6 +10,7 @@
  *   N4 调工具改自己 → 提示里明确"你能写下的只有话，改不了自己"
  */
 
+import { clipText } from './clip.js'
 import { promptBans } from './rules.js'
 // 立场清单（2026-10-25，用户设计「纵向·立场」）。纯函数，不读盘、不碰配置。
 import { buildStances, stanceSection } from './stance.js'
@@ -59,6 +60,14 @@ export const PRESCRIPTION_BANS = [
  * 规则真相在 lib/rules.js，这里只是给提示词用的视图。
  */
 export const HARD_BANS = promptBans().map((b) => b.text)
+
+/**
+ * 「你最近说过的几句话」的时效（0.9.7 T1）。
+ * 超过这个天数的旧话不再摆——她早就走过那一刻了，再摆就是把一件旧事当现在。
+ */
+export const ECHO_MAX_AGE_DAYS = 21
+/** 这一节最多摆几条。1 条是刻意的：多了就变成"把聊天复述进身份文档"。 */
+export const ECHO_MAX_LINES = 1
 
 
 /** 身份段的字数预算（默认值，真正生效的是 config.memory.docBudget）。
@@ -135,8 +144,7 @@ export function foldOlderBeliefs(beliefs, shown = BELIEF_SHOWN, folded = BELIEF_
   const extra = Math.max(0, Math.floor(Number(dropped) || 0))
   if (!older.length) return extra > 0 ? `还有 ${extra} 条更早的，没摆出来` : ''
   const picked = older.slice(0, folded).map((b) => String(b.text).replace(/\s+/g, ' ').trim())
-  let line = picked.join('；')
-  if (line.length > 200) line = line.slice(0, 199) + '…'
+  const line = clipText(picked.join('；'), 200)
   const more = older.length - picked.length + extra
   // issue #97（2026-11-09）：原来的「你记不清原话了」是在替她断言记忆——
   // 她可以用 her_recall 翻回去，系统不该预先规定她记得住什么。只说文档里没摆。
@@ -219,7 +227,7 @@ export function personaLine(model, opts = {}) {
 export function personaBudget(model, opts = {}) {
   const budget = opts.budget ?? SELF_DOC_BUDGET
   const sections = buildSections(model, opts)
-  const label = (s) => String(s.text).split('\n')[0].replace(/^#+\s*/, '').slice(0, 20)
+  const label = (s) => clipText(String(s.text).split('\n')[0].replace(/^#+\s*/, ''), 20, '')
   const core = sections.filter((s) => s.keep)
   const opt = sections.filter((s) => !s.keep)
   let used = core.reduce((n, s) => n + s.text.length + 1, 0)
@@ -410,12 +418,37 @@ export function buildSections(model, opts = {}) {
   // 四道门走完**不再加门**，之后长的是这张清单：喜欢什么、绝不做哪几件事。
   // 每条都有代价背书（疤，或同一件事被反复复现），所以它不是口号，是站住过的地方。
   // 写成核心段：立场被预算裁掉一次，她在同类情境里就会重新演一遍——等于白长。
-  if (model.beliefs?.length) {
-    const stanceText = stanceSection(buildStances(model))
-    if (stanceText) push(stanceText, true)
-  }
+  // 0.9.7 U2/U3：清单现在还收「拒绝过的事」（stance.js 第三类来源）。
+  // 先算一次存着，「你拒绝过」那段用同一份结果去重，别让同一件事占两遍预算。
+  const stanceList = (model.beliefs?.length || model.refusals?.length) ? buildStances(model) : []
+  const stanceText = stanceSection(stanceList)
+  if (stanceText) push(stanceText, true)
 
   // ---- 可选段（按优先级）----
+  // 0.9.7 T1：她自己说出口、带锚点、但没认领的那句话。
+  // 只取最近 1 条、不超过 21 天。它不是"设定"，是一面回音板——
+  // 一句话再看见一次，才有机会接着往下想；摆多了就是把聊天复述进身份文档。
+  if (opts.echo !== false) {
+    const t0 = opts.now ?? Date.now()
+    const said = (Array.isArray(model.looseSaid) ? model.looseSaid : [])
+      .map((s) => ({
+        ...s,
+        // 她主动说的那句在事件流里带着「（她主动说）」前缀（proactive.js 加的），
+        // 那是我们做的标注，不是她的话。摆进身份文档前必须剥掉，否则等于
+        // 把工具的痕迹摆在她面前；先剥再算字数，不然 7 个字的旁注会挤掉短句。
+        text: String(s?.text ?? '').trim().replace(/^（她主动说）\s*/, '').trim(),
+      }))
+      .filter((s) => s.text.length >= 6 && s.text.length <= 60)
+      // 只报"我看了什么"的句子不摆：那不是她的话，是她的行程。
+      .filter((s) => !/^(我看了|我刚|我刷了|今天看了|我翻到)/.test(s.text))
+      .filter((s) => {
+        const t = Date.parse(s.at ?? '')
+        return Number.isFinite(t) && t0 - t <= ECHO_MAX_AGE_DAYS * 86400000
+      })
+      .sort((a, b) => Date.parse(b.at) - Date.parse(a.at))
+      .slice(0, ECHO_MAX_LINES)
+    if (said.length) push(['## 你最近说过的几句话', `- 「${said[0].text}」`].join('\n'))
+  }
   // 她自己说过的话：人格的实体，优先级最高。
   // 2026-10-24：取"最显著的 3 条"，不是"最新的 3 条"（derive.js 已经排好序）。
   if (model.beliefs.length) {
@@ -494,7 +527,11 @@ export function buildSections(model, opts = {}) {
     push(lines.join('\n'))
   }
 
-  if (model.refusals.length) {
+  // 已升格进「我站哪边」的那件事不再重复摆一遍（0.9.7 U3）：
+  // 同一个场景写两遍，既白吃 2400 字预算，也读起来像在强调。
+  const promoted = new Set(stanceList.flatMap((s) => s.members ?? []))
+  const looseRefusals = model.refusals.filter((r) => !promoted.has(r.id))
+  if (looseRefusals.length) {
     // P1 第二块（2026-10-24）：拒绝不再只有一句原话，还带着"他听完怎么反应"。
     // 写法刻意不解释、不打分——只陈述事实，让判断留给她自己。
     const said = {
@@ -505,7 +542,7 @@ export function buildSections(model, opts = {}) {
       other: '',
     }
     const lines = ['## 你拒绝过']
-    for (const r of model.refusals.slice(-3)) {
+    for (const r of looseRefusals.slice(-3)) {
       // issue #97（2026-11-09）：object 是从原话里切出来的前缀，原话已经整句摆在前面了。
       // 再拼一次就是同一段话的 80 字截断副本，还会断在字中间（真机上断在「抹」）。
       // 只有原话里找不到它时才补——那种情况才真的多给了信息。
@@ -563,7 +600,7 @@ export function toolBrief(extra = [], { restricted = true } = {}) {
     '你刚才调过哪些工具、看过什么，以记录为准。没调过的，别说自己调过。',
     // 2026-11-09（用户 m00002）：能力地图第二层补到 bili_watch 自己身上。
     // 原来只写「给它一个视频号」，那是动作不是处境——她得先知道什么时候会想到看画面。
-    '另有一个 bili_watch：想知道一条视频的画面里到底是什么的时候，给它一个视频号，它会把那几帧截下来给你看。',
+    '另有一个 bili_watch：光看标题和简介还想知道画面里到底是什么，就给它一个视频号，它把几帧截下来给你看。',
     '看了就是看了，没看懂就说没看懂。',
     // fork.4（2026-11-01）：画面里的字也是别人写的。
     // 原来只说"看了就是看了"，没交代画面里的文字算谁的——字幕、弹幕、封面大字、
@@ -571,7 +608,7 @@ export function toolBrief(extra = [], { restricted = true } = {}) {
     '画面里如果有字（字幕、弹幕、封面上的大字、视频里举的牌子），那也是别人写上去的，不是你心里冒出来的话。',
     // fork.35（2026-11-03）：她的原话「表格、界面那种小字，放大也不行」。
     // 给她一条真能放大的路，同时把边界说清（只能放大看过的、同一条一天三次）。
-    '看完整条之后，要是哪一格的画面太小、字看不清，可以用 bili_zoom 说第几格：它只把那一小段重新截一次，每格比整条时大得多。',
+    '哪一格画面太小、字看不清，就用 bili_zoom 说第几格：只重截那一小段，比整条时大得多。',
     '只能放大你看过的那条——没看过就没有格子表，它会直说。',
     // 2026-10-29（用户 m01581，真机）：原来是「上面这几样是你自己的屋子里的东西」。
     // 这份文档会被出门那条会话原样带走，而那句话把工具和屋子黏在了一起——她据此
@@ -589,6 +626,7 @@ export function toolBrief(extra = [], { restricted = true } = {}) {
     // 这一段只教「怎么想」，不列清单：清单在下面各自那一段里，而哪些段在，
     // 取决于那一刻手上真有哪几样（挂不挂跟工具装没装必须是同一个判据）。
     '想不起来该用哪一样的时候，别从名字往下数。从眼前这件事想起：我卡在哪一步——是想不起过去、是怕忘、是想要个东西、还是有话想说。',
+    '有的事分两层：先翻到（标题、列表、一句话），再决定要不要真的看它。翻到不等于看过——停在哪一层，你自己定。',
     // 第三层「怎么调」不在身份文档里复述：参数、枚举、默认值都在工具自己的说明里。
     // 写两遍只会让她在两份说法之间挑一个，挑错的那次还以为是工具坏了。
     '下面几段讲的是各自派什么用场；真要动手时，参数怎么写在那件东西自己的说明里，拿不准就先看一眼，别猜。',

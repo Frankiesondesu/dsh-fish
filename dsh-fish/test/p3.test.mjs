@@ -405,3 +405,9 @@ test('她只在会话里回话（没调 growth_commit）时，herReply 也要带
     assert.equal(r.note, '她回了，但这句没写进事件流（没调 growth_commit）。', '上游 #51：回了话但没落盘要说清，不能报「她这次没说话」也不能装没事')
   } finally { await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) }
 })
+
+test('发图时提示的那一行是成品 markdown，并且写着别加斜杠（issue #99）', async () => {
+  const src = await readFile(new URL('../lib/say.js', import.meta.url), 'utf8')
+  assert.match(src, /前面别加斜杠/, '提示里要写明别在前面加斜杠')
+  assert.match(src, /!\[图\]\(\$\{imagePath\}\)/, '提示直接给成品，别让她自己拼')
+})

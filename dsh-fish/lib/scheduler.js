@@ -219,6 +219,26 @@ function watchTurnEnd(ctx, sessionId, done) {
   return { off, once, get fired() { return fired } }
 }
 
+/**
+ * 这一天是不是「停下来想一想」的日子，且还没递过（issue #101）。
+ *
+ * 为什么要单独成函数：空醒（摆料）几乎每天都成立，而那句提示原来被 `!free` 挡着——
+ * 于是只要摆料开着、窗口里有旧句子，它基本响不了。现在这个判据要早于「判空醒」算，
+ * 好让这一轮不判 table、把这句递出去；判据本身也得能单测。
+ *
+ * @param {object} o
+ * @param {number} o.every   memory.sleepEveryDays（0 = 不用提醒）
+ * @param {number} o.day     成长日（growthDay；不是自然日）
+ * @param {string} o.dk      当天 dateKey
+ * @param {object[]} [o.events] 全量事件（查 `meta sleep:<dk>`）
+ */
+export function sleepPromptDue({ every = 0, day = 1, dk = '', events = [] } = {}) {
+  const n = Number(every ?? 0)
+  if (!(n > 0) || !(day > 1) || day % n !== 0) return false
+  const key = `sleep:${dk}`
+  return !(Array.isArray(events) ? events : []).some((e) => e?.type === 'meta' && String(e.text ?? '').startsWith(key))
+}
+
 export function startScheduler(ctx, deps = {}) {
   const root = deps.root ?? rootDir()
   const log = deps.log ?? ((...a) => console.log('[dsh-fish]', ...a))
@@ -1056,7 +1076,7 @@ export function browseDigestLine(items, opts = {}) {
   // 今天还没醒过（since=0）时，这确是「今天」；醒过一次之后，数字只覆盖
   // 上次醒来之后那一段，就别再说成「今天」，否则同一个「今天」两句不同口径。
   const head = since > 0 ? '上次醒来之后，你自己又翻到了' : '今天你自己又翻到了'
-  return `${head} ${countPhrase(all.length)}：${names}${more}。想看哪条，自己点开。`
+  return `${head} ${countPhrase(all.length)}：${names}${more}。想看哪条，用 bili_look 打开它；想知道画面是什么样，用 bili_watch 看一眼。`
 }
 
 /**
@@ -1106,16 +1126,24 @@ async function wake(ctx, root, model, config, decision, dk, log, deps = {}) {
   // 旧句子：判「要不要空醒」要用渲染好的那段，摆桌子要的是原始行——一次算好两处都用。
   let staleRows = []
   let free = null
+  // 「每 N 天的想一想」这一天要不要递（issue #101，2026-11-09）。
+  // 为什么要在这一层算：空醒（table）几乎每天都成立，而「想一想」原来被 `!free` 挡着——
+  // 于是只要摆料开着、窗口里有旧句子，那句提示就基本响不了，设置页那行字等于骗人。
+  // 现在倒过来：这一天先不判空醒，摆料顺延到下一次醒来，仍按正常叫醒把这句递出去。
+  let sleepDue = false
   {
     try {
       const { events: evs } = await readEvents(root)
+      // 判据与下面那段一致：用 growthDay 取模（不是自然日），同一天只递一次。
+      const everySleep = Number(config?.memory?.sleepEveryDays ?? 0)
+      sleepDue = sleepPromptDue({ every: everySleep, day: model.day, dk, events: evs })
       // 2026-11-06（issue #42）：「兴趣」关掉时不再摆旧句子。
       // 原来 freeWakeFor 只要 tableText 非空就判成 table，而 tableText 根本不看 interest 开关——
       // 于是「关掉摆东西」之后，每 6 小时还是会因为旧句子空醒一次，而且那一轮既不想一想、
       // 也不给规则申请、也不给「今天到这里」：14 天里 14 次全是旧句子。
       // 旧句子属于「桌上那几样东西」里的一样，跟着兴趣开关走才自洽。
       const staleOn = config?.interest?.enabled !== false
-      if (staleOn && !dreamOn(evs, model.day).length) {
+      if (staleOn && !sleepDue && !dreamOn(evs, model.day).length) {
         const shownToday = evs.some((e) => e?.type === 'meta' && String(e.text ?? '').startsWith(`table:${dk}`))
         const [{ outings }, { possessions }] = await Promise.all([readOutings(root), readPossessions(root)])
         const tripSessions = new Set(
@@ -1130,7 +1158,7 @@ async function wake(ctx, root, model, config, decision, dk, log, deps = {}) {
           shownToday,
         })
       }
-      free = freeWakeFor({ tableText, events: evs, dk, now: now.getTime(), config })
+      free = sleepDue ? null : freeWakeFor({ tableText, events: evs, dk, now: now.getTime(), config })
     } catch (err) {
       log('dream table', err?.message ?? err)
     }
@@ -1165,6 +1193,8 @@ async function wake(ctx, root, model, config, decision, dk, log, deps = {}) {
   // 只留一行便条：上一次醒来之后她又翻到了哪几条；想看哪条，她自己调 bili_look / bili_watch。
   // 断网（biliOn 为假）时不念：身份文档说她这会儿出不去，bili_look 也回打不开，
   // 这一行却叫她「自己点开」，同一轮里三种说法。断网前记下、还没念过的也一并不念。
+  // 念进这一行的 BV 号先攒着，真递进去了才记 `digest:`（见下面投递成功那一段）。
+  let digestShown = []
   if (config?.browse?.enabled && biliOn(config)) {
     try {
       // 现读一遍：tick 开头那份快照是「这一轮开始前」的，安静刷刚写的 browse: 不在里面，
@@ -1180,14 +1210,9 @@ async function wake(ctx, root, model, config, decision, dk, log, deps = {}) {
         parts.push('', line)
         // 只记真念出来的那几条：剩下的留给下一次醒来，否则「十几条」里
         // 没被点名的一直轮不到，等于白翻。
-        const shown = fresh.slice(0, DIGEST_NAMES_MAX).map((x) => x.bvid)
-        if (shown.length) {
-          await appendEvent(
-            { type: 'meta', text: `${DIGEST_PREFIX}${dk} ${shown.join(' ')}` },
-            { source: 'timer' },
-            root,
-          ).catch(() => {})
-        }
+        // 这里只攒、不记：后面取不到屋子会话、收摊、处境被清空、投递失败都会让这一轮
+        // 根本没开口，先记了的话这几条就被当成「提过」，以后再也不念。
+        digestShown = fresh.slice(0, DIGEST_NAMES_MAX).map((x) => x.bvid)
       }
     } catch { /* 一行便条拖不垮一次唤醒 */ }
   }
@@ -1329,14 +1354,10 @@ async function wake(ctx, root, model, config, decision, dk, log, deps = {}) {
   // 判据用 growthDay 取模（不是自然日），这样改了 growthDays 也不会突然连发。
   // 同一天只用一次，靠 `meta sleep:<dk>` 兜住。
   // 做法写在身份文档（SLEEP_BRIEF），这里只给一句时机标记。
-  const every = Number(config?.memory?.sleepEveryDays ?? 0)
+  // 2026-11-09（issue #101）：这一天优先于空醒——判据与「要不要摆料」同在一处算好（`sleepDue`），
+  // 摆料顺延到下一次醒来。原来写的是 `!free && …`，空醒一封口这句就永远轮不到。
   let askedSleep = false
-  // 空醒里不再叠一句「停下来想一想」：那一轮本来就是空的，多一句就成了安排。
-  if (!free && every > 0 && model.day > 1 && model.day % every === 0) {
-    const events0 = (await readEvents(root).catch(() => ({ events: [] }))).events
-    const doneToday = events0.some((e) => e?.type === 'meta' && String(e.text ?? '').startsWith(`sleep:${dk}`))
-    if (!doneToday) { parts.push('', SLEEP_TODAY); askedSleep = true }
-  }
+  if (sleepDue) { parts.push('', SLEEP_TODAY); askedSleep = true }
 
   // ---- 规则解禁申请（R3，2026-10-24）----
   // 时机：由「最后一条证据是哪天」+ 稳定偏移（1–3 天）算出来，不用随机数（每次 tick 重算会抖）。
@@ -1508,6 +1529,15 @@ async function wake(ctx, root, model, config, decision, dk, log, deps = {}) {
     // 所以投递失败不会白白吃掉这一次约定——下一个落点还会再试。
     if (deps.apptDue) {
       await markNotified(root, deps.apptDue.id, now.getTime()).catch((err) => log('appoint notify failed', err?.message ?? err))
+    }
+    // 便条里念到的那几条，同一个道理：递进去了才算「提过」。
+    // 以前在取会话之前就记，屋子没接上、这次没开口，那几条也被当成念过，以后再也轮不到。
+    if (digestShown.length) {
+      await appendEvent(
+        { type: 'meta', text: `${DIGEST_PREFIX}${dk} ${digestShown.join(' ')}` },
+        { source: 'timer' },
+        root,
+      ).catch(() => {})
     }
     // 空醒也要记账：`table:<dk>` 让摆料一天只摆一次，`think:<dk>` 让想一想一天只空一次。
     if (free) {
