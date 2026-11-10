@@ -110,6 +110,8 @@ export const SETTINGS = [
   { group: '规则与申请', key: 'rules.holdDays', label: '几天不处理算搁置', kind: 'num', min: 1, max: 30, step: 1, hint: '搁置不算驳回、不加重冷却' },
   { group: '规则与申请', key: 'rules.cooldownDays', label: '被驳回后隔几天才能再提', kind: 'num', min: 1, max: 30, step: 1, hint: '天' },
 
+  { group: '询问', key: 'ask.qqOnly', label: '只在 QQ 里问她的事', kind: 'bool', hint: '开了以后 ask_owner 不再在 DSH 会话里弹询问卡（那边没人点会把她卡住 5 分钟），改走 QQ 推送；她这一轮先回来，答案下一轮才知道' },
+
   { group: '出门', key: 'outing.ack', label: '出门说明卡已看过一遍', kind: 'bool', hint: '一次性确认；看过的不用再看' },
   { group: '出门', key: 'outing.enabled', label: '她能出门进真工作区', kind: 'bool', danger: true, hint: '那儿有 bash/read/write，读到的东西直接进她那条会话的上下文。默认关' },
 
