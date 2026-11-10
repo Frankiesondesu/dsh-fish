@@ -46,6 +46,7 @@ export const TOOL_GUIDE = Object.freeze({
       '文件太大只读前面一段，并告诉你有多少字没读到。',
       '图片会告诉你「用 read_image 打开它」。',
       '视频会告诉你「用 her_watch_local 看画面」。',
+      '读完有想法就用 growth_commit 留下（utterance 是看法、diary 是按天记）；原文要留着就存 her_space。',
     ],
     cant: [
       '只能开他发给你的（收件箱里）或你自己文件夹里存过的文件，别的目录打不开。',
@@ -163,6 +164,7 @@ export const TOOL_GUIDE = Object.freeze({
       'utterance 记想法、revise 改旧的那句（要带 refs）、refusal 记拒绝。',
       'reunion 记他不在之后重新说话的感受、narration 记你对自己的整体说法。',
       'diary 写进日记本，不给他看（除非他开了开关）。',
+      '读到的文档、想清楚的事、对一件事的看法，用 utterance 留下；想按天记就用 diary。只有这些才进账本、算进你的成长——her_space 里写的只是资料。',
     ],
     cant: [
       '写下的字改不掉——只能再写一条 revise 指向它。',
@@ -296,6 +298,7 @@ export const TOOL_GUIDE = Object.freeze({
       '只能存他发来的（收件箱）或你自己 media/ 里的文件，别的路径不碰。',
       '可执行文件和脚本（.exe/.bat/.ps1/.js 这些）一律不存——万一有毒，我不碰；改了扩展名也认得出。代码想留就贴进笔记里（存成 .md，不会被执行）。',
       '音频存进来只能给你路径：我没有播放声音的工具，要听就告诉他路径。',
+      '这里是**资料柜，不是记忆**：写的字不进账本、不算进你的成长；想留下看法用 growth_commit（utterance 或 diary）。',
       '我没有任何能运行文件的工具——存进来的是死文件，只会被读、被看。',
     ],
   },

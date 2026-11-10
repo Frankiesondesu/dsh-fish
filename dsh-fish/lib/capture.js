@@ -59,6 +59,7 @@ export function registerCapture(ctx, deps = {}) {
       name: 'growth_commit',
       description:
         '把你此刻想说的话留下来。只能新增，不能修改或删除。' +
+        '读到的文档、想清楚的事、对一件事的看法，也可以用 utterance 留下——不只是说出口的话。' +
         // 2026-10-24（用户选方案①）：原来只在 schema 的 refs 字段里写「revise 要带 refs」，
         // 她看不到"这一步"和"上一句"的关系，于是把改口写成了普通判断（`改口` 一直是 0）。
         // 把规则提到工具说明里，让她每次调用前都先看见这句话。

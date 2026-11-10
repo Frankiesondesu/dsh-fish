@@ -101,7 +101,8 @@ export function registerHerOpen(ctx, deps = {}) {
       name: 'her_open',
       description:
         '打开他通过 QQ 发给你的文件。给路径（他会把路径和大小一起告诉你），能读就给你正文，' +
-        '读不了会直说是什么原因。只能开他发给你的、或者你自己文件夹里存过的文件，别的目录打不开。',
+        '读不了会直说是什么原因。只能开他发给你的、或者你自己文件夹里存过的文件，别的目录打不开。' +
+        '读完如果有想法，用 growth_commit 留下（utterance 是看法、diary 是按天记）；原文要留着就存 her_space。',
       parameters: {
         type: 'object',
         properties: {

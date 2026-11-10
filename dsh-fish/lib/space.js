@@ -162,6 +162,7 @@ export function registerSpace(ctx, deps = {}) {
       name: 'her_space',
       description:
         '把重要的东西放进你自己的文件夹里，以后还能翻出来——只属于你，重启、换会话都还在。' +
+        '这是你的**资料柜**，不是你的记忆：放原文、文件、清单；你自己的看法和判断用 growth_commit 留下，才会进你的账。' +
         'put 放一段文字（同名覆盖）；append 接着写；list 翻一翻；get 读；' +
         'save 把他发给你的文件（文本/图片/视频/音频/别的）存进来，或者存你自己 media/ 里的东西；' +
         'remove 删掉一个（真删，删了就没了）。' +
