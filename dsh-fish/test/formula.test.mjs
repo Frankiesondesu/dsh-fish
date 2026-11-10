@@ -17,6 +17,8 @@ import {
   renderFormula,
   registerFormula,
   browserPath,
+  splitBlocks,
+  formatBlockReport,
 } from '../lib/formula.js'
 
 // ── 切稿：哪些是公式、哪些是字 ─────────────────────────────
@@ -203,6 +205,74 @@ test('真渲染：中文 + 行内公式 + aligned 多行推导，产出合法 PN
   } finally {
     // Edge 的 profile 就在这个临时目录里，Windows 上可能还有句柄没放——
     // 删不掉就算了（系统自己清 tmp），别把一次成功的渲染判成失败
+    await rm(root, { recursive: true, force: true }).catch(() => {})
+  }
+})
+
+// ── 草稿模式（2026-11-10，用户定案：按空行切段 + 段 id + 自动预览 + 导出即删）──
+
+test('splitBlocks：按空行切段，$$ 内部的空行不拆', () => {
+  assert.deepEqual(splitBlocks('第一段\n\n第二段'), ['第一段', '第二段'])
+  assert.deepEqual(splitBlocks('a\nb\n\nc'), ['a\nb', 'c'], '连续非空行是一段')
+  const aligned = '$$\\begin{aligned}\na &= 1\n\nb &= 2\n\\end{aligned}$$'
+  assert.deepEqual(splitBlocks(aligned), [aligned], '$$ 内部的空行不拆段')
+  assert.deepEqual(splitBlocks('  \n\n '), [])
+})
+
+test('formatBlockReport：按段 id 列字数与开头', () => {
+  const s = formatBlockReport([{ id: 'p1', text: '第一段' }, { id: 'p2', text: 'x'.repeat(80) }], { head: 10 })
+  assert.match(s, /p1 3 字：第一段/)
+  assert.match(s, /p2 80 字：xxxxxxxxxx…/, '长段要截断，回执不能变成长文')
+})
+
+test('公式草稿生命周期：增改自动预览，export 后删稿', { timeout: 180_000 }, async () => {
+  const exe = browserPath()
+  const root = await mkdtemp(join(tmpdir(), 'fish-formula-draft-'))
+  try {
+    const registered = []
+    const ctx = { tools: { register: (t) => registered.push(t) } }
+    registerFormula(ctx, { root, log: () => {} })
+    const def = registered[0]
+    const exec = { session: {} }
+
+    const created = await def.execute({ action: 'create', content: '第一段 $a^2$\n\n第二段 $$b^2$$' }, exec)
+    assert.equal(created.ok, true, created.note)
+    assert.match(created.note, /d1/)
+    assert.match(created.note, /切了 2 段/)
+    assert.match(created.note, /p1/)
+    assert.match(created.note, /p2/)
+    assert.match(created.note, /整页变了是正常的/, '流式重排要说真')
+
+    if (!exe) {
+      // 没有浏览器：只能验到「如实说排不出来」，别假装通过
+      const out = await def.execute({ action: 'export', draft: 'd1' }, exec)
+      assert.equal(out.ok, false)
+      assert.match(out.note, /Edge|Chrome/)
+      return
+    }
+
+    const edited = await def.execute({ action: 'edit', draft: 'd1', block: 'p2', text: '改过的第二段 $c^2$' }, exec)
+    assert.equal(edited.ok, true, edited.note)
+    assert.match(edited.note, /改了 p2/)
+    assert.match(edited.note, /预览（临时图，不是成品/)
+    assert.match(edited.note, /media\/board\/f-d1-r\d+\.png/)
+
+    const added = await def.execute({ action: 'add', draft: 'd1', content: '第三段 $\\frac{1}{2}$' }, exec)
+    assert.equal(added.ok, true, added.note)
+    assert.match(added.note, /p3/)
+
+    const exported = await def.execute({ action: 'export', draft: 'd1' }, exec)
+    assert.equal(exported.ok, true, exported.note)
+    assert.match(exported.path, /media[\\/]formula[\\/]formula-\d{4}-\d{2}-\d{2}-\d{2}\.png$/)
+    assert.match(exported.note, /已经删了，不能再改/)
+    assert.match(exported.note, /没有发给他/)
+    const png = await readFile(exported.path)
+    assert.deepEqual([...png.subarray(0, 4)], [0x89, 0x50, 0x4e, 0x47])
+
+    const gone = await def.execute({ action: 'edit', draft: 'd1', block: 'p1', text: 'x' }, exec)
+    assert.equal(gone.ok, false)
+    assert.match(gone.note, /没有 d1 这份草稿/, '导出后草稿真没了')
+  } finally {
     await rm(root, { recursive: true, force: true }).catch(() => {})
   }
 })

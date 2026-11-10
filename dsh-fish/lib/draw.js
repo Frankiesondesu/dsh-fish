@@ -370,6 +370,52 @@ export function formatMeasureReport(report, { maxLines = 14 } = {}) {
   return lines.join('\n')
 }
 
+/** 画板预览图：media/board/<板 id>-r<修订号>.png。必须落 media/ 下，桥的 readLocalImage 才放行。 */
+function previewPath(root, id, rev) {
+  const dir = join(root, 'media', 'board')
+  mkdirSync(dir, { recursive: true })
+  return join(dir, `${id}-r${rev}.png`)
+}
+
+/** 删掉某块板的旧预览图（keepRev < 0 = 全删）。 */
+function cleanPreviews(root, id, keepRev) {
+  const dir = join(root, 'media', 'board')
+  try {
+    for (const f of readdirSync(dir)) {
+      if (!f.startsWith(id + '-r') || !f.endsWith('.png')) continue
+      if (keepRev >= 0 && f === `${id}-r${keepRev}.png`) continue
+      try { rmSync(join(dir, f), { force: true }) } catch { /* 删不掉就算了 */ }
+    }
+  } catch { /* 目录还没有 */ }
+}
+
+/** 画布参数夹紧（create 时用；空 items 不能走 planDrawing）。 */
+function normCanvas(canvas = {}) {
+  const w = Math.max(LIMITS.canvasMin, Math.min(LIMITS.canvasMax, Number(canvas?.w) || 480))
+  const h = Math.max(LIMITS.canvasMin, Math.min(LIMITS.canvasMax, Number(canvas?.h) || 360))
+  return { w, h, bg: colorOf(canvas?.bg, '#ffffff') }
+}
+
+/**
+ * 画板回执：每一笔按 **id** 列几何，她才知道「改 i3」指的是哪一笔。
+ * 与 formatMeasureReport 分开：那个按「第 N 笔」说（一次性画法的旧口径），
+ * 这个按 id 说（画板模式，用户 2026-11-10 定案用笔画 id 定位）。
+ */
+export function formatBoardReport(report, idMap = [], { maxLines = 16 } = {}) {
+  if (!report || !Array.isArray(report.items) || !report.items.length) return ''
+  const nameOf = (i) => idMap[i - 1] || `#${i}`
+  const lines = []
+  for (const it of report.items.slice(0, maxLines)) {
+    lines.push(`${nameOf(it.i)} ${it.t}@${r1(it.x)},${r1(it.y)} ${r1(it.w)}×${r1(it.h)}`)
+  }
+  if (report.items.length > maxLines) lines.push(`…还有 ${report.items.length - maxLines} 笔没列（直接看图）`)
+  const b = report.bbox
+  if (b) lines.push(`整张画占 ${b.x1},${b.y1} → ${b.x2},${b.y2}`)
+  const clipped = Array.isArray(report.clipped) ? report.clipped : []
+  if (clipped.length) lines.push(`⚠ 出界会被裁：${clipped.map(nameOf).join('、')}`)
+  return lines.join('\n')
+}
+
 /** 输出文件名：draw-<日期>-<当天序号>.png，落在 media/draw/ 下。 */
 function outPathFor(root) {
   // 落在 media/ 下是有意的：桥的 readLocalImage 只放行 media/（含子目录），
@@ -388,18 +434,186 @@ export function registerDraw(ctx, deps = {}) {
   const root = deps.root ?? rootDir()
   const log = deps.log ?? (() => {})
 
+  // 画板：只在这个进程里活着（用户 2026-11-10 定案：进程内 Map，不落盘、不记账、重启即丢）。
+  // 放在 registerDraw 闭包里而不是模块级：插件启动时注册一次，天然就是「这次运行」。
+  const boards = new Map()
+  let boardSeq = 0
+  const BOARD_MAX = 8
+
+  const fail = (why) => ({ ok: false, path: '', note: why })
+  const boardHint = () => (boards.size ? `现在有：${[...boards.keys()].join('、')}` : '现在一块都没有')
+  // 空 text 不渲染（planDrawing 会跳过它）——统一在渲染前滤掉，
+  // 保证 report.items 的下标与 idMap 一一对应，几何回执不会串笔。
+  const liveItems = (items) =>
+    items.filter((it) => !(String(it?.type ?? '') === 'text' && !String(it?.text ?? '').trim()))
+
+  function createBoard(args) {
+    if (boards.size >= BOARD_MAX) {
+      return fail(`同时最多 ${BOARD_MAX} 块画板，先 export 一块（或 discard）再开新的。${boardHint()}。`)
+    }
+    boardSeq += 1
+    const id = `b${boardSeq}`
+    const cv = normCanvas(args?.canvas)
+    boards.set(id, { id, canvas: cv, items: [], seq: 0, rev: 0 })
+    return {
+      ok: true,
+      path: '',
+      note: [
+        `画板 ${id} 建好了（${cv.w}×${cv.h}）。`,
+        '用 add 把笔放上去；edit 按 id 改指定的一笔；remove 按 id 删；export 才出成品并删掉这块板。',
+        '⚠ 画板只在这次运行里活着，进程重启就没了。',
+      ].join('\n'),
+    }
+  }
+
+  // 候选 items 先 plan + 渲一张预览，通过才落回板子（坏参数不会污染板子）。
+  async function renderBoard(b, items) {
+    const live = liveItems(items)
+    const plan = planDrawing({ canvas: b.canvas, items: live })
+    if (!plan.ok) return { ok: false, why: plan.why }
+    const rev = b.rev + 1
+    const out = previewPath(root, b.id, rev)
+    const report = await renderJob(plan.job, out, log)
+    cleanPreviews(root, b.id, rev)
+    return { ok: true, report, out, idMap: live.map((x) => x.id), rev }
+  }
+
+  function okBoard(b, r, what) {
+    return {
+      ok: true,
+      path: r.out,
+      note: [
+        `${what}。画板 ${b.id} 现在 ${b.items.length} 笔。`,
+        `预览（临时图，不是成品，这个路径别拿去发）：${slashed(r.out)}`,
+        formatBoardReport(r.report, r.idMap),
+        '哪里不对就 edit 指定 id（或 remove 掉重加）；export 才出成品并删掉这块板。',
+        '板子只在这次运行里活着，进程重启就没了。',
+      ].filter(Boolean).join('\n'),
+    }
+  }
+
+  async function addItems(b, args) {
+    const raw = Array.isArray(args?.items) ? args.items : []
+    if (!raw.length) return fail('add 要把要画的笔放在 items 里（数组，一次可以给多笔）。')
+    if (b.items.length + raw.length > LIMITS.itemsMax) {
+      return fail(`一块画板最多 ${LIMITS.itemsMax} 笔，现在 ${b.items.length} 笔，再加 ${raw.length} 笔放不下。`)
+    }
+    const added = raw.map((it) => ({ ...it, id: 'i' + (++b.seq) }))
+    const candidate = [...b.items, ...added]
+    const r = await renderBoard(b, candidate)
+    if (!r.ok) return fail(r.why)
+    b.items = candidate
+    b.rev = r.rev
+    return okBoard(b, r, `加了 ${added.length} 笔：${added.map((x) => x.id).join('、')}`)
+  }
+
+  async function editItems(b, args) {
+    const patches = Array.isArray(args?.items) ? args.items : []
+    if (!patches.length) return fail('edit 要把改动放在 items 里，每项必须带 id（比如 {id:"i2", x:120}）。')
+    const candidate = b.items.map((x) => ({ ...x }))
+    for (const p of patches) {
+      const pid = String(p?.id ?? '')
+      const idx = candidate.findIndex((x) => x.id === pid)
+      if (idx === -1) return fail(`画板上没有 id=${pid || '（空）'} 这一笔。现有：${candidate.map((x) => x.id).join('、')}`)
+      const cur = candidate[idx]
+      if (p.type && String(p.type) !== String(cur.type)) {
+        return fail(`${pid} 是 ${cur.type}，不能直接改成 ${p.type}；先 remove 掉再 add 一笔新的。`)
+      }
+      candidate[idx] = { ...cur, ...p, id: cur.id }
+    }
+    const r = await renderBoard(b, candidate)
+    if (!r.ok) return fail(r.why)
+    b.items = candidate
+    b.rev = r.rev
+    return okBoard(b, r, `改了 ${patches.length} 笔：${patches.map((x) => x.id).join('、')}`)
+  }
+
+  async function removeItems(b, args) {
+    const ids = Array.isArray(args?.ids) ? args.ids.map((x) => String(x)) : []
+    if (!ids.length) return fail('remove 要把要删的 id 放在 ids 里（比如 {ids:["i2"]}）。')
+    const missing = ids.filter((id) => !b.items.some((x) => x.id === id))
+    if (missing.length) return fail(`画板上没有这些 id：${missing.join('、')}。现有：${b.items.map((x) => x.id).join('、')}`)
+    const candidate = b.items.filter((x) => !ids.includes(x.id))
+    if (!candidate.length) {
+      b.items = []
+      b.rev += 1
+      cleanPreviews(root, b.id, -1)
+      return { ok: true, path: '', note: `删掉了 ${ids.join('、')}。画板 ${b.id} 现在空了（还能继续 add）。` }
+    }
+    const r = await renderBoard(b, candidate)
+    if (!r.ok) return fail(r.why)
+    b.items = candidate
+    b.rev = r.rev
+    return okBoard(b, r, `删掉了 ${ids.join('、')}`)
+  }
+
+  async function exportBoard(b) {
+    const live = liveItems(b.items)
+    if (!live.length) return fail('画板是空的，没有可导出的东西。先用 add 画点什么。')
+    const plan = planDrawing({ canvas: b.canvas, items: live })
+    if (!plan.ok) return fail(plan.why)
+    const { out } = outPathFor(root)
+    const report = await renderJob(plan.job, out, log)
+    // 导出成功才删板：渲染失败就留着，她还能接着改。
+    boards.delete(b.id)
+    cleanPreviews(root, b.id, -1)
+    const shown = slashed(out)
+    return {
+      ok: true,
+      path: out,
+      note: [
+        `导出好了，存在 ${shown}。没有发给他。`,
+        formatMeasureReport(report),
+        `画板 ${b.id} 已经删了，不能再改；想再调就重新 create 一块。`,
+        `想发就把它写成 ![白板](${shown}) 放进 her_say，桥会把 media/ 下的图单独发成一条 QQ 图片消息。`,
+      ].filter(Boolean).join('\n'),
+    }
+  }
+
+  function discardBoard(b) {
+    boards.delete(b.id)
+    cleanPreviews(root, b.id, -1)
+    return { ok: true, path: '', note: `画板 ${b.id} 丢了（没导出，什么图都没留下）。` }
+  }
+
+  async function runBoardAction(action, args) {
+    if (action === 'create') return createBoard(args)
+    const id = String(args?.board ?? '').trim()
+    const b = boards.get(id)
+    if (!b) {
+      return fail(`没有 ${id || '（空 id）'} 这块画板。画板只在这次运行里活着，进程重启就没了——重新 create 一块。${boardHint()}。`)
+    }
+    if (action === 'add') return addItems(b, args)
+    if (action === 'edit') return editItems(b, args)
+    if (action === 'remove') return removeItems(b, args)
+    if (action === 'export') return exportBoard(b)
+    if (action === 'discard') return discardBoard(b)
+    return fail(`不认识的 action=${action}。能用：create / add / edit / remove / export / discard；不带 action 就是一次画一整张。`)
+  }
+
   ctx.tools.register(
     defineTool({
       name: 'her_draw',
       description: [
         '在一张白板上画画：线条、矩形、圆、箭头、分数线、写字，位置大小颜色都由你定。',
-        '画好了存成 PNG（只存，不会发给他）。讲题排算式、画示意图、画流程、圈重点都用它。',
+        '讲题排算式、画示意图、画流程、圈重点都用它。',
+        '两种用法：① 直接给 canvas + items，一次画成一整张成品；② 先 create 一块画板，用 add 一笔笔加、edit 按 id 改指定的一笔、remove 按 id 删，每次改动自动出一张临时预览给你 read_image 看，最后 export 才出成品。',
         '回执会附上每一笔的实测宽高和整张画占到哪，对齐靠它，不用靠画三回。',
+        '⚠ 画板只在这次运行里活着（重启就没了）；预览图不是成品，别拿预览路径去发；export 成功后画板立刻删除。',
         '画得直不直、好不好看是你的手艺——它是白板，不是画师。',
       ].join(''),
       parameters: toJsonSchema({
         type: 'object',
         properties: {
+          action: {
+            type: 'string',
+            enum: ['create', 'add', 'edit', 'remove', 'export', 'discard'],
+            description:
+              '画板动作。不带 action = 一次画一整张成品（老用法，仍可用）。' +
+              'create 建一块板（返回 board）；add 加笔；edit 按 id 改指定笔；remove 按 id 删；' +
+              'export 出成品并立刻删掉这块板；discard 直接丢掉板子。',
+          },
+          board: { type: 'string', description: '画板 id（create 返回的，如 b1）。add/edit/remove/export/discard 必填。' },
           canvas: {
             type: 'object',
             properties: {
@@ -414,7 +628,8 @@ export function registerDraw(ctx, deps = {}) {
             maxItems: LIMITS.itemsMax,
             items: { type: 'object' },
             description:
-              '要画的元素，从上到下叠。x,y 都是这一笔的**左上角**（文字也一样，不是基线）。' +
+              '笔画。add 时是要新增的笔；edit 时是带 id 的补丁（只写要改的字段，如 {id:"i2", x:120}）。' +
+              'x,y 都是这一笔的**左上角**（文字也一样，不是基线）。' +
               'text=写字（x,y,text,size,color,bold）；' +
               'frac=分数线（x,y,num,den,size,color）——分子分母自动量宽居中，num/den 可以写文字、{text,size}、' +
               '或者再套一个 frac（最多 3 层）；' +
@@ -423,8 +638,9 @@ export function registerDraw(ctx, deps = {}) {
               '颜色用中文名（黑/灰/红/蓝/绿/橙/黄/紫/粉/棕/浅灰/白）或 #RRGGBB。' +
               '行高大致是字号×1.75（16 号约 28）；回执里的「高」是实测值，按它往下加 y 最准。',
           },
+          ids: { type: 'array', items: { type: 'string' }, description: 'remove 要删的笔画 id（如 ["i2","i5"]）。' },
         },
-        required: ['items'],
+        required: [],
       }),
       output: {
         schema: toJsonSchema({
@@ -437,26 +653,32 @@ export function registerDraw(ctx, deps = {}) {
       async execute(args = {}, exec) {
         const who = guardWrite(deps.tenant, exec, 'her_draw')
         if (!who.ok) return { ok: false, path: '', note: who.note || '这张没画成。' }
+        const action = String(args?.action ?? '').trim()
         try {
-          const plan = planDrawing(args)
-          if (!plan.ok) {
-            logLine('warn', ['her_draw：没画成', plan.why], root)
-            return { ok: false, path: '', note: plan.why }
+          if (!action) {
+            // 旧行为（2026-11-08 起她已学会）：一次给完整画布与 items，直接出一张成品。
+            // 画板模式不能把这条吞掉——她的历史用法与旧测试都靠它。
+            const plan = planDrawing(args)
+            if (!plan.ok) {
+              logLine('warn', ['her_draw：没画成', plan.why], root)
+              return fail(plan.why)
+            }
+            const { out } = outPathFor(root)
+            const report = await renderJob(plan.job, out, log)
+            logLine('info', [`her_draw：画了一张 ${plan.job.w}×${plan.job.h}，${plan.job.items.length} 笔 → ${basename(out)}`], root)
+            // 只存不发（用户定案）：回执如实说没发，并把完整路径给她——
+            // 只写「media/draw/」她拿不到可抄的路径，就会以为只能绕表情库（11-08 她真卡在这）。
+            // 2026-11-08 再加实测几何：她连着重画了几回才把字对齐，
+            // 图她能用 read_image 看，但「这行字量出来多宽、整体占到哪」看不见，只能靠试。
+            const shown = slashed(out)
+            const note = [
+              `画好了，存在 ${shown}。没有发给他。`,
+              formatMeasureReport(report),
+              `想发就把它写成 ![白板](${shown}) 放进 her_say，桥会把 media/ 下的图单独发成一条 QQ 图片消息。`,
+            ].filter(Boolean).join('\n')
+            return { ok: true, path: out, note }
           }
-          const { out } = outPathFor(root)
-          const report = await renderJob(plan.job, out, log)
-          logLine('info', [`her_draw：画了一张 ${plan.job.w}×${plan.job.h}，${plan.job.items.length} 笔 → ${basename(out)}`], root)
-          // 只存不发（用户定案）：回执如实说没发，并把完整路径给她——
-          // 只写「media/draw/」她拿不到可抄的路径，就会以为只能绕表情库（11-08 她真卡在这）。
-          // 2026-11-08 再加实测几何：她连着重画了几回才把字对齐，
-          // 图她能用 read_image 看，但「这行字量出来多宽、整体占到哪」看不见，只能靠试。
-          const shown = slashed(out)
-          const note = [
-            `画好了，存在 ${shown}。没有发给他。`,
-            formatMeasureReport(report),
-            `想发就把它写成 ![白板](${shown}) 放进 her_say，桥会把 media/ 下的图单独发成一条 QQ 图片消息。`,
-          ].filter(Boolean).join('\n')
-          return { ok: true, path: out, note }
+          return await runBoardAction(action, args)
         } catch (err) {
           // 不吞真因（fork.13）：只说「没画成」她既不知道为什么、也没法自己改参数重画
           const why = String(err?.message ?? err).split('\n')[0].slice(0, 200)

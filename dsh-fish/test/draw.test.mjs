@@ -12,7 +12,7 @@ import { mkdtemp, rm, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { planDrawing, registerDraw, formatMeasureReport } from '../lib/draw.js'
+import { planDrawing, registerDraw, formatMeasureReport, formatBoardReport } from '../lib/draw.js'
 import { FISH_TOOLS } from '../lib/restrict.js'
 
 test('planDrawing：空画布、不认识的笔、字数超限都拒绝', () => {
@@ -196,6 +196,104 @@ test('真渲染：分数线（含嵌套）画出来，回执带实测几何', { 
     const png = await readFile(out.path)
     assert.deepEqual([...png.subarray(0, 4)], [0x89, 0x50, 0x4e, 0x47])
     assert.ok(png.length > 1500, `PNG 太小不像画（${png.length}B）`)
+  } finally {
+    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
+  }
+})
+
+// ── 画板模式（2026-11-10，用户定案：进程内 Map / 每次改动自动预览 / 导出即删 / 笔画 id）──
+
+test('formatBoardReport：按笔画 id 列几何，出界也映射回 id', () => {
+  const report = {
+    canvas: { w: 480, h: 360 },
+    items: [
+      { i: 1, t: 'text', x: 16, y: 16, w: 192.4, h: 22.1 },
+      { i: 2, t: 'rect', x: 10, y: 10, w: 100, h: 40 },
+      { i: 3, t: 'frac', x: 460, y: 10, w: 48, h: 56 },
+    ],
+    bbox: { x1: 10, y1: 10, x2: 508, y2: 66 },
+    clipped: [3],
+  }
+  const s = formatBoardReport(report, ['i1', 'i2', 'i3'])
+  assert.match(s, /i1 text@16,16 192×22/, '按 id 说，不按「第 N 笔」')
+  assert.match(s, /i2 rect@10,10 100×40/)
+  assert.match(s, /⚠ 出界会被裁：i3/, '出界也要映射回 id')
+})
+
+test('画板生命周期：增删改自动预览，export 出成品后立刻删板', { timeout: 120_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), 'fish-draw-board-'))
+  try {
+    const registered = []
+    registerDraw({ tools: { register: (t) => registered.push(t) } }, { root, log: () => {} })
+    const def = registered[0]
+    const exec = { session: {} }
+
+    const created = await def.execute({ action: 'create', canvas: { w: 480, h: 300 } }, exec)
+    assert.equal(created.ok, true, created.note)
+    assert.match(created.note, /b1/)
+    assert.match(created.note, /只在这次运行里活着/)
+
+    const added = await def.execute({
+      action: 'add',
+      board: 'b1',
+      items: [
+        { type: 'text', x: 20, y: 20, text: '第一步', size: 18 },
+        { type: 'rect', x: 100, y: 10, w: 120, h: 40, color: '蓝' },
+      ],
+    }, exec)
+    assert.equal(added.ok, true, added.note)
+    assert.match(added.note, /i1/)
+    assert.match(added.note, /i2/, '每笔要有稳定 id')
+    assert.match(added.note, /预览（临时图，不是成品/, '预览必须说清不是成品')
+    assert.match(added.note, /media\/board\/b1-r\d+\.png/, '预览要给完整路径')
+    assert.match(added.note, /只在这次运行里活着/, 'fork.13：板子的寿命要说真')
+    assert.ok(added.path.includes(join('media', 'board')), added.path)
+    const png = await readFile(added.path)
+    assert.deepEqual([...png.subarray(0, 4)], [0x89, 0x50, 0x4e, 0x47], '预览是真 PNG')
+
+    const edited = await def.execute({ action: 'edit', board: 'b1', items: [{ id: 'i2', x: 140 }] }, exec)
+    assert.equal(edited.ok, true, edited.note)
+    assert.match(edited.note, /改了 1 笔：i2/)
+    assert.notEqual(edited.path, added.path, '改动后是新的修订号，不覆盖旧预览')
+
+    const removed = await def.execute({ action: 'remove', board: 'b1', ids: ['i1'] }, exec)
+    assert.equal(removed.ok, true, removed.note)
+    assert.doesNotMatch(removed.note, /i1 text/, 'i1 删了就不该再出现在几何回执里')
+
+    const exported = await def.execute({ action: 'export', board: 'b1' }, exec)
+    assert.equal(exported.ok, true, exported.note)
+    assert.match(exported.path, /media[\\/]draw[\\/]draw-\d{4}-\d{2}-\d{2}-\d{2}\.png$/)
+    assert.match(exported.note, /已经删了，不能再改/, '导出即删必须说真')
+    assert.match(exported.note, /没有发给他/, '只存不发仍是定案')
+    const png2 = await readFile(exported.path)
+    assert.deepEqual([...png2.subarray(0, 4)], [0x89, 0x50, 0x4e, 0x47])
+
+    const gone = await def.execute({ action: 'add', board: 'b1', items: [{ type: 'text', text: 'x' }] }, exec)
+    assert.equal(gone.ok, false)
+    assert.match(gone.note, /没有 b1 这块画板/, '导出后板子真没了')
+    assert.match(gone.note, /重启就没了/)
+  } finally {
+    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
+  }
+})
+
+test('画板：找不到板 / 空板导出都要给真因，不静默新建', { timeout: 60_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), 'fish-draw-board-'))
+  try {
+    const registered = []
+    registerDraw({ tools: { register: (t) => registered.push(t) } }, { root, log: () => {} })
+    const def = registered[0]
+    const exec = { session: {} }
+
+    const noBoard = await def.execute({ action: 'add', board: 'b9', items: [{ type: 'text', text: 'x' }] }, exec)
+    assert.equal(noBoard.ok, false)
+    assert.match(noBoard.note, /没有 b9 这块画板/)
+
+    const empty = await def.execute({ action: 'create', canvas: { w: 200, h: 200 } }, exec)
+    assert.equal(empty.ok, true)
+    const exp = await def.execute({ action: 'export', board: 'b1' }, exec)
+    assert.equal(exp.ok, false)
+    assert.match(exp.note, /空的/)
   } finally {
     await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
   }
