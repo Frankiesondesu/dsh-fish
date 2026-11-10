@@ -23,6 +23,7 @@ import { intercomStatus, talk } from './intercom.mjs'
 import { readUsage } from './usage.mjs'
 import { observeData, settleAsk, decideOffer, markInboxRead, clearBiliRisk, backupBundle, restoreBundle, wakeHer, reportFor } from './observe.mjs'
 import { qqSaidOf, mergeSaid } from './said.mjs'
+import { ensurePass, isLocal, authed, loginPage, samePass, readBody, passFile, COOKIE } from './auth.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const FISH = join(HERE, '..', 'dsh-fish')
@@ -33,6 +34,8 @@ const DSH_SESSIONS = dshSessionsDir(ROOT)
 // 2026-11-07：端口可配（VIEWER_PORT 环境变量）。默认 7788 不变；
 // 主要是给测试/并行验证用——真机 viewer 在跑的时候，新代码能在旁边端口先冒烟。
 const PORT = Number(process.env.VIEWER_PORT) || 7788
+// 外部访问的密码（本机免密）：仓外文件，删掉重启会重新生成。
+const PASS = ensurePass(ROOT)
 
 // ---------------------------------------------------------------- 读数据
 
@@ -1425,6 +1428,43 @@ document.addEventListener('visibilitychange', ()=>{ if(!document.hidden) pull(fa
 // ---------------------------------------------------------------- 服务
 
 createServer(async (req, res) => {
+  // 2026-11-10 用户定案：本机免密、可读写；外部必须密码、且只读。
+  // 隧道转发的回环请求也按外部算（见 auth.mjs 的 isLocal）。
+  if (!isLocal(req)) {
+    if (req.url === '/__login') {
+      if (req.method === 'GET') {
+        res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' })
+        return res.end(loginPage())
+      }
+      if (req.method === 'POST') {
+        let key = ''
+        try { key = new URLSearchParams(await readBody(req)).get('key') ?? '' } catch { /* 体太大当空 */ }
+        if (!samePass(key, PASS)) {
+          res.writeHead(401, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' })
+          return res.end(loginPage(true))
+        }
+        res.writeHead(303, {
+          location: '/',
+          'set-cookie': `${COOKIE}=${encodeURIComponent(PASS)}; HttpOnly; SameSite=Lax; Path=/; Max-Age=2592000`,
+          'cache-control': 'no-store',
+        })
+        return res.end()
+      }
+    }
+    if (!authed(req, PASS)) {
+      if (String(req.url).startsWith('/api/')) {
+        res.writeHead(401, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
+        return res.end(JSON.stringify({ ok: false, error: '需要访问密码（外部访问只读）' }))
+      }
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' })
+      return res.end(loginPage())
+    }
+    // 外部登录后也只读：所有写接口一律拒绝
+    if (req.method === 'POST') {
+      res.writeHead(403, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
+      return res.end(JSON.stringify({ ok: false, error: '外部访问只读' }))
+    }
+  }
   try {
     if (req.url === '/api/data') {
       const data = await buildData()
@@ -1586,7 +1626,9 @@ createServer(async (req, res) => {
     res.writeHead(500, { 'content-type': 'text/plain; charset=utf-8' })
     res.end('出错了：' + String(err?.message ?? err))
   }
-}).listen(PORT, '127.0.0.1', () => {
-  console.log(`她 · 查看器： http://127.0.0.1:${PORT}`)
+}).listen(PORT, process.env.VIEWER_HOST || '0.0.0.0', () => {
+  console.log(`她 · 查看器： http://127.0.0.1:${PORT}（本机免密、可写）`)
+  console.log(`  外部访问：http://<内网或隧道地址>:${PORT}（要密码、只读）`)
+  console.log(`  访问密码：${passFile(ROOT)}`)
   console.log(`  数据：${ROOT}`)
 })
