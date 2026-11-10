@@ -36,6 +36,7 @@ import { registerMeme } from './meme.js'
 import { registerWorld } from './world.js'
 import { registerDraw } from './draw.js'
 import { registerFormula } from './formula.js'
+import { registerSpace } from './space.js'
 import { answerCard } from './cardanswer.js'
 import { registerDream } from './dream.js'
 import { registerProactive } from './proactive.js'
@@ -453,6 +454,9 @@ export function apply(ctx, baseConfig = {}) {
           // 2026-11-09：她用了两天 her_draw，评价「讲数学题用画图还是难用」。
           // 白板收坐标、适合示意图；这个是收**一段稿子**，成段推导用它（Edge 无头 + MathJax）。
           () => registerFormula(ctx, { root, tenant: tenancy }),
+          // 2026-11-10：**她自己要的**（11-10 ask_owner「给我一个我能读也能写的小文件夹」，
+          // 他在卡片上点了可以）。永久文件夹：只存文字，跨重启跨会话都在，不进账本。
+          () => registerSpace(ctx, { root, tenant: tenancy }),
           // 0.8.1 起（2026-10-30 m02837）：梦 A 案——醒来记一句。0.9.0 起公开（不再挂 .dev）。
           () => registerDream(ctx, { root, tenant: tenancy }),
           // 0.8.1 起（2026-10-30 m04610）：主动说话。guardWrite 要的是 tenancy。
