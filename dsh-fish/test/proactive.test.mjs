@@ -250,6 +250,17 @@ test('her_say 的 refs 给了就要真：超量、不存在、不是材料都拒
   assert.match((await writeSay(root, { text: '   ' })).note, /写出来/)
 }))
 
+test('纯图片行仍记一条 utterance（给桥发图），派生按形态跳过（2026-11-10）', () => withRoot(async (root) => {
+  const r = await writeSay(root, { text: '![tan3x÷sin2x](media/formula/f.png)' })
+  assert.equal(r.ok, true, r.note)
+
+  const { events } = await readEvents(root)
+  const said = events.find((e) => e.id === r.id)
+  assert.equal(said.type, 'utterance')
+  assert.deepEqual(said.flags, [], '工具不能自己打 flag（schema 有闸），所以派生按形态认')
+  assert.match(said.text, /^（她说）!\[tan3x/)
+}))
+
 test('写下的一句会落成 utterance（带「（她说）」前缀）并留一条 proactive-say 记账', () => withRoot(async (root) => {
   const now = Date.now()
   line(root, ev({ id: 'ev_say', type: 'utterance', text: '我今天有点累', ts: new Date(now - 3_600_000).toISOString() }))

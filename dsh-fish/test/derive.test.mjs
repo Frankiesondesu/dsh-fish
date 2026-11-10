@@ -50,6 +50,18 @@ test('selfmod 不入 beliefs，但留证', () => {
   assert.equal(m.beliefs[0].text, '我不太喜欢人多的地方。')
 })
 
+test('纯图片行不入 beliefs（新 media 标记与旧形态都拦，2026-11-10）', () => {
+  const evs = [
+    ev('ev_seed', 'seed', 1, '种', { source: 'system' }),
+    ev('ev_img_old', 'utterance', 1, '（她说）![第13题](media/formula/a.png)'),
+    ev('ev_img_new', 'utterance', 1, '（她说）![第14题](media/formula/b.png)', { flags: ['media'] }),
+    ev('ev_talk', 'utterance', 2, '（她说）这道题我会了。'),
+  ]
+  const m = deriveSelf(evs, { now: T0 + 2 * DAY_MS })
+  assert.equal(m.beliefs.length, 1)
+  assert.equal(m.beliefs[0].text, '（她说）这道题我会了。')
+})
+
 test('isProofOnly：selfmod 只在 utterance 上算，uncommitted 不分类型', () => {
   const flagged = (type, flags) => ev('ev_x', type, 1, '一句话', { flags })
   assert.equal(isProofOnly(flagged('utterance', ['selfmod'])), true)

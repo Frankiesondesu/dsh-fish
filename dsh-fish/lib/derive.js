@@ -593,6 +593,9 @@ export function deriveSelf(events = [], opts = {}) {
         break
 
       case 'utterance': {
+        // 2026-11-10：整行只有一个 markdown 图片 = 她发了一张图，不是她的话/判断。
+        // 新数据带 media flag；旧数据（11-09 那批 formula 图）没 flag，按形态兜底。
+        if (flags.includes('media') || /^（她说）!\[[^\]]*\]\([^)]+\)$/.test(String(ev.text ?? ''))) break
         // 2026-11-02（用户 m00680）：她在侧栏里说出口、但没调 growth_commit 认领的话，
         // 由 turns.js 补写进来并打 uncommitted。它和 selfmod 一样**只留证、不进信念**：
         // 没认领的话不该改她的称呼、不该覆盖自我叙述、不该参与固化与"新话率"。

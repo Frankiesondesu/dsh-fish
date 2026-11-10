@@ -546,6 +546,8 @@ export async function writeSay(root, { text = '', refs = [], sessionId = '', why
   const stored = []
   for (const line of lines) {
     const one = await appendEvent(
+      // 2026-11-10：纯图片行也照写 utterance——桥要靠它把 media/ 里的图发出去。
+      // 「别当判断」落在 derive.js：按形态跳过（工具不能自己打 flag，schema 有闸）。
       { type: 'utterance', text: `（她说）${line}`, refs: list, ...(sessionId ? { sessionId } : {}) },
       stamp,
       root,
