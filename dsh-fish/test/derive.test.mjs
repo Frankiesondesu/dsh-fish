@@ -54,10 +54,22 @@ test('narrative 不被对话句误设：要在句首、且不含对话指代（2
   const evs = [
     ev('ev_seed', 'seed', 1, '种', { source: 'system' }),
     ev('ev_a', 'utterance', 1, '（她说）我猜你说的"干"，是说我一直在用第一层。'),
-    ev('ev_b', 'utterance', 2, '（她说）我一直是先把事情做完再说话的那种。'),
+    ev('ev_b', 'utterance', 2, '我一直是先把事情做完再说话的那种。'),
   ]
   const m = deriveSelf(evs, { now: T0 + 2 * DAY_MS })
-  assert.equal(m.narrative?.text, '（她说）我一直是先把事情做完再说话的那种。')
+  assert.equal(m.narrative?.text, '我一直是先把事情做完再说话的那种。')
+})
+
+test('her_say 的聊天话只留证、不进 beliefs（2026-11-10）', () => {
+  const evs = [
+    ev('ev_seed', 'seed', 1, '种', { source: 'system' }),
+    ev('ev_chat', 'utterance', 1, '（她说）晚上好。'),
+    ev('ev_judge', 'utterance', 2, '我不太喜欢人多的地方。'),
+  ]
+  const m = deriveSelf(evs, { now: T0 + 2 * DAY_MS })
+  assert.equal(m.beliefs.length, 1)
+  assert.equal(m.beliefs[0].text, '我不太喜欢人多的地方。')
+  assert.equal(m.spokenSinceSeen, true, '开口这件事仍算数')
 })
 
 test('纯图片行不入 beliefs（新 media 标记与旧形态都拦，2026-11-10）', () => {
@@ -65,11 +77,11 @@ test('纯图片行不入 beliefs（新 media 标记与旧形态都拦，2026-11-
     ev('ev_seed', 'seed', 1, '种', { source: 'system' }),
     ev('ev_img_old', 'utterance', 1, '（她说）![第13题](media/formula/a.png)'),
     ev('ev_img_new', 'utterance', 1, '（她说）![第14题](media/formula/b.png)', { flags: ['media'] }),
-    ev('ev_talk', 'utterance', 2, '（她说）这道题我会了。'),
+    ev('ev_talk', 'utterance', 2, '这道题我会了。'),
   ]
   const m = deriveSelf(evs, { now: T0 + 2 * DAY_MS })
   assert.equal(m.beliefs.length, 1)
-  assert.equal(m.beliefs[0].text, '（她说）这道题我会了。')
+  assert.equal(m.beliefs[0].text, '这道题我会了。')
 })
 
 test('isProofOnly：selfmod 只在 utterance 上算，uncommitted 不分类型', () => {

@@ -603,6 +603,13 @@ export function deriveSelf(events = [], opts = {}) {
         // 2026-11-10：整行只有一个 markdown 图片 = 她发了一张图，不是她的话/判断。
         // 新数据带 media flag；旧数据（11-09 那批 formula 图）没 flag，按形态兜底。
         if (flags.includes('media') || /^（她说）!\[[^\]]*\]\([^)]+\)$/.test(String(ev.text ?? ''))) break
+        // 2026-11-10：her_say 发到 QQ 的话是「说过的话」，不是她认领的判断。
+        // 和 uncommitted 一样只留证、不进信念；账本里那批存量已按用户要求清掉。
+        // spokenSinceSeen 要留住：开口这件事仍算数，只是不变成一条判断。
+        if (String(ev.text ?? '').startsWith('（她说）')) {
+          spokenSinceSeen = true
+          break
+        }
         // 2026-11-02（用户 m00680）：她在侧栏里说出口、但没调 growth_commit 认领的话，
         // 由 turns.js 补写进来并打 uncommitted。它和 selfmod 一样**只留证、不进信念**：
         // 没认领的话不该改她的称呼、不该覆盖自我叙述、不该参与固化与"新话率"。
