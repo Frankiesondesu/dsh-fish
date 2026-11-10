@@ -451,6 +451,20 @@ export function registerAsk(ctx, deps = {}) {
           },
         }, { day: model.day, stage: model.stage, source: 'system' }, root)
 
+        // 只用 QQ 的部署（ask.qqOnly，2026-11-10 用户定案）：账本事件照写，桥会推到 QQ；
+        // 但**不弹宿主卡、不等**——宿主 ask 是同步等待，人不在 DSH 窗口里点，
+        // 她会卡满 5 分钟，而 QQ 那边其实早就答完了（answerCard 只结算账本，
+        // 结束不了宿主那个等待）。这里直接回来，答案下一轮在「悬着的事」里看。
+        if (config?.ask?.qqOnly === true) {
+          return {
+            ok: true,
+            note: '问了，已经走 QQ 那条路送出去了；还没答。答了会记下来，你下一轮能看到（或者用 her_recall 翻）。',
+            said: 'relayed',
+            askId: ev.id,
+            via: 'QQ',
+          }
+        }
+
         // 卡片只挂在那条会话上；她这轮刚起来时 agent 可能在注册路上，askInChat 会等一小会儿。
         const rawTexts = [args?.question, args?.why, ...(Array.isArray(args?.options) ? args.options : [])]
         const r = await askInCard(ctx, { sessionId, ev, options, signal: exec?.signal, rawTexts, root })

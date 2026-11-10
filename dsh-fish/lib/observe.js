@@ -807,7 +807,7 @@ export function registerObserve(ctx, deps = {}) {
         // 2026-11-07：加 recall / rules / outing。这三组在 DEFAULTS 里有、normalizeConfig
         // 会夹紧，但一直没登记进 allowed——DSH 侧设置页存不了它们，而 7788 查看器
         // 的设置页是直写 updateConfig 的，两边口径不一致（viewer 的防漂移测试抓的）。
-        const allowed = ['growthDays', 'wakesPerDay', 'window', 'daily', 'diary', 'absenceAfterDays', 'avoid', 'browse', 'bili', 'video', 'comment', 'notify', 'chat', 'rooms', 'memory', 'tools', 'observe', 'ui', 'proactive', 'drive', 'interest', 'dream', 'world', 'recall', 'rules', 'outing']
+        const allowed = ['growthDays', 'wakesPerDay', 'window', 'daily', 'diary', 'absenceAfterDays', 'avoid', 'browse', 'bili', 'video', 'comment', 'notify', 'chat', 'rooms', 'memory', 'tools', 'observe', 'ui', 'proactive', 'drive', 'interest', 'dream', 'world', 'recall', 'rules', 'outing', 'ask']
         const bad = Object.keys(patch).filter((k) => !allowed.includes(k))
         // 这句话会原样冒到界面上，所以写成人话（界面会把它放在「技术信息」那一行）：
         // 原来那句「不允许修改：bili」既不说人话，也让人以为自己填错了。

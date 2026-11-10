@@ -263,6 +263,13 @@ export const DEFAULTS = {
     cooldownDays: 3,        // 被驳回后至少隔几天才能再提
   },
 
+  // 询问（2026-11-10，用户）：只用 QQ 的部署别让宿主弹卡——
+  // 宿主 `userQuestions.ask()` 是同步等待，人不在 DSH 窗口里点，她就卡满 5 分钟；
+  // 而桥本来就会把 ask 事件推到 QQ、回数字也能结算（/local/answer → answerCard）。
+  ask: {
+    qqOnly: false,          // true = ask_owner 不弹宿主卡，写账本后立刻回来，答案下一轮才知道
+  },
+
   // 出门（2026-10-30，用户 m01904）：发布前加一道一次性确认。
   // 只记「说明卡看过一遍」，不是开关——看过的不用再看，没看过的按钮先挡着。
   outing: {

@@ -317,3 +317,27 @@ test('认不出的回答不落地原文：日志只留回执形状（issue #35�
   assert.ok(!log.includes(secret), '他手打的原文不许进日志')
   assert.ok(log.includes(`"custom":${secret.length}`), '但要留下长度，够定位是哪种形状')
 }))
+
+test('ask.qqOnly：不弹宿主卡、立刻回来；账本里照样有 ask（桥才推得出去）', async () => withRoot(async (root) => {
+  const { registerAsk } = await import('../lib/ask.js')
+  let asked = 0
+  const ctx = askCtx(() => { asked++; return { answers: [] } })
+  writeFileSync(join(root, 'config.json'), JSON.stringify({ ask: { qqOnly: true } }), 'utf8')
+  registerAsk(ctx, { root })
+  const tool = ctx.regs.get('ask_owner')
+
+  const out = await tool.execute(
+    { question: '今天能不能歇一天。', kind: 'rest' },
+    { agent: { session: { id: 'session-abc' } } },
+  )
+  assert.equal(out.ok, true, out.note)
+  assert.equal(out.said, 'relayed', '要走「已送出、还没答」那条，不是 approved/rejected')
+  assert.equal(out.via, 'QQ')
+  assert.equal(asked, 0, '不该调宿主 userQuestions.ask——那边没人点会卡 5 分钟')
+  assert.match(out.note, /还没答/)
+  assert.match(out.note, /下一轮能看到/)
+
+  const { events } = await readEvents(root)
+  const asks = events.filter((e) => e.type === 'ask')
+  assert.equal(asks.length, 1, '账本事件必须照写，桥靠它推 QQ')
+}))
