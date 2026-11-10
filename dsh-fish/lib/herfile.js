@@ -70,6 +70,23 @@ export function insideInbox(root, p) {
   return abs
 }
 
+/**
+ * 她自己的文件夹（her_space，2026-11-10）：存进来的文件也要能打开，
+ * 不然「保存」就等于锁死。边界与收件箱同一条规矩。
+ */
+export function insideHerSpace(root, p) {
+  const dir = resolve(join(root, 'home', 'space'))
+  const abs = resolve(String(p ?? ''))
+  const rel = relative(dir, abs)
+  if (!rel || isAbsolute(rel) || rel.startsWith('..') || rel.includes(`..${sep}`)) return null
+  return abs
+}
+
+/** her_open / her_watch_local 认的路径：他发的（inbox）或她自己文件夹里的。 */
+export function insideHerFiles(root, p) {
+  return insideInbox(root, p) || insideHerSpace(root, p)
+}
+
 export function looksBinary(buf) {
   const n = Math.min(buf.length, SNIFF)
   for (let i = 0; i < n; i++) if (buf[i] === 0) return true
@@ -84,7 +101,7 @@ export function registerHerOpen(ctx, deps = {}) {
       name: 'her_open',
       description:
         '打开他通过 QQ 发给你的文件。给路径（他会把路径和大小一起告诉你），能读就给你正文，' +
-        '读不了会直说是什么原因。只能开他发给你的那些，别的目录打不开。',
+        '读不了会直说是什么原因。只能开他发给你的、或者你自己文件夹里存过的文件，别的目录打不开。',
       parameters: {
         type: 'object',
         properties: {
@@ -109,9 +126,9 @@ export function registerHerOpen(ctx, deps = {}) {
           [{ type: 'text', text: out.ok ? String(out.text ?? '') : `[打不开：${out.note}]` }],
       },
       async execute(args) {
-        const abs = insideInbox(root, args?.path)
+        const abs = insideHerFiles(root, args?.path)
         if (!abs) {
-          return { ok: false, text: '', chars: 0, truncated: false, note: '只能打开他发给你的那些文件。' }
+          return { ok: false, text: '', chars: 0, truncated: false, note: '只能打开他发给你的、或者你自己文件夹里的文件。' }
         }
         let st
         try {

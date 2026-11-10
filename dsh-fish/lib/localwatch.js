@@ -12,7 +12,7 @@
  * 整条管线（切镜 → 拼宫格 → 硬字幕 OCR → 本地听写 → 台词对齐）原样复用。
  *
  * 三条边界（和这个项目其余部分一致）：
- *   1. **只能看 inbox 里的文件**：复用 `insideInbox()`，她不能拿它去翻别的目录；
+ *   1. **只能看 inbox 或她自己文件夹里的文件**：复用 `insideHerFiles()`，不能翻别的目录；
  *   2. **不占额度**：本地文件全是他递过来的，按 fork.20「他给的不记在她头上」，
  *      写 `watched:` 凭证但带 `free: true`，`watchedInTariff` 会跳过；
  *   3. **失败如实说**：技术原因只进日志，对她只说「这次没看成」（fork.13）。
@@ -30,7 +30,7 @@ import { logLine } from './log.js'
 import { slashed } from './posix.js'
 import { guardWrite } from './tenant.js'
 import { tenancyOf } from './watch.js'
-import { insideInbox } from './herfile.js'
+import { insideHerFiles } from './herfile.js'
 import { detectFfmpeg } from './media.js'
 import { defineTool } from './tool.js'
 
@@ -60,14 +60,14 @@ export function registerLocalWatch(ctx, deps = {}) {
     defineTool({
       name: 'her_watch_local',
       description:
-        '看他直接递过来的本地视频（他发文件时给你的那个完整路径）。' +
+        '看他直接递过来的本地视频，或者你自己文件夹里存过的视频（给完整路径）。' +
         '会把整条片子按镜头切开、每段挑一帧，拼成宫格图存下来，告诉你文件在哪，' +
         '你用 read_image 打开就能看见；每一格是哪一刻、那时候在说什么也一起给你。' +
         '看一条要几十秒到几分钟，看不看由你定。只想看某几段就传 at（秒）。',
       parameters: {
         type: 'object',
         properties: {
-          path: { type: 'string', description: '他递过来的那个文件的完整路径（在收件箱里）。' },
+          path: { type: 'string', description: '完整路径：收件箱里他递的那个，或者你自己文件夹里存的。' },
           at: {
             type: 'array',
             items: { type: 'number' },
@@ -95,9 +95,9 @@ export function registerLocalWatch(ctx, deps = {}) {
         if (!who.ok) return { ok: false, path: '', text: '', note: who.note }
 
         // 路径安全：与 her_open 同一道闸，只能开他递过来的那些
-        const abs = insideInbox(root, args?.path)
+        const abs = insideHerFiles(root, args?.path)
         if (!abs) {
-          return { ok: false, path: '', text: '', note: '只能看他递给你的那些文件。' }
+          return { ok: false, path: '', text: '', note: '只能看他递给你的、或者你自己文件夹里的文件。' }
         }
         let st
         try {

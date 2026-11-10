@@ -115,11 +115,11 @@ export function sanitizeMemeName(name) {
     .slice(0, 40)
 }
 
-/** 路径必须落在她的这两个目录里——按路径判定，不按来源：收件箱与 media/（含 media/draw/）。 */
+/** 路径必须落在她的这三个目录里——按路径判定，不按来源：收件箱、media/（含 media/draw/）、她自己的文件夹。 */
 export function insideHerDirs(p, root) {
   const norm = normalize(String(p ?? '')).toLowerCase()
   if (!isAbsolute(norm)) return false
-  const dirs = [join(root, 'home', 'inbox'), join(root, 'media')].map((d) => normalize(d).toLowerCase())
+  const dirs = [join(root, 'home', 'inbox'), join(root, 'media'), join(root, 'home', 'space')].map((d) => normalize(d).toLowerCase())
   return dirs.some((d) => norm === d || norm.startsWith(d.endsWith(sep) ? d : d + sep))
 }
 
@@ -158,7 +158,7 @@ export function registerMeme(ctx, deps = {}) {
         },
         savePath: {
           type: 'string',
-          description: '想收下一张图就给它完整路径（只认收件箱和 media/ 这两个目录，你自己画在 media/draw/ 的也算；相对路径不行）。给了这个就是收藏，不发送，要发再调一次。',
+          description: '想收下一张图就给它完整路径（只认收件箱、media/、你自己文件夹这三个目录；相对路径不行）。给了这个就是收藏，不发送，要发再调一次。',
         },
         saveName: {
           type: 'string',
@@ -198,7 +198,7 @@ export function registerMeme(ctx, deps = {}) {
         if (savePath) {
           const root = deps.root ?? rootDir()
           if (!insideHerDirs(savePath, root)) {
-            return { ok: false, picked: '', why: '', saved: false, note: '只收收件箱和 media/ 这两个目录里的完整路径（相对路径不行），别的路径不碰。' }
+            return { ok: false, picked: '', why: '', saved: false, note: '只收收件箱、media/ 和你自己文件夹里的完整路径（相对路径不行），别的路径不碰。' }
           }
           const ext = MEME_EXT.find((e) => savePath.toLowerCase().endsWith(e))
           if (!ext) {

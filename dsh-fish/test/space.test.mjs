@@ -10,7 +10,7 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, rm, readFile, stat } from 'node:fs/promises'
+import { mkdtemp, rm, readFile, stat, writeFile, mkdir, open } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -52,7 +52,7 @@ test('存取闭环：put → list → get → append → 同名覆盖', async ()
 
   const list = await call(tool, { action: 'list' })
   assert.match(list.note, /课表\.md/)
-  assert.match(list.note, /篇/)
+  assert.match(list.note, /文件夹里有 \d+ 个/)
 
   const get = await call(tool, { action: 'get', name: '课表' })
   assert.equal(get.ok, true)
@@ -97,4 +97,65 @@ test('列表：空文件夹说空，不是报错', async () => withSpace(async (
   const out = await call(tool, { action: 'list' })
   assert.equal(out.ok, true)
   assert.match(out.note, /还是空的/)
+}))
+
+// ---- 存文件（2026-11-10 用户补充：他发的文件她可以自己选择保存）----
+
+test('save：收件箱里的文件存进来，重名不覆盖', async () => withSpace(async ({ root, tool }) => {
+  await mkdir(join(root, 'home', 'inbox'), { recursive: true })
+  await writeFile(join(root, 'home', 'inbox', '课表.txt'), '周一数学', 'utf8')
+
+  const out = await call(tool, { action: 'save', path: join(root, 'home', 'inbox', '课表.txt') })
+  assert.equal(out.ok, true, out.note)
+  assert.match(out.note, /存好了/)
+  assert.equal(await readFile(join(spaceDir(root), '课表.txt'), 'utf8'), '周一数学')
+
+  const again = await call(tool, { action: 'save', path: join(root, 'home', 'inbox', '课表.txt') })
+  assert.equal(again.ok, true, again.note)
+  assert.equal(await readFile(join(spaceDir(root), '课表.txt'), 'utf8'), '周一数学', '重名不覆盖原件')
+}))
+
+test('save：media/ 里的也能存，别的路径不碰', async () => withSpace(async ({ root, tool }) => {
+  await mkdir(join(root, 'media', 'draw'), { recursive: true })
+  await writeFile(join(root, 'media', 'draw', 'a.png'), Buffer.from([0x89, 0x50, 0x4e, 0x47]))
+
+  const ok = await call(tool, { action: 'save', path: join(root, 'media', 'draw', 'a.png') })
+  assert.equal(ok.ok, true, ok.note)
+
+  const bad = await call(tool, { action: 'save', path: join(root, 'config.json') })
+  assert.equal(bad.ok, false)
+  assert.match(bad.note, /只能存/)
+}))
+
+test('save：超过单文件上限就拒绝（不复制）', async () => withSpace(async ({ root, tool }) => {
+  await mkdir(join(root, 'home', 'inbox'), { recursive: true })
+  const src = join(root, 'home', 'inbox', 'big.bin')
+  const fh = await open(src, 'w')
+  await fh.truncate(200 * 1024 * 1024 + 1) // 稀疏文件，不真占盘
+  await fh.close()
+
+  const out = await call(tool, { action: 'save', path: src })
+  assert.equal(out.ok, false)
+  assert.match(out.note, /超过单文件上限/)
+}))
+
+test('remove 是真删；get 对二进制只给路径', async () => withSpace(async ({ root, tool }) => {
+  await mkdir(join(root, 'home', 'inbox'), { recursive: true })
+  await writeFile(join(root, 'home', 'inbox', 'v.mp4'), Buffer.from([0, 1, 2, 3]))
+
+  const saved = await call(tool, { action: 'save', path: join(root, 'home', 'inbox', 'v.mp4'), name: '视频' })
+  assert.equal(saved.ok, true, saved.note)
+  assert.match(saved.note, /视频\.mp4/, '没给扩展名时要沿用源文件的扩展名')
+
+  const g = await call(tool, { action: 'get', name: '视频.mp4' })
+  assert.equal(g.ok, true)
+  assert.match(g.note, /读不出内容/)
+  assert.match(g.note, /home\/space\/视频\.mp4/)
+
+  const rm1 = await call(tool, { action: 'remove', name: '视频.mp4' })
+  assert.equal(rm1.ok, true, rm1.note)
+  assert.match(rm1.note, /删了就没了/)
+  let gone = false
+  try { await stat(join(spaceDir(root), '视频.mp4')) } catch { gone = true }
+  assert.equal(gone, true, '真删')
 }))
