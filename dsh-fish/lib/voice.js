@@ -152,15 +152,17 @@ function workbuddyPythons() {
 }
 
 function pythonExe() {
+  const fallback = process.platform === 'win32' ? 'python' : 'python3'
   const cands = [
     process.env.FISH_PYTHON,
     ...workbuddyPythons(),
-    'python',
+    fallback,
   ].filter(Boolean)
   for (const p of cands) {
-    if (p === 'python' || existsSync(p)) return p
+    // 命令名（不带路径）交给 PATH 解析；绝对路径才要求存在
+    if (!/[\\/]/.test(p) || existsSync(p)) return p
   }
-  return 'python'
+  return fallback
 }
 
 export function registerVoice(ctx, deps = {}) {

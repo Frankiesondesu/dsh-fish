@@ -1,0 +1,17 @@
+[Unit]
+Description=fish viewer (dsh-fish fork)
+Documentation=file://__REPO__/DEPLOY-LINUX.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=__REPO__
+EnvironmentFile=-__ENV__
+ExecStart=__NODE__ __REPO__/viewer/viewer.mjs
+Restart=on-failure
+RestartSec=5
+# 日志走 journald：journalctl --user -u fish-viewer -f
+
+[Install]
+WantedBy=default.target

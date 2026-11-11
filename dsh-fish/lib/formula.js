@@ -29,6 +29,7 @@ import { rootDir } from './store.js'
 import { logLine } from './log.js'
 import { slashed } from './posix.js'
 import { colorOf } from './draw.js'
+import { browserPath, browserArgs } from './browser.js'
 
 const runFile = promisify(execFile)
 
@@ -47,18 +48,7 @@ function mathjaxPath() {
   return join(dirname(fileURLToPath(import.meta.url)), 'assets', 'mathjax', 'tex-svg.js')
 }
 
-/** 找 Edge（找不到就退 Chrome）。返回 exe 路径或空串。 */
-export function browserPath(env = process.env) {
-  const cands = [
-    env.FISH_DRAW_BROWSER,
-    env.EDGE_PATH,
-    'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
-    'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe',
-    'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
-    'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
-  ].filter(Boolean)
-  return cands.find((p) => { try { return existsSync(p) } catch { return false } }) ?? ''
-}
+export { browserPath }
 
 /** 浏览器 profile 放她屋里，别每次都冷启动。 */
 function profileDir(root) {
@@ -133,7 +123,7 @@ export function buildHtml(plan, { mathjax = mathjaxPath(), pad = 28 } = {}) {
 <style>
 html,body{margin:0;padding:0;background:#fff;overflow:hidden}
 #p{padding:${pad}px;font-size:${plan.size}px;line-height:1.75;color:${plan.color};
-   font-family:"Microsoft YaHei","Segoe UI",sans-serif;width:${plan.width}px;box-sizing:border-box;word-break:break-word}
+   font-family:"Noto Sans CJK SC","Noto Sans CJK","Microsoft YaHei","Segoe UI",sans-serif;width:${plan.width}px;box-sizing:border-box;word-break:break-word}
 </style>
 <script>
 window.MathJax = {
@@ -154,27 +144,12 @@ window.MathJax = {
 `
 }
 
-/** 浏览器公共参数：无头、不弹窗、不联网、复用一个 profile。 */
-function baseArgs(profile) {
-  return [
-    '--headless=new',
-    '--disable-gpu',
-    '--no-first-run',
-    '--no-default-browser-check',
-    '--disable-extensions',
-    '--disable-sync',
-    '--disable-background-networking',
-    '--disable-component-update',
-    `--user-data-dir=${profile}`,
-  ]
-}
-
 /**
  * 真渲染：量一次、截一次。返回 {ok:true, w, h, truncated} 或抛错（带人话原因）。
  */
 export async function renderFormula(plan, outPath, { root, log = () => {} } = {}) {
   const exe = browserPath()
-  if (!exe) throw new Error('这台机器上没有 Edge 也没有 Chrome，公式排不出来。')
+  if (!exe) throw new Error('这台机器上没有 Edge / Chrome / Chromium，公式排不出来。装一个 chromium，或设 FISH_DRAW_BROWSER。')
   const mj = mathjaxPath()
   if (!existsSync(mj)) throw new Error('MathJax 那个文件没跟着插件装进来（lib/assets/mathjax/tex-svg.js）。')
 
@@ -186,7 +161,7 @@ export async function renderFormula(plan, outPath, { root, log = () => {} } = {}
     const profile = profileDir(root ?? homedir())
 
     // ① 量：让页面把尺寸写进 title，再从 DOM 里读回来
-    const dom = await runFile(exe, [...baseArgs(profile), '--virtual-time-budget=8000', '--dump-dom', url], {
+    const dom = await runFile(exe, [...browserArgs(profile), '--virtual-time-budget=8000', '--dump-dom', url], {
       windowsHide: true,
       timeout: 45_000,
       maxBuffer: 32 * 1024 * 1024,
@@ -203,7 +178,7 @@ export async function renderFormula(plan, outPath, { root, log = () => {} } = {}
 
     // ② 截：按精确尺寸来，一点白边都不留
     await runFile(exe, [
-      ...baseArgs(profile),
+      ...browserArgs(profile),
       '--virtual-time-budget=8000',
       `--force-device-scale-factor=${LIMITS.scale}`,
       `--window-size=${w},${h}`,

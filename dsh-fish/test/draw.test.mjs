@@ -12,7 +12,8 @@ import { mkdtemp, rm, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { planDrawing, registerDraw, formatMeasureReport, formatBoardReport } from '../lib/draw.js'
+import { planDrawing, registerDraw, formatMeasureReport, formatBoardReport, buildDrawHtml, parseDrawBrowserOutput, renderJobBrowser } from '../lib/draw.js'
+import { browserPath } from '../lib/browser.js'
 import { FISH_TOOLS } from '../lib/restrict.js'
 
 test('planDrawing：空画布、不认识的笔、字数超限都拒绝', () => {
@@ -294,6 +295,62 @@ test('画板：找不到板 / 空板导出都要给真因，不静默新建', { 
     const exp = await def.execute({ action: 'export', board: 'b1' }, exec)
     assert.equal(exp.ok, false)
     assert.match(exp.note, /空的/)
+  } finally {
+    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
+  }
+})
+
+// ── Linux / 无 GDI：无头浏览器渲染（2026-11-11）────────────────
+
+test('浏览器渲染页：画布尺寸写对，正文里的 </script> 不能提前截断页面', () => {
+  const html = buildDrawHtml({
+    w: 480, h: 360, bg: '#ffffff',
+    items: [{ t: 'text', x: 1, y: 2, text: '</script><b>x</b>', size: 16 }],
+  })
+  assert.match(html, /width="480"/)
+  assert.match(html, /height="360"/)
+  assert.ok(!html.includes('</script><b>'), 'JSON 里的 </script> 必须转义')
+  assert.match(html, /\u003c\/script/)
+})
+
+test('浏览器回执解析：HTML 实体还原、PNG base64 解码', () => {
+  const png = Buffer.from([0x89, 0x50, 0x4e, 0x47]).toString('base64')
+  const payload = {
+    report: { canvas: { w: 10, h: 10 }, items: [{ i: 1, t: 'text', x: 1, y: 2, w: 3, h: 4 }] },
+    png: 'data:image/png;base64,' + png,
+  }
+  const esc = JSON.stringify(payload)
+    .replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+  const { report, buf } = parseDrawBrowserOutput(`<pre id="out">${esc}</pre>`)
+  assert.equal(report.items[0].w, 3)
+  assert.deepEqual([...buf], [0x89, 0x50, 0x4e, 0x47])
+})
+
+test('浏览器回执里的脚本错误要如实抛，不假装画好了', () => {
+  assert.throws(() => parseDrawBrowserOutput('<pre id="out">{"error":"boom"}</pre>'), /画布脚本报错：boom/)
+  assert.throws(() => parseDrawBrowserOutput('<pre id="out">{bad json}</pre>'), /不是 JSON/)
+})
+
+test('浏览器真渲染：本机有 Edge/Chrome/Chromium 时产出合法 PNG 与实测回执', { timeout: 90_000 }, async (t) => {
+  if (!browserPath()) return t.skip('这台机器没有可用浏览器')
+  const root = await mkdtemp(join(tmpdir(), 'fish-draw-browser-'))
+  try {
+    const plan = planDrawing({
+      canvas: { w: 320, h: 200 },
+      items: [
+        { type: 'text', x: 20, y: 20, text: '浏览器画布', size: 18 },
+        { type: 'rect', x: 20, y: 60, w: 120, h: 50, color: '蓝', fill: '#EAF0FF' },
+        { type: 'circle', cx: 240, cy: 100, r: 30, color: '橙' },
+      ],
+    })
+    assert.equal(plan.ok, true, plan.why)
+    const out = join(root, 'browser.png')
+    const report = await renderJobBrowser(plan.job, out, () => {}, root)
+    const png = await readFile(out)
+    assert.deepEqual([...png.subarray(0, 4)], [0x89, 0x50, 0x4e, 0x47])
+    assert.ok(png.length > 1500, `PNG 太小（${png.length}B）`)
+    assert.equal(report.items.length, 3)
+    assert.ok(report.bbox.x2 > report.bbox.x1)
   } finally {
     await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
   }

@@ -193,18 +193,19 @@ async function sayToHer(text, { log = () => {} } = {}) {
 // ---------------------------------------------------------------- 声音
 
 function pythonExe() {
-  // 与 dsh-fish/lib/voice.js 同一套候选：装了 edge_tts 的那个 WorkBuddy python 优先
+  // 与 dsh-fish/lib/voice.js 同一套候选：装了 edge_tts 的那个 Python 优先
+  const fallback = process.platform === 'win32' ? 'python' : 'python3'
   const cands = [
     process.env.FISH_PYTHON,
     // 2026-11-06：原来写死 .../versions/3.13.12/python.exe，WorkBuddy 一升级就失效。
     // workbuddyPythons() 扫目录、版本降序，换机也不会指到不存在的路径。
     ...workbuddyPythons(),
-    'python',
+    fallback,
   ].filter(Boolean)
   for (const p of cands) {
-    if (p === 'python' || existsSync(p)) return p
+    if (!/[\\/]/.test(p) || existsSync(p)) return p
   }
-  return 'python'
+  return fallback
 }
 
 function ffmpegBin() {

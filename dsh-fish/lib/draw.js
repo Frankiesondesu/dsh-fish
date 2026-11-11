@@ -18,8 +18,10 @@
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { mkdtempSync, writeFileSync, readFileSync, rmSync, mkdirSync, existsSync, readdirSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { tmpdir, homedir } from 'node:os'
 import { join, basename } from 'node:path'
+import { pathToFileURL } from 'node:url'
+import { browserPath, browserArgs } from './browser.js'
 import { toJsonSchema } from './toolschema.js'
 import { defineTool } from './tool.js'
 import { guardWrite } from './tenant.js'
@@ -316,8 +318,213 @@ if ($job.report) {
 }
 `
 
-/** 真正调 PS 渲染。outdir/outPath 由调用方定；job 文件在临时目录，用完即删。 */
-async function renderJob(job, outPath, log) {
+/**
+ * Linux/无 GDI 的渲染通路（2026-11-11）：把同一份 job 画进 canvas，再用
+ * canvas.toDataURL() 交回 PNG。测量也在页面里做，回执与 GDI 版同形。
+ * 不 import 任何依赖；浏览器只由 browser.js 找。
+ */
+const DRAW_BROWSER_JS = String.raw`
+(function () {
+  var job = JSON.parse(document.getElementById('job').textContent);
+  var c = document.getElementById('c');
+  var ctx = c.getContext('2d');
+  var R = function (v) { return Math.round(Number(v) * 10) / 10; };
+  function fontOf(px, bold) {
+    return (bold ? 'bold ' : '') + px + 'px "Noto Sans CJK SC","Noto Sans CJK","Microsoft YaHei","Segoe UI",sans-serif';
+  }
+  function measure(node) {
+    if (node.t === 'text') {
+      ctx.font = fontOf(node.size, node.bold);
+      var m = ctx.measureText(String(node.text));
+      var asc = Number.isFinite(m.actualBoundingBoxAscent) ? m.actualBoundingBoxAscent : node.size * 0.8;
+      var desc = Number.isFinite(m.actualBoundingBoxDescent) ? m.actualBoundingBoxDescent : node.size * 0.2;
+      return { w: m.width, h: Math.max(1, asc + desc) };
+    }
+    var a = measure(node.num);
+    var b = measure(node.den);
+    var pad = node.size * 0.20;
+    if (node.num.t === 'frac' || node.den.t === 'frac') pad = node.size * 0.55;
+    var gap = node.size * 0.22;
+    var barT = Math.max(1, node.size * 0.06);
+    var bw = Math.max(a.w, b.w) + 2 * pad;
+    return { w: bw, h: a.h + gap + barT + gap + b.h };
+  }
+  function drawNode(node, left, top, color) {
+    if (node.t === 'text') {
+      ctx.fillStyle = color;
+      ctx.font = fontOf(node.size, node.bold);
+      ctx.textBaseline = 'top';
+      ctx.fillText(String(node.text), left, top);
+      return measure(node);
+    }
+    var a = measure(node.num);
+    var b = measure(node.den);
+    var pad = node.size * 0.20;
+    if (node.num.t === 'frac' || node.den.t === 'frac') pad = node.size * 0.55;
+    var gap = node.size * 0.22;
+    var barT = Math.max(1, node.size * 0.06);
+    var bw = Math.max(a.w, b.w) + 2 * pad;
+    drawNode(node.num, left + (bw - a.w) / 2, top, color);
+    var by = top + a.h + gap;
+    ctx.strokeStyle = color;
+    ctx.lineWidth = barT;
+    ctx.beginPath();
+    ctx.moveTo(left, by);
+    ctx.lineTo(left + bw, by);
+    ctx.stroke();
+    drawNode(node.den, left + (bw - b.w) / 2, by + barT + gap, color);
+    return { w: bw, h: a.h + gap + barT + gap + b.h };
+  }
+  function render() {
+    ctx.fillStyle = job.bg || '#ffffff';
+    ctx.fillRect(0, 0, job.w, job.h);
+    var report = [];
+    var idx = 0;
+    for (var n = 0; n < job.items.length; n++) {
+      var it = job.items[n];
+      idx++;
+      var color = it.color || '#1a1a1a';
+      var bx = 0, by = 0, bw = 0, bh = 0;
+      if (it.t === 'text') {
+        var sz = drawNode({ t: 'text', text: it.text, size: it.size, bold: it.bold }, it.x, it.y, color);
+        bx = it.x; by = it.y; bw = sz.w; bh = sz.h;
+      } else if (it.t === 'frac') {
+        var fs = drawNode(it, it.x, it.y, color);
+        bx = it.x; by = it.y; bw = fs.w; bh = fs.h;
+      } else if (it.t === 'line' || it.t === 'arrow') {
+        ctx.strokeStyle = color;
+        ctx.lineWidth = it.width || 2;
+        ctx.beginPath();
+        ctx.moveTo(it.x1, it.y1);
+        ctx.lineTo(it.x2, it.y2);
+        ctx.stroke();
+        if (it.t === 'arrow') {
+          var ang = Math.atan2(it.y2 - it.y1, it.x2 - it.x1);
+          var head = 10;
+          var p1x = it.x2 - head * Math.cos(ang - 0.45);
+          var p1y = it.y2 - head * Math.sin(ang - 0.45);
+          var p2x = it.x2 - head * Math.cos(ang + 0.45);
+          var p2y = it.y2 - head * Math.sin(ang + 0.45);
+          ctx.fillStyle = color;
+          ctx.beginPath();
+          ctx.moveTo(it.x2, it.y2);
+          ctx.lineTo(p1x, p1y);
+          ctx.lineTo(p2x, p2y);
+          ctx.closePath();
+          ctx.fill();
+        }
+        bx = Math.min(it.x1, it.x2); by = Math.min(it.y1, it.y2);
+        bw = Math.abs(it.x2 - it.x1); bh = Math.abs(it.y2 - it.y1);
+      } else if (it.t === 'rect') {
+        if (it.fill) { ctx.fillStyle = it.fill; ctx.fillRect(it.x, it.y, it.w, it.h); }
+        ctx.strokeStyle = color;
+        ctx.lineWidth = it.width || 2;
+        ctx.strokeRect(it.x, it.y, it.w, it.h);
+        bx = it.x; by = it.y; bw = it.w; bh = it.h;
+      } else if (it.t === 'circle') {
+        ctx.beginPath();
+        ctx.arc(it.cx, it.cy, it.r, 0, Math.PI * 2);
+        if (it.fill) { ctx.fillStyle = it.fill; ctx.fill(); }
+        ctx.strokeStyle = color;
+        ctx.lineWidth = it.width || 2;
+        ctx.stroke();
+        bx = it.cx - it.r; by = it.cy - it.r; bw = 2 * it.r; bh = 2 * it.r;
+      }
+      report.push({ i: idx, t: it.t, x: R(bx), y: R(by), w: R(bw), h: R(bh) });
+    }
+    var minX = 0, minY = 0, maxX = 0, maxY = 0, first = true;
+    var clipped = [];
+    for (var k = 0; k < report.length; k++) {
+      var r = report[k];
+      if (first) { minX = r.x; minY = r.y; maxX = r.x + r.w; maxY = r.y + r.h; first = false; }
+      minX = Math.min(minX, r.x); minY = Math.min(minY, r.y);
+      maxX = Math.max(maxX, r.x + r.w); maxY = Math.max(maxY, r.y + r.h);
+      if ((r.x + r.w) > job.w + 0.5 || (r.y + r.h) > job.h + 0.5) clipped.push(r.i);
+    }
+    var out = {
+      report: {
+        canvas: { w: job.w, h: job.h },
+        items: report,
+        bbox: { x1: R(minX), y1: R(minY), x2: R(maxX), y2: R(maxY) },
+        clipped: clipped
+      },
+      png: c.toDataURL('image/png')
+    };
+    document.getElementById('out').textContent = JSON.stringify(out);
+  }
+  var ready = (document.fonts && document.fonts.ready) ? document.fonts.ready : Promise.resolve();
+  ready.then(render).catch(function (e) {
+    document.getElementById('out').textContent = JSON.stringify({ error: String(e && e.message || e) });
+  });
+})();
+`
+
+/** 生成无头浏览器要跑的那一页。job 里的 text 可能含 </script>，JSON 里的 `<` 必须转义。 */
+export function buildDrawHtml(job) {
+  const json = JSON.stringify(job).replace(/</g, '\\u003c')
+  return `<!doctype html><meta charset="utf-8">
+<style>html,body{margin:0;padding:0;background:${job.bg}}canvas{display:block}</style>
+<canvas id="c" width="${job.w}" height="${job.h}"></canvas>
+<pre id="out" style="display:none"></pre>
+<script id="job" type="application/json">${json}</script>
+<script>${DRAW_BROWSER_JS}</script>`
+}
+
+function decodeHtmlEntities(s) {
+  return String(s ?? '')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&amp;/g, '&')
+}
+
+/** 从 --dump-dom 的输出里取回 report 与 PNG。纯函数，便于单测。 */
+export function parseDrawBrowserOutput(dom) {
+  const m = /<pre[^>]*id="out"[^>]*>([\s\S]*?)<\/pre>/i.exec(String(dom ?? ''))
+  if (!m) throw new Error('浏览器没有把画的结果交回来（页面脚本没跑完）。')
+  let data
+  try { data = JSON.parse(decodeHtmlEntities(m[1])) } catch { throw new Error('浏览器交回来的结果不是 JSON。') }
+  if (data?.error) throw new Error(`画布脚本报错：${data.error}`)
+  const png = String(data?.png ?? '')
+  const prefix = 'data:image/png;base64,'
+  if (!png.startsWith(prefix) || png.length <= prefix.length) throw new Error('浏览器没给出 PNG。')
+  return { report: data.report ?? null, buf: Buffer.from(png.slice(prefix.length), 'base64') }
+}
+
+/** Linux 渲染：起一次无头浏览器，页面自己画、自己量、把 PNG 用 data URL 交回来。 */
+export async function renderJobBrowser(job, outPath, log = () => {}, root) {
+  const exe = browserPath()
+  if (!exe) {
+    throw new Error('这台机器上没有 Edge / Chrome / Chromium，画不出来。装一个 chromium，或设 FISH_DRAW_BROWSER。')
+  }
+  const dir = mkdtempSync(join(tmpdir(), 'fish-draw-browser-'))
+  const htmlPath = join(dir, 'draw.html')
+  const profile = join(root ?? homedir(), 'cache', 'draw-browser')
+  try {
+    mkdirSync(profile, { recursive: true })
+    writeFileSync(htmlPath, buildDrawHtml(job), 'utf8')
+    const r = await runFile(exe, [
+      ...browserArgs(profile),
+      '--virtual-time-budget=8000',
+      '--dump-dom',
+      pathToFileURL(htmlPath).href,
+    ], { windowsHide: true, timeout: 45_000, maxBuffer: 64 * 1024 * 1024 })
+    const { report, buf } = parseDrawBrowserOutput(r.stdout)
+    writeFileSync(outPath, buf)
+    log(`draw: browser ${job.w}x${job.h} → ${basename(outPath)}`)
+    return report
+  } finally {
+    try { rmSync(dir, { recursive: true, force: true }) } catch { /* 临时目录删不掉就算了 */ }
+  }
+}
+
+/** 真正调渲染。Windows 走 PS + GDI；Linux（或 FISH_DRAW_ENGINE=browser）走无头浏览器。 */
+async function renderJob(job, outPath, log, root) {
+  const engine = String(process.env.FISH_DRAW_ENGINE || '').trim().toLowerCase()
+  if (engine === 'browser' || (engine !== 'gdi' && process.platform !== 'win32')) {
+    return renderJobBrowser(job, outPath, log, root)
+  }
   const dir = mkdtempSync(join(tmpdir(), 'fish-draw-'))
   const jobPath = join(dir, 'job.json')
   const psPath = join(dir, 'draw.ps1')
@@ -473,7 +680,7 @@ export function registerDraw(ctx, deps = {}) {
     if (!plan.ok) return { ok: false, why: plan.why }
     const rev = b.rev + 1
     const out = previewPath(root, b.id, rev)
-    const report = await renderJob(plan.job, out, log)
+    const report = await renderJob(plan.job, out, log, root)
     cleanPreviews(root, b.id, rev)
     return { ok: true, report, out, idMap: live.map((x) => x.id), rev }
   }
@@ -553,7 +760,7 @@ export function registerDraw(ctx, deps = {}) {
     const plan = planDrawing({ canvas: b.canvas, items: live })
     if (!plan.ok) return fail(plan.why)
     const { out } = outPathFor(root)
-    const report = await renderJob(plan.job, out, log)
+    const report = await renderJob(plan.job, out, log, root)
     // 导出成功才删板：渲染失败就留着，她还能接着改。
     boards.delete(b.id)
     cleanPreviews(root, b.id, -1)
@@ -664,7 +871,7 @@ export function registerDraw(ctx, deps = {}) {
               return fail(plan.why)
             }
             const { out } = outPathFor(root)
-            const report = await renderJob(plan.job, out, log)
+            const report = await renderJob(plan.job, out, log, root)
             logLine('info', [`her_draw：画了一张 ${plan.job.w}×${plan.job.h}，${plan.job.items.length} 笔 → ${basename(out)}`], root)
             // 只存不发（用户定案）：回执如实说没发，并把完整路径给她——
             // 只写「media/draw/」她拿不到可抄的路径，就会以为只能绕表情库（11-08 她真卡在这）。

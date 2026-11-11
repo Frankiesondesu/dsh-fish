@@ -11,7 +11,8 @@ DSH（DeepSeek Harness）插件：**不写人设、不做记忆摘要**——人
 - **查看器**（viewer/，127.0.0.1:7788）：人格数据、她说的话（含发到 QQ 的）、事件流、
   观测台（待答申请/信箱/规则裁决/你不在的时候）、上网记录、记忆体检、用量、
   本机状态、**全量设置页（73 项）**
-- **GUI 管理器**（manager/，7789）：各服务启停/重启、待重启检测、启动日志
+- **GUI 管理器**（manager/，7789，仅 Windows）：各服务启停/重启、待重启检测、启动日志；
+  Linux 用 systemd + `deploy/linux/fishctl.sh`
 - **白板画笔 her_draw**：线/矩形/圆/箭头/文字，构图由她定，渲染成 PNG
 - **公式排版 her_formula**：一段「文字 + `$公式$`」排成一页图（Edge 无头 + MathJax），讲推导用
 - **her_world**：日期与天气（她自己申请的）
@@ -23,8 +24,8 @@ DSH（DeepSeek Harness）插件：**不写人设、不做记忆摘要**——人
 > ⚠️ 仓库里**没有**她——她的账本、日记、画都在运行目录（默认 `~/.dsh-fish`），
 > 每一份都是那个使用者在自己的生活里养出来的。你拿到的是一套养她的框架。
 >
-> 📖 从零部署的完整步骤（插件安装、QQ 桥、查看器权限、备份迁移、常见坑）见
-> **[DEPLOY.md](DEPLOY.md)**。
+> 📖 从零部署的完整步骤：Windows 见 **[DEPLOY.md](DEPLOY.md)**；
+> Linux（Ubuntu/Debian）见 **[DEPLOY-LINUX.md](DEPLOY-LINUX.md)**。
 
 ---
 
@@ -32,10 +33,10 @@ DSH（DeepSeek Harness）插件：**不写人设、不做记忆摘要**——人
 
 | 组件 | 说明 |
 |---|---|
-| Windows 10/11 | 强绑定：生命周期脚本、GDI 渲染、路径解析都按 Windows 设计 |
-| [DSH（DeepSeek Harness）桌面版](https://github.com/ssamurias/dsh-fish) | 她的宿主。先按上游说明装好、能正常对话 |
+| Windows 10/11 或 Ubuntu/Debian | Windows 用 GDI / 管理器 / 一键通话；Linux 用 Chromium / systemd，见 `DEPLOY-LINUX.md` |
+| [DSH（DeepSeek Harness）](https://github.com/ssamurias/dsh-fish) | 她的宿主。Windows 桌面版或 Linux 的 headless/web profile；先确保能正常对话 |
 | Node.js 22+ | 桥 / 查看器 / 管理器 / 启动器 |
-| QQ + [LLOneBot](https://github.com/LLOneBot/LLOneBot) | QQ 协议侧：LLOneBot 以 OneBot 连到桥的 WebSocket（默认 6199） |
+| QQ + OneBot 实现 | Windows 可用 LLOneBot / LuckyLillia；Linux 用 NapCat / Lagrange，连到桥的 WebSocket（默认 6199） |
 | ffmpeg（可选） | 动图表情拆帧。装了 WinGet 版会自动找，或设 `DSH_FISH_FFMPEG` |
 | funasr ASR 服务（可选） | 语音转写，端口 18765（归你自己的语音管线管，桥只调用） |
 
@@ -59,7 +60,11 @@ copy bridge\config.example.json bridge\config.json
 :: 查看器       :: 127.0.0.1:7788 —— 她的一切数据与全量设置
 ```
 
-启动器（`launch.mjs`）是所有启动路径的唯一入口：按依赖顺序拉 DSH、LuckyLillia、
+**Linux（Ubuntu/Debian）**：不需要 `.cmd` / 管理器 / LuckyLillia；用 NapCat/Lagrange
+接 QQ，装 Chromium 与 Noto CJK 字体，然后看 **[DEPLOY-LINUX.md](DEPLOY-LINUX.md)**
+（`deploy/linux/install.sh` 会生成 bridge/viewer 的 systemd 用户服务）。
+
+启动器（`launch.mjs`）是 Windows 启动路径的唯一入口：按依赖顺序拉 DSH、LuckyLillia、
 话轮、全双工、桥、查看器，已启动的自动跳过。`restart.mjs` / `shutdown.mjs` 同理，
 `管理器.cmd` 的网页控制台全部转发到这三个脚本——**本仓库不实现第二套启停逻辑**。
 
