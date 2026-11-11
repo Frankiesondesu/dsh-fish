@@ -241,7 +241,35 @@ bash deploy/linux/fishctl.sh restart
   但回执是实测值，不是估算。
 - **DSH 本体**是前置：本仓只提供插件和外挂设施，不附带 DSH。
 
-## 13. 许可与致谢
+## 13. Termux / Android（可选）
+
+Android 上没有 systemd，用 Termux + proot Ubuntu 也能跑查看器/桥。把本仓放进容器
+（例如 `/root/fish`），在 **Termux**（不是容器里）执行：
+
+```bash
+cp /path/to/fish/deploy/termux/fish-start.sh ~/fish-start.sh
+bash ~/fish-start.sh start     # 起容器 + 查看器 7788（顺带 sshd、唤醒锁、开浏览器）
+bash ~/fish-start.sh status    # 端口 / 进程 / 局域网地址
+bash ~/fish-start.sh stop
+bash ~/fish-start.sh logs
+```
+
+变量：`VIEWER_PORT` / `WITH_BRIDGE=1`（需要 bridge/config.json 和 OneBot）/
+`WITH_SSH=0` / `OPEN_BROWSER=0` / `FISH_CONTAINER_ROOT` / `DSH_FISH_HOME`。
+装了 Termux:Widget 的话，把脚本链进 `~/.shortcuts/` 就能从桌面一键跑。
+
+注意：
+
+- **管理器 7789 不在这条路上**（Windows 专用）；用脚本的 `status`/`stop` 和
+  查看器「本机状态」代替。
+- **手机浏览器**开 `http://127.0.0.1:7788` 是本机访问：免密、可写。
+  局域网（电脑开 `http://<手机IP>:7788`）要密码且只读，密码在容器的
+  `~/.dsh-fish/viewer-pass.txt`。
+- proot 的子进程会随登录会话退出被收走；脚本用常驻 proot 会话托管，并加了
+  `termux-wake-lock`，锁屏后仍活着（系统清后台时仍可能被杀，重新 `start` 即可）。
+- QQ 桥要有 Android 上能用的 OneBot（NapCat/Lagrange）；没有就保持 `WITH_BRIDGE=0`。
+
+## 14. 许可与致谢
 
 - 上游 [ssamurias/dsh-fish](https://github.com/ssamurias/dsh-fish)（MIT）
 - 本 fork 在上游协议（MIT）之内发布；`dsh-fish/LICENSE` 随目录保留
