@@ -61,6 +61,12 @@ chromium --version || chromium-browser --version || google-chrome --version
 如果 Chromium 不在常见路径，后面在 `~/.config/fish-fork.env` 里设
 `FISH_DRAW_BROWSER=/实际路径`。`her_draw` / `her_formula` 都靠它。
 
+容器 / 无 snap 环境（Docker、proot、WSL）里 Ubuntu 的 `chromium-browser` 只是 snap 包装，
+装不上也起不来。可下 [Chrome for Testing](https://googlechromelabs.github.io/chrome-for-testing/)
+的 `chrome-headless-shell-linux-arm64` / `linux64` 包，解压后把 `chrome-headless-shell`
+的绝对路径写进 `FISH_DRAW_BROWSER`。2026-11-11 在 Ubuntu 24.04 arm64（Termux proot）
+实测 `her_draw` / `her_formula` 都能出图；Linux 下代码会自动加 `--no-sandbox`。
+
 ## 3. 把插件挂进 DSH
 
 **先完全停掉 DSH**（源码目录安装时替换已加载的包会 `EPERM`）：

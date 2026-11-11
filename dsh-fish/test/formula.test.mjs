@@ -10,6 +10,7 @@ import assert from 'node:assert/strict'
 import { readFile, stat, mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import {
   buildHtmlBody,
   buildHtml,
@@ -116,10 +117,9 @@ test('颜色名走 her_draw 那张表，不认识的退回默认', () => {
 // ── 那一页 HTML ────────────────────────────────────────────
 
 test('生成的页面：引本地 MathJax、关字体缓存、尺寸写进 title', () => {
-  const html = buildHtml(planFormula({ content: '求 $x$', size: 24, width: 720 }).plan, {
-    mathjax: 'C:/x/tex-svg.js',
-  })
-  assert.ok(html.includes('file:///C:/x/tex-svg.js'), '要用 file:// 引本地文件，别走网络')
+  const mathjax = join(tmpdir(), 'tex-svg.js')
+  const html = buildHtml(planFormula({ content: '求 $x$', size: 24, width: 720 }).plan, { mathjax })
+  assert.ok(html.includes(pathToFileURL(mathjax).href), '要用 file:// 引本地文件，别走网络')
   assert.ok(html.includes("fontCache: 'none'"), '无字体缓存，SVG 才自包含')
   assert.ok(html.includes('getBoundingClientRect'), '要量尺寸')
   assert.ok(html.includes('document.title'), '尺寸要写进 title 才读得回来')

@@ -127,10 +127,10 @@ test('saveIncoming：清洗名字、重名不覆盖', async () => {
 })
 
 test('insideInbox / looksBinary 的基本判定', () => {
-  const root = 'C:\\tmp\\fish-root'
-  assert.ok(insideInbox(root, 'C:\\tmp\\fish-root\\home\\inbox\\a.txt'))
-  assert.equal(insideInbox(root, 'C:\\tmp\\fish-root\\config.json'), null)
-  assert.equal(insideInbox(root, 'C:\\tmp\\fish-root\\home\\inbox\\..\\x'), null)
+  const root = join(tmpdir(), 'fish-root')
+  assert.ok(insideInbox(root, join(root, 'home', 'inbox', 'a.txt')))
+  assert.equal(insideInbox(root, join(root, 'config.json')), null)
+  assert.equal(insideInbox(root, join(root, 'home', 'inbox', '..', 'x')), null)
   assert.equal(looksBinary(Buffer.from([0x61, 0x00, 0x62])), true)
   assert.equal(looksBinary(Buffer.from('纯文本', 'utf8')), false)
 })
