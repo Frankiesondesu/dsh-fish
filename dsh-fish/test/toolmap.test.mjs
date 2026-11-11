@@ -77,6 +77,7 @@ test('说明书的字数：长不等于有用', () => {
   const total = briefs.reduce((n, s) => n + s.length, 0)
   // fork：上限 2400→2450。TOOL_BRIEF 里 bili_zoom 的处境句（fork.35，她的原话需求）
   // 比上游口径多 7 字；不为凑上游的数删真话。其余各段未动。
+  // 0.9.8 的 her_diary 按词找加了一段（+29 字），压掉重复措辞后回到 2450 以内。
   assert.ok(total <= 2450, `全部说明书合计 ${total} 字，超过 2450 就该想想是不是又在写产品手册`)
   assert.ok(NOTE_BRIEF.length <= 240, `her_note 的说明书 ${NOTE_BRIEF.length} 字，太长了`)
 })

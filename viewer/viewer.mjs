@@ -299,7 +299,7 @@ async function buildStatus() {
   const ts = ms => ms ? new Date(ms).toLocaleString('zh-CN', { hour12: false }) : ''
   return {
     at: Date.now(),
-    plugin: { version: pkg.version || '?', processVersion: inst.version || '', upstream: 'v0.9.1（21 提交，11-06 合入）' },
+    plugin: { version: pkg.version || '?', processVersion: inst.version || '', upstream: 'v0.9.8（12 提交，11-11 合入）' },
     dsh: { bootAt: ts(bootAt), running: !!bootAt },
     restartNeeded,
     restartWhy: restartNeeded

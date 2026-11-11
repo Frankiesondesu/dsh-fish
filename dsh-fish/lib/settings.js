@@ -14,6 +14,16 @@ import { readConfig, writeConfig, paths, readJson } from './store.js'
 // 这里有 settings → bili 的单向依赖，bili.js 不反过来引 settings，不会成环。
 import { setPacing } from './bili.js'
 
+/**
+ * 换会话时最多能带几轮原话。
+ *
+ * 上限放在这里，是为了让「设置页能调多大」和「talk-recent.json 存多少」永远
+ * 是同一个数：调大设置立刻生效，不需要等下一次写入才开始攒。
+ * 20 轮 × 每轮两条各 160 字 ≈ 6400 字，已经比身份段本身还长；再往上加，
+ * 换会话后的头几轮会明显变贵，而真正久远的事本来就该用 her_recall 去翻。
+ */
+export const CARRY_MAX = 20
+
 /** 所有可调项。加新项就在这里加，下面读配置会自动补全。 */
 export const DEFAULTS = {
   // 成长
@@ -214,6 +224,13 @@ export const DEFAULTS = {
     // 2026-11-10 计量修准（只数真实回传体积）后，按真实体积调到 1MB——
     // 真实 1MB ≈ 55 万 tokens，高峰单次 ≈ 4 分钱（deepseek-flash 牌价），仍在 5 分锚内。
     rotateWhenKB: 1024,
+    // 换新会话时带几轮原话过去（2026-11-11，外部用户反馈）。
+    //
+    // 以前写死 4 轮：对「聊得稀但每一轮都很长」的人够用，对「一天聊几十句」
+    // 的人，换窗口时只接得上最后四条，等于断在半句话上。这个数是给用户的
+    // 一个旋钮：想接得长就往上调，不想让旧原话占上下文就往下调或写 0。
+    // 单位是「轮」（一问一答算一轮），原文一句不改、不改写、不总结。
+    carry: 4,               // 换会话时带过去几轮原话（0 = 不带）
     // 单轮回复字数预算（2026-10-25 加）。
     //
     // 为什么这条不算「人格设置」：它描述的是**这一轮产出的预算**，不是「她是什么样的人」。
@@ -321,6 +338,7 @@ const LIMITS = {
   'comment.scanEveryMin': [5, 720],
   'chat.rotateAfter': [0, 500],
   'chat.rotateWhenKB': [0, 5000],
+  'chat.carry': [0, CARRY_MAX],
   'chat.replyChars': [0, 2000],
   'rooms.groupRotateDays': [0, 365],
   'memory.docBudget': [600, 4000],

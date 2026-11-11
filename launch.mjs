@@ -391,7 +391,7 @@ async function main() {
   out('  查看器    ' + VIEWER_URL)
   out('  语音两路  18766 话轮 / 18768 全双工（查看器「本机状态」可探活）')
   out('            TTS 18767 已停用（从没接进任何链路，用了只赔启动时间）')
-  out('  QQ 那条   QQ → 阿岸；桥连上后日志在 bridge\\bridge.log')
+  out('  QQ 那条   QQ → 她；桥连上后日志在 bridge\\bridge.log')
   out('')
   out('  关掉：双击 一键关闭.cmd（或 node shutdown.mjs --check 先看清单）')
   out('')

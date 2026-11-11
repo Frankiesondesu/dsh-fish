@@ -279,6 +279,77 @@ test('渲染只写「那次」，不带次数、不带数字', () => {
   assert.ok(!line.includes('次'))
 })
 
+// ---- 「我绝不…」和升格的拒绝是同一个方向，不算打架 ----
+// resolveConflicts 原先只看 kind 不同 + 同一件事。0.9.7 多了 kind:'refused' 之后，
+// 「我绝不吃辣」（never）和「他让你吃辣，你没答应」（refused）被当成改口：
+// 谁晚谁留下，另一条从清单里拿掉，留下的那条还挂上 changedFrom。
+function spicy({ said = [], refused = [] }) {
+  return model({
+    beliefs: said.map((since, i) => belief('我绝不吃辣', { id: `b${i}`, since })),
+    refusals: refused.map((at, i) => refusal({ id: `r${i}`, at, what: '我不想吃辣', act: '', object: '吃辣' })),
+  })
+}
+
+test('「我绝不…」在前、同一件事的拒绝在后：两条都在，她那句原话不被模板句顶掉', () => {
+  const r = buildStances(spicy({
+    said: ['2026-10-01T10:00:00Z', '2026-10-03T10:00:00Z'],
+    refused: ['2026-10-10T10:00:00Z', '2026-10-12T10:00:00Z', '2026-10-14T10:00:00Z'],
+  }))
+  assert.deepEqual(r.map((s) => s.kind).sort(), ['never', 'refused'])
+  assert.ok(r.every((s) => !s.changedFrom), '同向的两条谁也不是谁的「以前」')
+  const text = stanceSection(r)
+  assert.ok(text.includes('- 我绝不吃辣'), '她自己说的那句还在')
+  assert.ok(text.includes('- 他让你吃辣，你没答应。这件事你一直没改口。'))
+  assert.ok(!text.includes('改过口'))
+})
+
+test('拒绝在前、「我绝不…」在后：不挂「这件事我改过口」', () => {
+  const r = buildStances(spicy({
+    refused: ['2026-10-01T10:00:00Z', '2026-10-03T10:00:00Z', '2026-10-05T10:00:00Z'],
+    said: ['2026-10-10T10:00:00Z', '2026-10-12T10:00:00Z'],
+  }))
+  assert.deepEqual(r.map((s) => s.kind).sort(), ['never', 'refused'])
+  const never = r.find((s) => s.kind === 'never')
+  assert.equal(never.changedFrom, undefined)
+  assert.equal(stanceLine(never), '- 我绝不吃辣')
+  assert.ok(!stanceSection(r).includes('改过口'), '她没改过口：先是没答应，后来说了绝不')
+})
+
+test('「我绝不…」和拒绝比不出先后：同向，不用比，两条都留', () => {
+  const refused = ['2026-10-01T10:00:00Z', '2026-10-03T10:00:00Z', '2026-10-05T10:00:00Z']
+  // 同一毫秒
+  const same = buildStances(spicy({ said: ['2026-10-02T10:00:00Z', '2026-10-05T10:00:00Z'], refused }))
+  assert.deepEqual(same.map((s) => s.kind).sort(), ['never', 'refused'])
+  // 判断没带时间
+  const noTime = buildStances(spicy({ said: [undefined, undefined], refused }))
+  assert.deepEqual(noTime.map((s) => s.kind).sort(), ['never', 'refused'])
+})
+
+test('「我喜欢…」和同一件事的拒绝才是反向：照旧后来的算数', () => {
+  const likes = (since) => since.map((s, i) => belief('我喜欢吃辣', { id: `l${i}`, since: s }))
+  const refusals = (at) => at.map((a, i) => refusal({ id: `r${i}`, at: a, what: '我不想吃辣', act: '', object: '吃辣' }))
+  // 先说喜欢，后来三次没答应 → 留拒绝
+  const later = buildStances(model({
+    beliefs: likes(['2026-10-01T10:00:00Z', '2026-10-03T10:00:00Z']),
+    refusals: refusals(['2026-10-10T10:00:00Z', '2026-10-12T10:00:00Z', '2026-10-14T10:00:00Z']),
+  }))
+  assert.deepEqual(later.map((s) => s.kind), ['refused'])
+  assert.equal(later[0].changedFrom, '我喜欢吃辣')
+  // 先三次没答应，后来说喜欢 → 留喜欢，这回是真的改过口
+  const earlier = buildStances(model({
+    beliefs: likes(['2026-10-10T10:00:00Z', '2026-10-12T10:00:00Z']),
+    refusals: refusals(['2026-10-01T10:00:00Z', '2026-10-03T10:00:00Z', '2026-10-05T10:00:00Z']),
+  }))
+  assert.deepEqual(earlier.map((s) => s.kind), ['like'])
+  assert.ok(stanceLine(earlier[0]).includes('这件事我改过口'))
+  // 比不出先后 → 两条都不进，不替她选
+  const tie = buildStances(model({
+    beliefs: likes(['2026-10-02T10:00:00Z', '2026-10-05T10:00:00Z']),
+    refusals: refusals(['2026-10-01T10:00:00Z', '2026-10-03T10:00:00Z', '2026-10-05T10:00:00Z']),
+  }))
+  assert.equal(tie.length, 0)
+})
+
 test('升格之后「你拒绝过」不再重复摆同一件事', () => {
   const refusals = [
     refusal({ at: '2026-10-01T10:00:00Z', reaction: 'insist' }),
@@ -305,4 +376,38 @@ test('升格之后「你拒绝过」不再重复摆同一件事', () => {
   const text = sections.map((s) => s.text).join(String.fromCharCode(10))
   assert.ok(text.includes('他让你叫老大，你没叫。'), '立场里写「那次」')
   assert.ok(!text.includes('## 你拒绝过'), '同一件事不重复写两遍')
+})
+
+test('清单排到第 9 条以后的拒绝没摆进「我站哪边」，就得留在「你拒绝过」里', () => {
+  // 清单内部留 STANCE_MAX 条，身份文档只摆前 STANCE_PROMPT_MAX 条。
+  // 去重要是按整张清单算，排在后面的那件事两头都没有，整份文档里就找不到它了。
+  const topics = ['替别人写作业', '在群里唱歌', '半夜叫醒他', '假装自己是人', '背着他改设置', '把私聊贴到群里', '替他回别人的消息', '说自己没看过的番好看']
+  const nevers = (n) => topics.slice(0, n).flatMap((t, i) => [
+    belief(`我绝不${t}`, { id: `b${i}a`, mentions: 3 }),
+    belief(`我绝不${t}`, { id: `b${i}b`, mentions: 3 }),
+  ])
+  const refusals = [
+    refusal({ at: '2026-10-01T10:00:00Z' }),
+    refusal({ at: '2026-10-02T10:00:00Z' }),
+    refusal({ at: '2026-10-09T10:00:00Z' }),
+  ]
+  const doc = (beliefs) => {
+    const m = model({ stageGate: { passed: ['trust', 'autonomy', 'competence'] }, faded: [], name: null, absenceDays: 0, beliefs, refusals })
+    const text = buildSections(m).map((s) => s.text).join('\n\n')
+    const part = (head) => text.split('\n\n').find((s) => s.startsWith(head)) ?? ''
+    return { list: buildStances(m), stand: part('## 我站哪边'), refused: part('## 你拒绝过') }
+  }
+
+  // 8 组判断排在前面，升格的拒绝是清单第 9 条：没摆出来
+  const over = doc(nevers(STANCE_PROMPT_MAX))
+  assert.equal(over.list.length, STANCE_PROMPT_MAX + 1)
+  assert.equal(over.list[STANCE_PROMPT_MAX].kind, 'refused')
+  assert.equal(over.stand.split('\n').filter((l) => l.startsWith('- ')).length, STANCE_PROMPT_MAX)
+  assert.ok(!over.stand.includes('老大'))
+  assert.ok(over.refused.includes('老大'), '没摆进「我站哪边」的拒绝，还在「你拒绝过」里')
+
+  // 少一组判断，它是第 8 条：摆进「我站哪边」，「你拒绝过」照旧不重复
+  const fits = doc(nevers(STANCE_PROMPT_MAX - 1))
+  assert.ok(fits.stand.includes('- 他让你叫老大，你没叫。这件事你一直没改口。'))
+  assert.equal(fits.refused, '')
 })

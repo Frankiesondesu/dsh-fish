@@ -94,6 +94,7 @@ export const SETTINGS = [
   { group: '评论区', key: 'comment.atOwner', label: '评论开头 @ 你', kind: 'bool', hint: '需要先在 DSH 侧存过你的昵称' },
 
   { group: '对话', key: 'chat.rotateAfter', label: '聊满几轮换新会话', kind: 'num', min: 0, max: 500, step: 10, hint: '0 = 永不换。换会话=侧栏上下文换一条，账本记忆不断；下面还有按会话大小的触发器，谁先到谁生效' },
+  { group: '对话', key: 'chat.carry', label: '换新会话时带几轮原话', kind: 'num', min: 0, max: 20, step: 1, hint: '0 = 不带。换窗口时把最后这几轮原话原样搬过去（「上次我们说到这」），一句不改、不总结；带得越多，换窗口后的头几轮越占地方' },
   { group: '对话', key: 'chat.rotateWhenKB', label: '会话内容多大换新', kind: 'num', min: 0, max: 5000, step: 100, hint: 'KB，0 = 不看大小。轮数和上下文大小不挂钩（一轮调很多次工具也会顶爆），量的是会话日志里会进上下文的内容（估），与轮数谁先到谁生效。默认 1MB（2026-11-10 计量修准后调上来；800 是旧口径虚高时的保守值）' },
   { group: '对话', key: 'chat.replyChars', label: '单轮最多写多少字', kind: 'num', min: 0, max: 2000, step: 100, hint: '0 = 不限（默认），提示词里不出现任何长度要求' },
 
@@ -144,7 +145,7 @@ export const UNIT = {
   'avoid.minDuration': '秒', 'bili.minIntervalMs': 'ms', 'bili.jitterMs': 'ms',
   'video.perDay': '条', 'video.offPeakPerDay': '条',
   'comment.perDay': '条', 'comment.replyPerDay': '条', 'comment.scanEveryMin': '分',
-  'chat.rotateAfter': '轮', 'chat.rotateWhenKB': 'KB', 'chat.replyChars': '字',
+  'chat.rotateAfter': '轮', 'chat.carry': '轮', 'chat.rotateWhenKB': 'KB', 'chat.replyChars': '字',
   'rooms.groupRotateDays': '天',
   'memory.docBudget': '字', 'memory.sleepEveryDays': '天', 'memory.sleepKeep': '条',
   'memory.beliefsShown': '条', 'memory.hearEvery': '轮',

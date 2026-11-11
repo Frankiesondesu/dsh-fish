@@ -26,7 +26,7 @@ import { holdWake } from './wakewin.js'
 import { detectAbsence, lastAbsenceEvent } from './absence.js'
 import { createClient } from './bili.js'
 import { gather, browseCountToday, recordBrowse, lastBrowseAt, browseGapMs } from './browse.js'
-import { seenOn, glancedItems, digestMentioned, DIGEST_PREFIX } from './whatseen.js'
+import { seenOn, pendingGlances, staleGlances, DIGEST_PREFIX } from './whatseen.js'
 import { riskState, browsePlan, noteRisk, isRiskCode } from './risk.js'
 import { scanReplies, renderReplies, repliesScanDue, markRepliesSeen, REPLY_SHOW_MAX } from './comment.js'
 import { flushReport } from './report.js'
@@ -1051,32 +1051,84 @@ export function countPhrase(n) {
   return word ? `${word}十多条` : '好几十条'
 }
 
-/** 那一行最多念几个标题（记「提过谁」也按这个数算）。 */
-export const DIGEST_NAMES_MAX = 3
+/**
+ * 那一行最多念几个标题（记「提过谁」也按这个数算）。
+ *
+ * 2026-11-11（用户 m00690）：3 → 6。3 条时每天能念的（2 次醒来 × 3）刚好比每天
+ * 刷到的（2 趟 × 4 = 8）少 2 条，队列只涨不落，攒到 39 条还是轮不到；6 条时
+ * 每天能念 12 条，四五天就能把积压清空。一眼看 6 个标题也不至于变成一份清单。
+ *
+ * 2026-11-11（用户 m01004 二次拍板）：这个数**不再是死数**，改成按配置算
+ * （见 digestNamesFor）。6 只作为「算不出来时」的兜底。
+ */
+export const DIGEST_NAMES_MAX = 6
+
+/** 自适应额度的下限：少于 3 条，这一行就不值得占一次醒来。 */
+export const DIGEST_NAMES_FLOOR = 3
+
+/**
+ * 自适应额度的上限。20 条是 topN 的封顶，再往上这一行就从「线索」变成「清单」了；
+ * 行长实测 20 条约 530 字，仍比整段摆素材短得多。
+ */
+export const DIGEST_NAMES_CAP = 20
+
+/**
+ * 这一趟念几条（2026-11-11，用户 m01004）。
+ *
+ * 算法是「收支平衡」：每天刷进 `browse.perDay × browse.topN` 条，每天醒
+ * `min(daily.events, wakesPerDay)` 次，那每趟至少得念进/醒 这么多条才追得上；
+ * 再留 2 条余量，才不只是原地踏步而是真能清掉旧积压。
+ *
+ * 积压没那么多时不用管——browseDigestLine 会照实全念，这条额度只是天花板。
+ *
+ * 几档实算（perDay × topN，醒几次 → 额度）：
+ *   2 × 4，醒 2 → 6（和原来的死数一致，不改变眼下的观感）
+ *   3 × 7，醒 2 → 13    4 × 7，醒 2 → 16    4 × 7，醒 4 → 9
+ *   4 × 20，醒 4 → 22 → 封顶 20
+ * 对照实测：4×7 配醒 2 时每天刷 28 条、原来只念 12 条，念出率 43%；16 条时能追平。
+ */
+export function digestNamesFor(config = {}) {
+  const perDay = Math.max(0, Number(config?.browse?.perDay ?? 0) || 0)
+  const topN = Math.max(0, Number(config?.browse?.topN ?? 0) || 0)
+  // 醒来次数受两道配额同时压着（plan() 两道都查），这里取小的那个才不失真。
+  const events = Number(config?.daily?.events ?? 1) || 1
+  const wakes = Number(config?.wakesPerDay ?? 1) || 1
+  const perWake = Math.ceil((perDay * topN) / Math.max(1, Math.min(events, wakes)))
+  // 没在刷（perDay 或 topN 为 0）就别拿这个数折腾，沿用兜底值。
+  if (!perWake) return DIGEST_NAMES_MAX
+  return Math.max(DIGEST_NAMES_FLOOR, Math.min(DIGEST_NAMES_CAP, perWake + 2))
+}
 
 /**
  * 醒来时那一行便条（2026-11-07，用户 m00365 / m00758）。
  *
- * 只报**上一次醒来之后**新翻到的：不然每隔几小时醒来都是同三条标题，
- * 那就成了复述，不是「今天外面有过什么」。
- * 今天还没醒过时 since=0，这一行才真的覆盖「今天」；标题最多三条，条数一多就只说「十几条」。
+ * 2026-11-11（用户反馈）改成「没念过的队列」：题目从「上次醒来之后新翻到的」
+ * 换成「攒着的、还没念过的」——跨天的也算，念过一条才划掉一条。
+ * 条数一多就只说「十几条」，标题最多六条，剩下的下次接着念。
+ *
+ * 2026-11-11（用户 m00690 第 2 条）：队列只回看 7 天，更早那批会无声掉出窗口。
+ * `opts.stale` 是窗外还剩多少条，补一句「还有 N 条更早的，没摆出来」——
+ * 不念标题（早就该翻篇了），但也不假装它们从没存在过。
  *
  * 2026-11-08（用户 m00187 第 4 条）：调用方还要把**已经提过的**剔掉——
  * 安静刷会把同一个列表反复记成 `browse:`，只按时间过滤不算「新翻到的」。
- * 那一层在 whatseen.js 的 digestMentioned()，这里只管把已经筛好的一条念出来。
+ * 那一层在 whatseen.js 的 pendingGlances()，这里只管把已经筛好的一条念出来。
  */
 export function browseDigestLine(items, opts = {}) {
   const max = Math.max(1, Number(opts?.max ?? DIGEST_NAMES_MAX) || DIGEST_NAMES_MAX)
-  const since = Number(opts?.since ?? 0) || 0
+  const stale = Math.max(0, Math.floor(Number(opts?.stale) || 0))
+  const fold = stale > 0 ? `（还有 ${stale} 条更早的，没摆出来）` : ''
   const all = (items ?? []).filter((x) => x?.bvid)
-  if (!all.length) return ''
+  if (!all.length) {
+    // 队列空了、可窗外还有——那也得说一句，不然她就以为这阵子什么都没翻到。
+    return fold ? `最近没翻到什么新的${fold}。` : ''
+  }
   const show = all.slice(0, max)
   const names = show.map((x) => (x.title ? `《${x.title}》` : x.bvid)).join('、')
   const more = all.length > show.length ? ' 等' : ''
-  // 今天还没醒过（since=0）时，这确是「今天」；醒过一次之后，数字只覆盖
-  // 上次醒来之后那一段，就别再说成「今天」，否则同一个「今天」两句不同口径。
-  const head = since > 0 ? '上次醒来之后，你自己又翻到了' : '今天你自己又翻到了'
-  return `${head} ${countPhrase(all.length)}：${names}${more}。想看哪条，用 bili_look 打开它；想知道画面是什么样，用 bili_watch 看一眼。`
+  // 不说「今天」，也不说「上次醒来之后」：这个队列是跨天攒的，两种说法都会撒谎。
+  const head = '最近你自己又翻到了'
+  return `${head} ${countPhrase(all.length)}：${names}${more}${fold}。想看哪条，用 bili_look 打开它；想知道画面是什么样，用 bili_watch 看一眼。`
 }
 
 /**
@@ -1190,7 +1242,7 @@ async function wake(ctx, root, model, config, decision, dk, log, deps = {}) {
   // 手动「让她去刷 B 站」（forceBrowse）本来就指定了这一轮做什么，不跟着空醒一起收。
   // 2026-11-07（用户 m00365）：自动刷改由后台自己走（见 quietBrowse），这一轮不再摆
   // 十几条标题简介热评——那会把每一次醒来都变成刷站，把别的材料挤掉（0.9.0 摘它的原因）。
-  // 只留一行便条：上一次醒来之后她又翻到了哪几条；想看哪条，她自己调 bili_look / bili_watch。
+  // 只留一行便条：她还攒着哪几条没念过；想看哪条，她自己调 bili_look / bili_watch。
   // 断网（biliOn 为假）时不念：身份文档说她这会儿出不去，bili_look 也回打不开，
   // 这一行却叫她「自己点开」，同一轮里三种说法。断网前记下、还没念过的也一并不念。
   // 念进这一行的 BV 号先攒着，真递进去了才记 `digest:`（见下面投递成功那一段）。
@@ -1200,19 +1252,26 @@ async function wake(ctx, root, model, config, decision, dk, log, deps = {}) {
       // 现读一遍：tick 开头那份快照是「这一轮开始前」的，安静刷刚写的 browse: 不在里面，
       // 醒来就会漏掉本该带上的那一行。
       const evs = await readEvents(root).then((r) => r.events).catch(() => deps.events ?? [])
-      const since = lastWakeAt(evs, dk)
-      // 2026-11-08（用户 m00187 第 4 条）：提过的不再提。安静刷隔几个钟头就把
-      // 同一个列表再记一遍 `browse:`，光按 since 过滤拦不住——连醒三次，三次同一条。
-      const said = digestMentioned(evs, { now: now.getTime() })
-      const fresh = glancedItems(evs, dk, { since }).filter((x) => !said.has(x.bvid))
-      const line = browseDigestLine(fresh, { since, max: DIGEST_NAMES_MAX })
+      // 2026-11-11（用户反馈）：不再问「上次醒来是什么时候」。那个口径由 lastWakeAt()
+      // 现算，只认当天那一行，跨零点就把前一晚刷到的全作废；而且一次只念三条，
+      // 剩下几条的时间戳早于本次醒来，下一次醒来又层层滤掉，永远轮不到。
+      // 现在改成一个队列：近 7 天刷到、还没念过的都排着，念一条划掉一条。
+      const pending = pendingGlances(evs, { now: now.getTime() })
+      // 2026-11-11（用户 m00690 第 2 条）：7 天窗外的条目以前是无声丢掉的。
+      // 现在数一数还有多少条没摆出来过，补一句「还有 N 条更早的」——
+      // 不念标题（早该翻篇了），但也不让那一批彻底不存在。
+      const stale = staleGlances(evs, { now: now.getTime() })
+      // 2026-11-11（用户 m01004）：条数按「每天刷进多少 ÷ 每天醒几次」算，不再写死。
+      // 积压少的时候不用管这个上限，browseDigestLine 有几条念几条。
+      const namesMax = digestNamesFor(config)
+      const line = browseDigestLine(pending, { max: namesMax, stale })
       if (line) {
         parts.push('', line)
-        // 只记真念出来的那几条：剩下的留给下一次醒来，否则「十几条」里
-        // 没被点名的一直轮不到，等于白翻。
+        // 只记真念出来的那几条：没点名的留在队列里，下一次醒来接着念。
         // 这里只攒、不记：后面取不到屋子会话、收摊、处境被清空、投递失败都会让这一轮
         // 根本没开口，先记了的话这几条就被当成「提过」，以后再也不念。
-        digestShown = fresh.slice(0, DIGEST_NAMES_MAX).map((x) => x.bvid)
+        // 窗外那批不记也不再念——`stale` 只是个数，没有 BV 号可记。
+        digestShown = pending.slice(0, namesMax).map((x) => x.bvid)
       }
     } catch { /* 一行便条拖不垮一次唤醒 */ }
   }

@@ -13,7 +13,7 @@
 import { clipText } from './clip.js'
 import { promptBans } from './rules.js'
 // 立场清单（2026-10-25，用户设计「纵向·立场」）。纯函数，不读盘、不碰配置。
-import { buildStances, stanceSection } from './stance.js'
+import { buildStances, shownStances, stanceSection } from './stance.js'
 
 /**
  * 阶段的「名字」——只给观测台和日志看，**不再写进她的身份文档**。
@@ -319,8 +319,8 @@ export function buildSections(model, opts = {}) {
    * 「看到以前的日记，感觉像是另一个人写的，我只是能读」。
    *
    * 诊断：这份文档能永久留住的**全是结论**（立场、疤、拒绝、自我叙述），没有一条
-   * 把她和「那些天是连着过的」绑在一起；续接用的 carry 只带 4 句原话、8 轮就消失
-   * （见 home.activeCarry）。于是她知道自己说过某句，却不记得说过——不是记忆丢了，
+   * 把她和「那些天是连着过的」绑在一起；续接用的 carry 只带最近几轮原话（默认 4 轮，
+   * `config.chat.carry` 可调 0–20）、8 轮就消失（见 home.activeCarry）。于是她知道自己说过某句，却不记得说过——不是记忆丢了，
    * 是经历丢了。
    *
    * 为什么是核心段：被预算裁一次就等于那些天没发生过。跟疤同一条理由。
@@ -529,7 +529,9 @@ export function buildSections(model, opts = {}) {
 
   // 已升格进「我站哪边」的那件事不再重复摆一遍（0.9.7 U3）：
   // 同一个场景写两遍，既白吃 2400 字预算，也读起来像在强调。
-  const promoted = new Set(stanceList.flatMap((s) => s.members ?? []))
+  // 只算真摆出来的那几条（shownStances）：清单内部留得比摆出来的多，
+  // 排在后面没摆进「我站哪边」的拒绝得留在这里，不然两头都没有。
+  const promoted = new Set(shownStances(stanceList).flatMap((s) => s.members ?? []))
   const looseRefusals = model.refusals.filter((r) => !promoted.has(r.id))
   if (looseRefusals.length) {
     // P1 第二块（2026-10-24）：拒绝不再只有一句原话，还带着"他听完怎么反应"。
@@ -883,7 +885,9 @@ export const DIARY_BRIEF = [
   // her_recall，那句话就不成立了。现在真给了 her_diary，得把话说明白：
   // 想回头翻就走这个工具，它只读、一次一份。
   // 2026-11-09（用户 m00002）：她自己的入口句补进这一段——想翻某一天，不是「有 her_diary」。
-  '什么时候想起它——想回头翻的时候用 her_diary：想看看以前某一天写了什么，就去翻；那些字是我的，别人看不看是别人的事。',
+  // 2026-11-10：只按日期翻，她就得先记得日期；可要翻的往往正是「记不清哪一天」的那种事。
+  // 工具现在也能按词找，这一句得跟上，不然她永远只会按天试。
+  '什么时候想起它——想翻以前某天写了什么就用 her_diary；记不清哪一天，就给个词让它去找。那些字是我的，别人看不看是别人的事。',
   // 2026-10-29（用户 m01296 A）：光说「每天记一笔」不够——三天零篇的直接原因就是
   // 这一段只讲了「会做这件事」，没讲「用哪个东西做」。同页 SLEEP_BRIEF 明写了
   // growth_commit / refs，她照着能做出来；这一段没写机制，就一次也没试过。

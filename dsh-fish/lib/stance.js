@@ -218,11 +218,22 @@ function sameTopic(a, b) {
   return similarity(x, y) >= 0.6
 }
 
+/**
+ * 一条立场朝哪边。打架看的是方向，不是 kind：
+ * 「我绝不吃辣」（never）和「他让你吃辣，你没答应」（refused，0.9.7 U2）是同一个方向，
+ * 一条是她说的话，一条是她没做的事，谁也不是谁的「以前」。只有 like 朝另一边。
+ * 按 kind 不同就算打架的话，她那句「我绝不…」会被模板句顶掉，或者被挂上一句
+ * 她没改过的「我改过口」；比不出先后时两条还会一起从清单里消失。
+ */
+function sideOf(kind) {
+  return kind === 'like' ? 'like' : 'no'
+}
+
 function resolveConflicts(groups) {
   const out = []
   for (const g of groups) {
     const clash = out.findIndex(
-      (o) => o.kind !== g.kind && sameTopic(o.text, g.text),
+      (o) => sideOf(o.kind) !== sideOf(g.kind) && sameTopic(o.text, g.text),
     )
     if (clash < 0) {
       out.push(g)
@@ -263,9 +274,18 @@ export function stanceLine(s) {
   return `- ${s.text}${cost}${flip}`
 }
 
+/**
+ * 清单里真正写进身份文档的那几条（前 STANCE_PROMPT_MAX 条）。
+ * `persona.js` 给「你拒绝过」去重时用的也是这一份：清单内部留到 STANCE_MAX 条，
+ * 排在后面没摆出来的拒绝不能算「已经升格」，不然两头都没有，这件事就从文档里消失了。
+ */
+export function shownStances(stances = []) {
+  return stances.slice(0, STANCE_PROMPT_MAX)
+}
+
 /** 身份文档里的那一段（空清单返回空串，不占预算）。 */
 export function stanceSection(stances = []) {
-  const list = stances.slice(0, STANCE_PROMPT_MAX)
+  const list = shownStances(stances)
   if (!list.length) return ''
   const refused = list.filter((s) => s.kind === 'refused')
   const nevers = list.filter((s) => s.kind === 'never')

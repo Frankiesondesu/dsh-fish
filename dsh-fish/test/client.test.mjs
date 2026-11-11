@@ -861,11 +861,12 @@ test('设置页切页不能把判据 showTab 当成开关用（issue #12）', as
 
 test('时段控件下面补一行 24 小时制：00:00 不会被读成中午十二点', async () => {
   // 「每天几点醒」在「生长」页（lib/client.js 里 growPage 那张卡），默认停在「状态」页，
-  // 得把 tab 拨过去。tab 是本组件第 47 个 useState（0 基下标 46）。
+  // 得把 tab 拨过去。tab 是本组件第 48 个 useState（0 基下标 47）。
   // 下标挪过几次：本 fork 加 rotateWhenKB 时 44→45；0.9.7 又在白名单那组加了一个
-  // state（只在特定场合才给她的工具）、T1 在 docBudget 后面加了 echoOn，顶到 46。
+  // state（只在特定场合才给她的工具）、T1 在 docBudget 后面加了 echoOn，顶到 46；
+  // 0.9.8 在 rotateAfter 后面加了 carryTurns（换会话带几轮原话），顶到 47。
   // 以后再往它前面加 state，这里要跟着挪。
-  const react = fakeReact({ 46: 'grow' })
+  const react = fakeReact({ 47: 'grow' })
   const { exports } = await loadClient({ react })
   react.resetCursor()
   const txt = textOf(exports.FishSection()).join(' ')

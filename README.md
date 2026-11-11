@@ -10,7 +10,7 @@ DSH（DeepSeek Harness）插件：**不写人设、不做记忆摘要**——人
   主动搭话推送、申请卡推送与代答
 - **查看器**（viewer/，127.0.0.1:7788）：人格数据、她说的话（含发到 QQ 的）、事件流、
   观测台（待答申请/信箱/规则裁决/你不在的时候）、上网记录、记忆体检、用量、
-  本机状态、**全量设置页（71 项）**
+  本机状态、**全量设置页（73 项）**
 - **GUI 管理器**（manager/，7789）：各服务启停/重启、待重启检测、启动日志
 - **白板画笔 her_draw**：线/矩形/圆/箭头/文字，构图由她定，渲染成 PNG
 - **公式排版 her_formula**：一段「文字 + `$公式$`」排成一页图（Edge 无头 + MathJax），讲推导用
@@ -22,6 +22,9 @@ DSH（DeepSeek Harness）插件：**不写人设、不做记忆摘要**——人
 
 > ⚠️ 仓库里**没有**她——她的账本、日记、画都在运行目录（默认 `~/.dsh-fish`），
 > 每一份都是那个使用者在自己的生活里养出来的。你拿到的是一套养她的框架。
+>
+> 📖 从零部署的完整步骤（插件安装、QQ 桥、查看器权限、备份迁移、常见坑）见
+> **[DEPLOY.md](DEPLOY.md)**。
 
 ---
 
@@ -86,7 +89,7 @@ QQ 桥是独立 Node 进程，连 LLOneBot（OneBot）收发 QQ 消息。从
 
 ## 她的配置：`~/.dsh-fish/config.json`
 
-26 组配置控制成长节奏与生活半径：醒来的时段与次数（`wakesPerDay`/`window`）、
+27 个顶层配置组控制成长节奏与生活半径：醒来的时段与次数（`wakesPerDay`/`window`）、
 主动搭话（`proactive`/`drive`）、上网与看视频（`browse`/`bili`/`video`/`comment`）、
 日记与回忆门槛（`diary`/`recall`）、上下文预算（`memory`）、会话轮换（`chat`）、
 天气坐标（`world.city`）、工具面白名单（`tools.restrict`/`allow`）……
@@ -99,8 +102,8 @@ QQ 桥是独立 Node 进程，连 LLOneBot（OneBot）收发 QQ 消息。从
 ```
 fish/
 ├── dsh-fish/          # 插件本体（上游同步在此进行）
-│   ├── lib/           #   账本人格 / 调度器 / 20 件工具 / 观测接口
-│   └── test/          #   1800+ 项测试
+│   ├── lib/           #   账本人格 / 调度器 / 23 件工具 / 观测接口
+│   └── test/          #   2400+ 项测试
 ├── bridge/            # QQ 桥（独立 Node 进程，配置见上）
 ├── viewer/            # 查看器（7788）
 ├── manager/           # GUI 管理器（7789）
@@ -114,13 +117,14 @@ fish/
 换盘/换机见「数据目录解析」——支持 `DSH_FISH_HOME` 环境变量与指针文件，
 **永远不要合并两份数据目录**。
 
-## 她的工具面（21 件）
+## 她的工具面（23 件）
 
 收窄后的白名单（`tools.restrict`，默认开）让她只看见这一套：
 `her_say`（发消息到 QQ，主动/回复同款）、`her_draw`（白板）、`her_formula`（公式排版）、`her_voice`（语音条）、
 `her_meme`（表情包）、`her_world`（日期/天气）、`her_note`（桌面便条）、
-`her_alarm`（自定闹钟）、`her_recall`/`her_diary`/`growth_commit`/`her_dream`（记忆与自我）、
+`her_alarm`（自定闹钟）、`her_appoint`（跟他约一件具体的事）、`her_recall`/`her_diary`/`growth_commit`/`her_dream`（记忆与自我）、
 `her_leave`/`ask_owner`/`her_help`（留言/申请/说明书）、
+`her_space`（她自己的资料柜）、
 `bili_look`/`bili_watch`/`bili_zoom`/`bili_speak`（B 站）、
 `her_open`/`her_watch_local`/`read_image`（文件与画面）。
 
