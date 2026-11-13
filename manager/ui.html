@@ -217,6 +217,39 @@
     .bulk{width:100%}
     .bulk button{flex:1}
   }
+  /* ---------- 记忆同步（2026-11-12）----------
+     放在页面最底下：先看服务、再回头看记忆。 */
+  .mempanel{
+    max-width:1132px; margin:0 auto 20px; padding:16px 18px 18px;
+    border:1px solid var(--line); border-radius:var(--r); background:var(--panel);
+  }
+  .memhead{display:flex; align-items:center; gap:12px; flex-wrap:wrap; margin-bottom:14px}
+  .memhead b{font-size:13.5px; font-weight:620}
+  .memhead .dim{font-size:12px; color:var(--dim)}
+  .memgrid{display:grid; grid-template-columns:1fr 1fr 1fr; gap:12px}
+  .memcard{background:var(--panel2); border:1px solid var(--line); border-radius:12px; padding:12px 14px}
+  .memcard .t{font-size:11.5px; color:var(--dim2); margin-bottom:9px; letter-spacing:.4px}
+  .memcard .big{font-size:21px; font-weight:600; font-variant-numeric:tabular-nums; line-height:1.25}
+  .memcard .unit{font-size:12px; color:var(--dim); margin-left:6px; font-weight:400}
+  .memcard .row{display:flex; justify-content:space-between; gap:12px; font-size:12px; color:var(--dim); padding:3px 0}
+  .memcard .row b{color:var(--fg); font-weight:520; text-align:right; word-break:break-word; max-width:62%}
+  .memverdict{display:flex; align-items:center; gap:10px; font-size:12.5px; margin-top:12px}
+  .memverdict .dot{width:8px; height:8px; border-radius:50%; background:var(--dim2); flex:none}
+  .memverdict.ok{border-color:rgba(74,222,128,.35)} .memverdict.ok .dot{background:var(--ok)}
+  .memverdict.warn{border-color:rgba(245,189,98,.42)} .memverdict.warn .dot{background:var(--warn)}
+  .memverdict.bad{border-color:rgba(240,120,138,.42)} .memverdict.bad .dot{background:var(--bad)}
+
+  /* 树状图（SVG）：三条泳道，节点按时间排，连线表示「这台机器打的包传到了云端」 */
+  .memtreewrap{
+    margin-top:14px; padding:6px; max-height:480px; overflow:auto;
+    background:var(--panel2); border:1px solid var(--line); border-radius:12px;
+  }
+  .memtreewrap svg{display:block; width:100%; height:auto}
+  @media (max-width:900px){
+    .memgrid{grid-template-columns:1fr}
+    .mempanel{max-width:none; margin:0 16px 20px}
+  }
+
 </style>
 </head>
 <body>
@@ -238,6 +271,25 @@
 <main>
   <div class="grid" id="grid"></div>
 </main>
+
+<section class="mempanel" id="mempanel">
+  <div class="memhead">
+    <b>记忆同步</b>
+    <span class="dim" id="meminfo">读取中…</span>
+    <div class="spacer"></div>
+    <button class="ghost" id="memphone" title="经 USB 探手机容器里的账本，要等几秒">探手机</button>
+    <button class="ghost" id="memremote" title="向 GitHub 问一次远端 main 在哪，会等几秒">问云端</button>
+    <button class="ghost" id="memrefresh">刷新</button>
+  </div>
+  <div class="memgrid">
+    <div class="memcard" id="memlocal"><div class="t">本机记忆</div><div class="dim" style="font-size:12.5px">读取中…</div></div>
+    <div class="memcard" id="memcloud"><div class="t">云端记忆（快照）</div><div class="dim" style="font-size:12.5px">读取中…</div></div>
+    <div class="memcard" id="memlast"><div class="t">上次同步</div><div class="dim" style="font-size:12.5px">读取中…</div></div>
+  </div>
+  <div class="memcard memverdict" id="memverdict"><span class="dot"></span><span class="dim">判定中…</span></div>
+
+  <div class="memtreewrap" id="memtree"></div>
+</section>
 
 <footer>
   启动/停止都交给仓库根目录的 <code>launch.mjs</code> / <code>shutdown.mjs</code> / <code>restart.mjs</code>，
@@ -526,6 +578,242 @@ document.getElementById('logtoggle').addEventListener('click', (ev) => {
   // 收起时把底部留白收回去，不然白挺大一块
   document.body.style.paddingBottom = p.classList.contains('collapsed') ? '60px' : '';
 });
+
+// ---------------------------------------------------------------- 记忆同步
+//
+// 只显示现状，不在这里做同步动作（同步归 sync.mjs）。
+// 默认不联网：ls-remote 在慢网要十几秒，页面会像死了一样；
+// 要真问远端就点「问一下云端」，那条路带 remote=1 且服务端限时。
+
+function fmtBytes(n) {
+  n = Number(n) || 0;
+  if (n < 1024) return n + 'B';
+  if (n < 1024 * 1024) return (n / 1024).toFixed(0) + 'KB';
+  if (n < 1024 * 1024 * 1024) return (n / 1024 / 1024).toFixed(1) + 'MB';
+  return (n / 1024 / 1024 / 1024).toFixed(2) + 'GB';
+}
+
+function fmtWhen(iso) {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return String(iso);
+  const p = n => String(n).padStart(2, '0');
+  const hm = p(d.getHours()) + ':' + p(d.getMinutes());
+  const sameDay = d.toDateString() === new Date().toDateString();
+  return sameDay ? hm : (d.getMonth() + 1) + '月' + d.getDate() + '日 ' + hm;
+}
+
+function renderMemory(d) {
+  const info = document.getElementById('meminfo');
+  const localEl = document.getElementById('memlocal');
+  const cloudEl = document.getElementById('memcloud');
+  const lastEl = document.getElementById('memlast');
+  const verdictEl = document.getElementById('memverdict');
+  const treeEl = document.getElementById('memtree');
+
+  if (!d || d.error) {
+    info.textContent = '读不到：' + ((d && d.error) || '未知原因');
+    return;
+  }
+  info.textContent = '读于 ' + fmtWhen(d.at);
+
+  const L = d.local || {};
+  const led = L.ledger || {};
+  const recent = led.recent || [];
+  // 最后一条「有内容」的（meta 多半是 seen/talk 记账，看着像噪音，但可能是唯一一条）
+  const ev = recent.find(e => e.type && e.type !== 'meta') || recent[0] || {};
+  localEl.innerHTML = `
+    <div class="t">本机记忆</div>
+    <div class="big">${led.ok ? led.lines : '—'}<span class="unit">条事件</span></div>
+    <div class="row"><span>最后写入</span><b>${esc(fmtWhen(led.mtime))}</b></div>
+    <div class="row"><span>最后一条</span><b>${esc((ev.type || '—') + (ev.text ? ' · ' + ev.text.slice(0, 40) : ''))}</b></div>
+    <div class="row"><span>目录</span><b>${esc(fmtBytes(L.dirBytes))} / ${esc(L.files || 0)} 个文件</b></div>
+  `;
+
+  const C = d.cloud || {};
+  const lm = C.localMain || {};
+  let remoteLine = '未问（点右上「问一下云端」）';
+  if (C.reachable === true) remoteLine = '一致 · ' + String(C.remoteMain || '').slice(0, 7);
+  else if (C.reachable === false) remoteLine = '问不到：' + (C.remoteError || '网络不通');
+  else if (C.originMain) remoteLine = '上次 fetch 记的是 ' + String(C.originMain).slice(0, 7);
+  cloudEl.innerHTML = `
+    <div class="t">云端记忆（快照）</div>
+    <div class="big">${esc(String(lm.sha || '').slice(0, 7) || '—')}<span class="unit">${esc(fmtWhen(lm.at))}</span></div>
+    <div class="row"><span>快照说明</span><b>${esc(lm.subject || '—')}</b></div>
+    <div class="row"><span>包大小</span><b>${esc(fmtBytes(C.pkgBytes))}</b></div>
+    <div class="row"><span>远端</span><b>${esc(remoteLine)}</b></div>
+  `;
+
+  const s = L.lastSync;
+  lastEl.innerHTML = `
+    <div class="t">上次同步</div>
+    <div class="big">${esc(s && s.decision ? s.decision : '—')}<span class="unit">${esc(s && s.at ? fmtWhen(s.at) : '')}</span></div>
+    <div class="row"><span>上次备份成功</span><b>${esc(fmtWhen((d.verdict || {}).backupAt))}</b></div>
+    <div class="row"><span>备份记录</span><b>${s ? '有' : '没有'}</b></div>
+    <div class="row"><span>云端仓库</span><b>${esc(C.ok ? '可读' : (C.error || '读不到'))}</b></div>
+  `;
+
+  const v = d.verdict || {};
+  const cls = v.kind === 'same' ? 'ok' : v.kind === 'local-newer' ? 'warn' : v.kind === 'unknown' ? '' : 'bad';
+  verdictEl.className = 'memcard memverdict ' + cls;
+  verdictEl.innerHTML = `<span class="dot"></span><span>${esc(v.note || '—')}</span>`;
+
+  renderTree(treeEl, d);
+}
+
+/**
+ * 树状图（2026-11-12 用户要的形态）。
+ *
+ * 三条泳道：手机 / 本机 / 云端，各画各的节点，按时间从上往下排（新的在上）。
+ * 节点内容来自两处：
+ *   · vault/history.jsonl —— 每台设备打包时明文留下的「时间 / 设备 / 条数 / 大小」
+ *   · git log main —— 云端真正收下的快照
+ * 当一个打包节点与某个快照时间接近（10 分钟内），就在两条泳道之间画一条曲线，
+ * 表示「这次打包进到了那个快照」。没有留痕的老快照只出现在云端泳道里。
+ */
+function renderTree(box, d) {
+  const W = 1000;
+  const lanes = [
+    { key: 'phone', x: 20, cx: 160, label: '手机', color: '#a78bfa' },
+    { key: 'pc', x: 360, cx: 500, label: '本机', color: '#4ade80' },
+    { key: 'cloud', x: 700, cx: 840, label: '云端', color: '#8aa4ff' },
+  ];
+  const C = d.cloud || {};
+  const P = d.phone;
+  const ev = [];
+
+  // 打包留痕（有设备端）
+  for (const u of (C.uploads || [])) {
+    const isPhone = u.device === 'phone';
+    ev.push({
+      at: u.at,
+      lane: isPhone ? 'phone' : 'pc',
+      title: isPhone ? '手机打包' : '电脑打包',
+      sub: (u.ledger || 0) + ' 条 · ' + fmtBytes(u.bytes),
+      kind: 'pack',
+    });
+  }
+  // 本机按天写了多少（没有打包留痕时，本机泳道至少不是空的）
+  if (!(C.uploads || []).some((u) => u.device !== 'phone')) {
+    for (const day of (d.byDay || []).slice(0, 4)) {
+      ev.push({
+        at: day.lastAt || (day.day + 'T00:00:00Z'),
+        lane: 'pc',
+        title: day.day.slice(5) + ' 写了 ' + day.count + ' 条',
+        sub: '',
+        kind: 'write',
+      });
+    }
+  }
+  // 手机探到的现状（没探过就不画，别拿假的凑数）
+  if (P && P.ok) {
+    ev.push({
+      at: P.mtime || d.at,
+      lane: 'phone',
+      title: '手机账本 ' + (P.lines || 0) + ' 条',
+      sub: P.lastSync && P.lastSync.decision ? 'sync: ' + P.lastSync.decision : '',
+      kind: 'now',
+    });
+  }
+  // 云端快照
+  for (const h of (C.history || [])) {
+    ev.push({ at: h.at, lane: 'cloud', title: '快照 ' + h.sha, sub: h.subject || '', kind: 'snap' });
+  }
+
+  ev.sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0));
+  const rows = ev.slice(0, 14);
+
+  // 一个节点都没有时也要把三条泳道画出来：否则「手机 未探测」这件事就看不见了，
+  // 界面会变成一句「还没有节点」，人不知道该去点哪儿。
+  const top = 64;
+  const rowH = 74;
+  const H = top + Math.max(rows.length, 1) * rowH + 18;
+  const e2 = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  const out = [];
+
+  for (const l of lanes) {
+    out.push(`<rect x="${l.x}" y="10" width="280" height="${H - 22}" rx="14" fill="rgba(255,255,255,0.022)" stroke="rgba(255,255,255,0.07)" stroke-width="0.5"/>`);
+    out.push(`<text x="${l.cx}" y="30" text-anchor="middle" font-size="12" fill="#5f6779" font-family="inherit">${l.label}</text>`);
+    const hint = l.key === 'phone'
+      ? (!P ? '未探测' : P.ok ? (P.lines || 0) + ' 条' : '连不上')
+      : l.key === 'cloud' ? 'fish-vault · main' : '这台电脑';
+    out.push(`<text x="${l.cx}" y="46" text-anchor="middle" font-size="10.5" fill="#444b5c" font-family="inherit">${e2(hint)}</text>`);
+    out.push(`<line x1="${l.cx}" y1="${top - 18}" x2="${l.cx}" y2="${H - 26}" stroke="rgba(255,255,255,0.09)" stroke-width="1"/>`);
+  }
+
+  const ys = rows.map((_, i) => top + i * rowH);
+  const cloudRows = rows.map((e, i) => ({ e, i })).filter((x) => x.e.lane === 'cloud');
+
+  // 打包 → 快照 的连线（10 分钟内算同一次）
+  rows.forEach((e, i) => {
+    if (e.lane === 'cloud' || e.kind !== 'pack') return;
+    const t = new Date(e.at).getTime();
+    const near = cloudRows
+      .map((c) => ({ ...c, dt: Math.abs(new Date(c.e.at).getTime() - t) }))
+      .filter((c) => c.dt < 10 * 60_000)
+      .sort((a, b) => a.dt - b.dt)[0];
+    if (!near) return;
+    const from = lanes.find((l) => l.key === e.lane);
+    const to = lanes.find((l) => l.key === 'cloud');
+    const x1 = from.cx + 8;
+    const y1 = ys[i];
+    const x2 = to.cx - 8;
+    const y2 = ys[near.i];
+    const mx = (x1 + x2) / 2;
+    out.push(`<path d="M${x1} ${y1} C${mx} ${y1} ${mx} ${y2} ${x2} ${y2}" fill="none" stroke="rgba(138,164,255,0.35)" stroke-width="1.2" stroke-dasharray="3 3"/>`);
+  });
+
+  rows.forEach((e, i) => {
+    const l = lanes.find((x) => x.key === e.lane) || lanes[1];
+    const y = ys[i];
+    const hollow = e.kind === 'write';
+    out.push(`<circle cx="${l.cx}" cy="${y}" r="5.5" fill="${hollow ? 'none' : l.color}" stroke="${hollow ? l.color : '#14171f'}" stroke-width="2"/>`);
+    out.push(`<text x="${l.cx}" y="${y - 13}" text-anchor="middle" font-size="10.5" fill="#5f6779" font-family="inherit">${e2(fmtWhen(e.at))}</text>`);
+    out.push(`<text x="${l.cx}" y="${y + 21}" text-anchor="middle" font-size="12.5" fill="#e9ebf2" font-family="inherit">${e2(e.title)}</text>`);
+    if (e.sub) out.push(`<text x="${l.cx}" y="${y + 38}" text-anchor="middle" font-size="10.5" fill="#8b93a7" font-family="inherit">${e2(String(e.sub).slice(0, 28))}</text>`);
+  });
+
+  // 底部一条注：说明这份图的口径
+  const note = rows.length === 0
+    ? '还没有任何节点：账本、快照、留痕都还是空的'
+    : (C.uploads || []).length
+      ? '圆点＝一次打包留痕（设备端/时间/条数），虚线＝这次打包对应上的云端快照'
+      : '还没有打包留痕：下次备份起，每台设备都会在本泳道留下「时间 + 条数 + 大小」';
+  out.push(`<text x="${W / 2}" y="${H - 6}" text-anchor="middle" font-size="10.5" fill="#444b5c" font-family="inherit">${e2(note)}</text>`);
+
+  box.innerHTML = `<svg viewBox="0 0 ${W} ${H}" width="100%" xmlns="http://www.w3.org/2000/svg" role="img"><title>记忆修改树</title><desc>手机、本机、云端三条泳道的记忆节点与它们之间的关系</desc>${out.join('')}</svg>`;
+}
+
+// 手机探测很重（adb + ssh），只在点了才跑；轮询带回来的数据里没有 phone 字段，
+// 所以把上次探到的结果留着，别让 30 秒一次的轮询把它擦掉。
+let lastPhone = null;
+
+async function refreshMemory(opts) {
+  const o = opts || {};
+  const info = document.getElementById('meminfo');
+  const q = [];
+  if (o.remote) q.push('remote=1');
+  if (o.phone) q.push('phone=1');
+  info.textContent = o.phone
+    ? '正在经 USB 问手机（要几秒）…'
+    : o.remote ? '正在问云端（可能要几秒）…' : '读取中…';
+  try {
+    const r = await fetch('/api/memory' + (q.length ? '?' + q.join('&') : ''));
+    const d = await r.json();
+    if (d && d.phone) lastPhone = d.phone;
+    else if (lastPhone && d) d.phone = lastPhone;
+    renderMemory(d);
+  } catch (e) {
+    info.textContent = '读不到：' + e.message;
+  }
+}
+
+document.getElementById('memrefresh').addEventListener('click', () => refreshMemory({}));
+document.getElementById('memremote').addEventListener('click', () => refreshMemory({ remote: true }));
+document.getElementById('memphone').addEventListener('click', () => refreshMemory({ phone: true }));
+refreshMemory({});
+// 记忆不会每两秒变一次，跟服务探测分开轮询
+setInterval(() => refreshMemory({}), 30000);
 </script>
 </body>
 </html>

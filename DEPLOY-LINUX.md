@@ -35,7 +35,7 @@
 先拿代码（路径尽量不带空格）：
 
 ```bash
-git clone https://github.com/Frankiesondesu/dsh-fish.git ~/fish
+git clone https://github.com/<用户>desu/dsh-fish.git ~/fish
 cd ~/fish
 ```
 

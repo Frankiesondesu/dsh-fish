@@ -202,6 +202,45 @@ async function buildData() {
     model = { __error: String(err?.message ?? err) }
   }
 
+  // 2026-11-13（用户）：「每个数值都要能看见它由哪几条事件算出来的」。
+  // 在这里一次算好随 D 下发，前端点开就有，不用再把 1.2MB 账本拉到浏览器里过滤。
+  // 口头拒绝必须用 derive.js 的同一个 isWont —— 界面写「口头 3 次」，点开就得是那 3 条，
+  // 两把尺子就成了第二个真相。
+  let detail = null
+  if (model && !model.__error) {
+    // 必须解构：viewer 里会裸调用它，作用域没有就运行时才炸（1a02a85 那种）
+    let wontMatch = null
+    try {
+      const { isWont } = await import('file://' + join(FISH, 'lib', 'derive.js').replace(/\\/g, '/'))
+      if (typeof isWont === 'function') wontMatch = isWont
+    } catch { /* 拿不到就只给正式拒绝，不拿猜的凑数 */ }
+    const brief = (e) => ({
+      id: String(e.id ?? ''),
+      ts: String(e.ts ?? ''),
+      type: String(e.type ?? ''),
+      text: String(e.text ?? '').slice(0, 400),
+    })
+    detail = {
+      belief: (model.beliefs || []).map((b) => ({
+        id: String(b.id ?? ''),
+        ts: String(b.ts ?? ''),
+        text: String(b.text ?? '').slice(0, 400),
+      })),
+      refusal: events.filter((e) => e && e.type === 'refusal').slice(-40).map(brief),
+      wont: wontMatch ? events.filter((e) => e && e.type === 'utterance' && wontMatch(e.text)).slice(-40).map(brief) : null,
+      revise: events.filter((e) => e && e.type === 'revise').slice(-40).map(brief),
+      solid: (model.solid || []).map((b) => ({
+        id: String(b.id ?? ''),
+        text: String(b.text ?? '').slice(0, 400),
+        times: Number(b.times ?? b.count ?? 0),
+      })),
+      tension: (model.tensions || []).map((t) => ({
+        a: String(t.a?.text ?? '').slice(0, 200),
+        b: String(t.b?.text ?? '').slice(0, 200),
+      })),
+    }
+  }
+
   const sessionId = String(home.sessionId ?? '')
   const recs = readSessionLog(sessionId)
 
@@ -230,6 +269,7 @@ async function buildData() {
     config,
     sessions,
     model,
+    detail,
     // 2026-11-08：events 全量数组移出轮询载荷（账本 654KB→JSON 1.2MB，每 15s 推一次
     // 浏览器也要跟着解析一次）。只留条数供指纹；事件流页自己拉 /api/events。
     eventsCount: events.length,
@@ -458,6 +498,23 @@ const PAGE = String.raw`<!doctype html>
   .st-btn.ghost:hover{color:var(--fg)}
   .st-toast{position:fixed;right:22px;bottom:22px;background:#1c2634;border:1px solid var(--acc);color:var(--fg);padding:10px 16px;border-radius:10px;box-shadow:0 8px 30px rgba(0,0,0,.45);font-size:13px;z-index:20}
   @media(max-width:720px){.st-wrap{grid-template-columns:1fr}.st-nav{position:static;flex-direction:row;overflow:auto}.st-field{grid-template-columns:1fr}.st-ctl{justify-self:start}}
+  /* 数值明细（2026-11-13）：点「看构成」，看这个数由哪几条事件算出来的 */
+  .stat.st-open{cursor:pointer;transition:border-color .12s}
+  .stat.st-open:hover{border-color:var(--acc)}
+  .st-more{color:var(--acc)!important;font-size:11px!important;margin-top:4px!important;opacity:.85}
+  .detmask{position:fixed;inset:0;background:rgba(0,0,0,.6);backdrop-filter:blur(3px);z-index:300;display:flex;align-items:center;justify-content:center;padding:24px}
+  .detbox{background:var(--bg);border:1px solid var(--line);border-radius:16px;max-width:760px;width:100%;max-height:80vh;display:flex;flex-direction:column;box-shadow:0 24px 70px rgba(0,0,0,.55)}
+  .dethead{display:flex;align-items:center;gap:12px;padding:14px 18px;border-bottom:1px solid var(--line)}
+  .dethead b{font-size:14px}
+  .dethead .dim{font-size:12px;color:var(--dim)}
+  .detbody{padding:14px 18px;overflow:auto}
+  .detgroup{margin-bottom:18px}
+  .detgroup:last-child{margin-bottom:0}
+  .detgroup h4{margin:0 0 8px;font-size:12px;color:var(--dim);font-weight:500}
+  .detitem{padding:8px 11px;border-left:2px solid var(--acc);background:rgba(255,255,255,.03);border-radius:0 8px 8px 0;margin-bottom:6px}
+  .detitem .dt{font-size:11px;color:var(--dim2);font-variant-numeric:tabular-nums}
+  .detitem .dx{font-size:12.5px;color:var(--fg);margin-top:3px;line-height:1.55;white-space:pre-wrap;word-break:break-word}
+  .detempty{font-size:12.5px;color:var(--dim2);padding:6px 0}
 </style></head><body>
 <header>
   <div class="hd"><div class="brand"><span class="mark">她</span> 她 · 查看器</div>
@@ -500,9 +557,13 @@ const t = ms => { if(!ms) return ''; const d=new Date(ms); return String(d.getHo
 
 // ---------------- 通用组件 ----------------
 const sec = txt => '<div class="sec">'+esc(txt)+'</div>';
-const stat = (k,v,unit,note) =>
-  '<div class="stat"><div class="k">'+esc(k)+'</div><div class="v">'+esc(String(v))+
-  (unit?'<small>'+esc(unit)+'</small>':'')+'</div>'+(note?'<div class="k" style="margin-top:2px">'+esc(note)+'</div>':'')+'</div>';
+const stat = (k,v,unit,note,dk) =>
+  '<div class="stat'+(dk?' st-open':'')+'"'+(dk?' data-dk="'+esc(dk)+'" data-dt="'+esc(k)+'"':'')+'>'+
+    '<div class="k">'+esc(k)+'</div><div class="v">'+esc(String(v))+
+    (unit?'<small>'+esc(unit)+'</small>':'')+'</div>'+
+    (note?'<div class="k" style="margin-top:2px">'+esc(note)+'</div>':'')+
+    (dk?'<div class="k st-more">看构成 ›</div>':'')+
+  '</div>';
 const need = (name,val,cls) => {
   const v = Number(val)||0, pct = Math.max(0,Math.min(100,Math.round(v*100)));
   return '<div class="need"><div class="nh"><b>'+esc(name)+'</b><span>'+v.toFixed(2)+'</span></div>'+
@@ -553,11 +614,11 @@ function render(){
           '<div class="sub">阶段 '+m.stage+' · '+esc(m.stageName||'')+' &nbsp;·&nbsp; '+D.eventsCount+' 条事件 &nbsp;·&nbsp; '+D.actions.length+' 次工具调用 &nbsp;·&nbsp; '+(D.home.turns??0)+' 轮会话</div></div>'+
           gate+'</div>'+
           '<div class="stats">'+
-            stat('判断', beliefs.length, '条')+
-            stat('拒绝', refused, '次', wont?('口头 '+wont+' 次'):'')+
-            stat('改口', m.corrected||0, '次')+
-            stat('固化', (m.solid||[]).length, '条', '反复想起的')+
-            stat('张力', (m.tensions||[]).length, '条')+
+            stat('判断', beliefs.length, '条', '', 'belief')+
+            stat('拒绝', refused, '次', wont?('口头 '+wont+' 次'):'', 'refusal')+
+            stat('改口', m.corrected||0, '次', '', 'revise')+
+            stat('固化', (m.solid||[]).length, '条', '反复想起的', 'solid')+
+            stat('张力', (m.tensions||[]).length, '条', '', 'tension')+
             stat('会话轮数', D.home.turns??0, '轮')+
             stat('近25条均长', HM ? HM.avg : '—', '字', HM ? ('样本 '+HM.n+' 条') : '她还没说过话')+
             stat('问句率', HM ? HM.qRate : '—', '%', '她的话里有几个问号')+
@@ -1056,6 +1117,64 @@ function markDirty(){
   if(btn) btn.disabled = !r.dirty.length;
 }
 
+// ---------------------------------------------------------------- 数值 → 构成事件（2026-11-13）
+// 用户要：每个数都能看见它由哪几条事件算出来的。数据在 D.detail 里（后端一次算好下发）。
+// 「拒绝」要分两组显示：正式登记的 refusal 与正则认出来的口头拒绝——两把尺子会骗人。
+function closeDetail(){
+  const m = document.getElementById('detmask');
+  if(m) m.remove();
+}
+
+function showDetail(dk, title){
+  const d = (D && D.detail) || {};
+  const groups = [];
+  if(dk === 'refusal'){
+    groups.push({ name:'正式登记（type=refusal）', items: d.refusal || [] });
+    groups.push({
+      name: d.wont ? '口头拒绝（derive.js 的正则认出来的）' : '口头拒绝（这轮没取到判定函数，只列正式的）',
+      items: d.wont || [],
+    });
+  } else if(dk === 'belief') groups.push({ name:'她的判断（只增不改）', items: d.belief || [] });
+  else if(dk === 'revise') groups.push({ name:'改口（type=revise）', items: d.revise || [] });
+  else if(dk === 'solid') groups.push({ name:'反复想起的', items: d.solid || [] });
+  else if(dk === 'tension') groups.push({ name:'张力（两句话互相拽着）', items: d.tension || [] });
+
+  const total = groups.reduce((n,g)=>n+g.items.length, 0);
+  const fmt = (t) => {
+    if(!t) return '';
+    const dt = new Date(t);
+    if(isNaN(dt)) return String(t);
+    const p = n => String(n).padStart(2,'0');
+    return (dt.getMonth()+1)+'-'+p(dt.getDate())+' '+p(dt.getHours())+':'+p(dt.getMinutes());
+  };
+
+  const body = groups.map(g => {
+    const items = g.items.length
+      ? g.items.map(it => {
+          const when = fmt(it.ts);
+          const txt = it.text || (it.a && it.b ? it.a + '\n—— 与 ——\n' + it.b : '');
+          const extra = it.times ? '（想起 '+it.times+' 次）' : '';
+          return '<div class="detitem"><div class="dt">'+esc(when)+esc(extra)+'</div>'+
+            '<div class="dx">'+nl(txt || '（这条没有正文）')+'</div></div>';
+        }).join('')
+      : '<div class="detempty">这一组是空的</div>';
+    return '<div class="detgroup"><h4>'+esc(g.name)+' · '+g.items.length+' 条</h4>'+items+'</div>';
+  }).join('');
+
+  closeDetail();
+  const mask = document.createElement('div');
+  mask.id = 'detmask';
+  mask.className = 'detmask';
+  mask.innerHTML = '<div class="detbox"><div class="dethead"><b>'+esc(title||'构成')+'</b>'+
+    '<span class="dim">共 '+total+' 条</span><div style="flex:1"></div>'+
+    '<button class="st-btn ghost" id="detclose">关闭</button></div>'+
+    '<div class="detbody">'+(total?body:'<div class="detempty">这个数现在是 0，没有可列的条目</div>')+'</div></div>';
+  mask.addEventListener('click', (ev)=>{ if(ev.target===mask) closeDetail(); });
+  document.body.appendChild(mask);
+  const b = document.getElementById('detclose');
+  if(b) b.onclick = closeDetail;
+}
+
 function toast(text){
   const d = document.createElement('div'); d.className='st-toast'; d.textContent=text;
   document.body.appendChild(d);
@@ -1402,7 +1521,13 @@ document.getElementById('tabs').addEventListener('click', ev => {
   const b = ev.target.closest('button'); if(!b) return;
   tab = b.dataset.tab; setNavOpen(false); render();
 });
-document.addEventListener('keydown', ev => { if(ev.key==='Escape') setNavOpen(false); });
+// 点数值卡上的「看构成」→ 弹层列出它由哪几条事件算出来的
+document.addEventListener('click', (ev) => {
+  const s = ev.target.closest('.stat.st-open');
+  if (!s) return;
+  showDetail(s.dataset.dk, (s.dataset.dt || '构成') + ' · 构成');
+});
+document.addEventListener('keydown', ev => { if(ev.key==='Escape'){ closeDetail(); setNavOpen(false); } });
 
 // 自动刷新（2026-11-04）：原来只 fetch 一次，页面开着就一直显示打开那一刻的数字，
 // 用户对着它看「自主为什么是 0」，其实账本早变了。

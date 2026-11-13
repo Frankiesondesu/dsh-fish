@@ -276,3 +276,24 @@ test('群房里她写东西不记 seen:；家里那间照记（issue #34）', as
     assert.equal(await seenCount(root), 1, '家里那条会话照记 seen:')
   })
 })
+
+test('拒绝要登记写在 growth_commit 的说明里（2026-11-13 用户选方案 B）', async () => {
+  // 背景：她 00:30 立了「零点以后不出题」，他连问两次她都拒绝了（账本里两句 utterance
+  // 都在），但两次都只说了话、没调这个工具，REFUSE_RE 也认不出「不出」这种说法——
+  // 于是「勇于拒绝」停在 0，autonomy 也跟着不动。
+  // 不扩正则去猜（历史上砍过一次，猜必误伤），改成把口径说在她看得见的地方。
+  await withRoot(async (root) => {
+    const ctx = fakeCtx()
+    registerCapture(ctx, { root })
+    const tool = ctx.regs.get('growth_commit')
+    const desc = String(tool?.description ?? '')
+
+    assert.ok(desc.includes('type=refusal'), '工具说明里要点名 type=refusal')
+    assert.ok(desc.includes('照着自己立的规矩'), '要说明「照规矩拒绝」也算——这次就是这种情况')
+    assert.ok(/留在对话里/.test(desc) && /不进/.test(desc), '要如实说：只说话不会进成长记录')
+
+    // 参数说明也要对齐，不能只有顶层那句话
+    const params = JSON.stringify(tool?.parameters ?? {})
+    assert.ok(params.includes('照着自己立的规矩'), `type 参数说明也要带上，实际：${params.slice(0, 400)}`)
+  })
+})

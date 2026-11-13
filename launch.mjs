@@ -18,7 +18,7 @@
  *   node launch.mjs --check  只体检，不启动任何东西
  */
 
-import { spawn, execFileSync } from 'node:child_process'
+import { spawn, spawnSync, execFileSync } from 'node:child_process'
 import { connect } from 'node:net'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
@@ -231,6 +231,27 @@ async function main() {
   if (TARGET) out(`  （只启动：${TARGET}）`)
   out('  ' + '─'.repeat(46))
 
+  // 启动前记忆同步（2026-11-12）：必须在拉起任何服务**之前**跑。
+  // 服务起来之后 DSH 就在写账本了，那时再覆盖 ~/.dsh-fish 是边写边覆盖的事故。
+  // 钩子住在数据目录（仓外），公共仓不背个人路径；单项启动 / --check 不触发；
+  // 同步失败只警告，绝不拦启动（她得能起来）。
+  if (!TARGET && !CHECK_ONLY) {
+    const pre = join(fishRoot(), 'pre-start-hook.mjs')
+    if (existsSync(pre)) {
+      out('  🪝 启动前同步：比对云端最新记忆…')
+      try {
+        const r = spawnSync(process.execPath, [pre], {
+          encoding: 'utf8', timeout: 180000, stdio: ['ignore', 'pipe', 'pipe'],
+        })
+        const tail = String(r.stdout || '').trim().split('\n').slice(-3).join(' / ')
+        if (tail) out(`     ${tail}`)
+        if (r.status !== 0) out('  ⚠ 同步没成（本机数据未动），照常用本机记忆启动')
+      } catch (e) {
+        out('  ⚠ 同步没跑起来：' + String(e?.message ?? e))
+      }
+    }
+  }
+
   // 1) DSH
   if (!want('dsh')) {
     // 单项启动别的：DSH 一点不碰（它不是可重启的普通服务，重启会断她会话）
@@ -382,6 +403,16 @@ async function main() {
       spawn('cmd', ['/c', 'start', '', VIEWER_URL], { detached: true, stdio: 'ignore', windowsHide: true }).unref()
       out(`  ↗ 浏览器已打开 ${VIEWER_URL}`)
     } catch { /* 打不开就算了，地址照样印出来 */ }
+  }
+
+  // 本机可选启动钩子（2026-11-12）：全量启动后跑一次数据目录里的 start-hook.mjs。
+  // 钩子住在 ~/.dsh-fish（仓外），公共仓不背任何个人路径；单项启动和 --check 不触发。
+  if (!TARGET) {
+    const hook = join(fishRoot(), 'start-hook.mjs')
+    if (existsSync(hook)) {
+      detach(process.execPath, [hook], '启动钩子', { hide: true })
+      out('  🪝 启动钩子：已触发')
+    }
   }
 
   out('')

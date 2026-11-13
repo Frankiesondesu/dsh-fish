@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>她</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header>
+  <div class="titlebar">
+    <span class="avatar her small">她</span>
+    <div class="titles">
+      <h1>她</h1>
+      <p class="note">广播式：她说的话 QQ 和网页都会出现；她想说才说，和 QQ 一样。</p>
+    </div>
+  </div>
+  <p id="status">连接中…</p>
+</header>
+<main id="log" aria-live="polite"></main>
+<footer>
+  <form id="form">
+    <div class="toolbar">
+      <button type="button" id="btn-image" title="发图片">图片</button>
+      <button type="button" id="btn-file" title="发视频/文件">文件</button>
+      <button type="button" id="btn-loc" title="发我的位置">定位</button>
+    </div>
+    <input id="input" type="text" autocomplete="off" placeholder="跟她说点什么…（Enter 发送）" disabled>
+    <button id="send" type="submit" disabled>发送</button>
+    <input type="file" id="img-input" accept="image/*" hidden>
+    <input type="file" id="file-input" hidden>
+  </form>
+</footer>
+<script src="/app.js"></script>
+</body>
+</html>

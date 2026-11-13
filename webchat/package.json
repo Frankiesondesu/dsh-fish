@@ -1,0 +1,14 @@
+{
+  "name": "fish-webchat",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "自建网页对话通道：复用 /local/say 递话 + push.mjs 推送层，与 QQ 桥平级的第二个网关",
+  "scripts": {
+    "start": "node webchat.mjs",
+    "test": "node --test test/"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}

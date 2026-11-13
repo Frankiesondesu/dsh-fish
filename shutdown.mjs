@@ -442,11 +442,19 @@ async function main() {
   out('  ' + '─'.repeat(46))
   for (const [k, v] of report) out(`  ${k.padEnd(12, ' ')} ${v}`)
   out('')
-  out('  要再开：双击 一键启动.cmd')
+  out('  要再开：node launch.mjs')
   out('')
 }
 
 function ask(q) {
+  // 2026-11-12 真机：从管理器（7789）点「全部关闭」时进程没有终端，readline 会
+  // 永远等一个不可能来的回车——网页端没有输入通道，界面就那么卡着。
+  // 没有 TTY 就直接按「没确认」处理：**默认不杀**，调用方真想关就带 --yes。
+  if (!process.stdin.isTTY) {
+    out('')
+    out('  （当前没有可交互的终端，不会替你决定——要关请加 --yes）')
+    return Promise.resolve('')
+  }
   const rl = createInterface({ input: process.stdin, output: process.stdout })
   return new Promise((resolve) => rl.question(q, (a) => {
     rl.close()

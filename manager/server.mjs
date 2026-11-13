@@ -17,6 +17,7 @@ import { join } from 'node:path'
 import { spawn } from 'node:child_process'
 
 import { HERE, ROOT, probeAll, startOne, stopOne, restartOne, restartStale, staleServices, serviceOf, readLogs, clearLogs, spawnLogged } from './services.mjs'
+import { readMemory } from './memory.mjs'
 
 const PORT = Number(process.env.FISH_MANAGER_PORT || 7789)
 const UI = join(HERE, 'ui.html')
@@ -83,7 +84,9 @@ function doAll(action) {
     return '正在启动全部…（DSH 和三路加载要一会儿）'
   }
   if (action === 'stop') {
-    spawnBg(process.execPath, [join(ROOT, 'shutdown.mjs')], ROOT, '全部 · 关闭')
+    // ⚠️ `--yes` 不能省：不带它时 shutdown.mjs 会停下来问 [y/N]，而这里没有终端可答
+    // （网页端没有输入通道），进程就那么卡着——2026-11-12 真机就卡在这里。
+    spawnBg(process.execPath, [join(ROOT, 'shutdown.mjs'), '--yes'], ROOT, '全部 · 关闭')
     return '正在关闭全部…'
   }
   if (action === 'restart') {
@@ -115,6 +118,19 @@ createServer(async (req, res) => {
     if (url === '/api/services') {
       const services = await probeAll()
       return json(res, 200, { at: Date.now(), busy, services })
+    }
+
+    // 记忆同步（2026-11-12）：只读现状 —— 本机账本 / 云端快照 / 修改树。
+    // 默认不联网（ls-remote 在慢网要十几秒，页面会像卡死）；要真问远端就带 remote=1。
+    if (url === '/api/memory') {
+      const q = new URL(req.url, 'http://127.0.0.1').searchParams
+      const remote = q.get('remote') === '1'
+      const phone = q.get('phone') === '1'
+      try {
+        return json(res, 200, await readMemory({ remote, phone }))
+      } catch (e) {
+        return json(res, 200, { error: String(e?.message ?? e), at: new Date().toISOString() })
+      }
     }
 
     if (url === '/api/action' && req.method === 'POST') {
@@ -212,7 +228,7 @@ createServer(async (req, res) => {
   console.log('  关掉这个窗口 = 关掉管理器（不会动她那些服务）')
   console.log('')
 
-  // 自己开浏览器：这样 管理器.cmd 只留一个窗口，关窗口就等于关管理器。
+  // 自己开浏览器：这样启动脚本只留一个窗口，关窗口就等于关管理器。
   // --no-open 给测试用（起了服务但不想每次弹一个标签页）。
   if (!process.argv.includes('--no-open')) openBrowser(url)
 })

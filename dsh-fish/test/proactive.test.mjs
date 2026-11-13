@@ -177,6 +177,13 @@ test('canLook 开着时给她一条「也可以自己去看点什么」的许可
   assert.match(on, /bili_look/, 'bili 可用时该让她想到可以去翻一眼')
   assert.match(on, /做什么都行，什么都不做也行/, '许可里必须包含「什么都不做」')
   assert.doesNotMatch(on, /你应该/)
+  // 2026-11-12：她对平台 home 推的那几条零响应，却为「怎么夸人」看完整条。
+  // 问题不是不爱看，是不知道可以不从平台那几条里挑。所以补的是「门在哪儿」。
+  assert.match(on, /what=search/, '要让她知道能自己搜，不是只能从平台推的里选')
+  assert.match(on, /不必只从它推给你的那几条里挑/, '这句才是解掉隐性约束的那一句')
+  assert.match(on, /keyword/, '要带上参数名，不然她知道有这回事也不知道怎么用')
+  // 只给门，不给方向：不许出现任何「看什么」的暗示
+  assert.doesNotMatch(on, /推荐你|你该看|值得看|你应该搜/, '不许替她挑内容（养不塑）')
 
   // bili.enabled=false 的部署：不提她够不着的工具名（fork.13，不能对她说假话）
   assert.doesNotMatch(proactiveSection({ ...base }), /bili_look/)

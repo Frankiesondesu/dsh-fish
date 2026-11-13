@@ -18,6 +18,8 @@
  * 不替她挑哪个值得看、不承诺某个工具能打开。对她说的话必须为真（fork.13）。
  */
 
+import { FACE_NAMES } from './face-names.mjs'
+
 /** 明确不是附件的段。它们 data 里也可能有 url（卡片 / 分享），别拿去当文件下载。 */
 const NON_ATTACHMENT = new Set([
   'text', 'at', 'face', 'reply', 'poke', 'dice', 'rps', 'shake', 'anonymous',
@@ -26,6 +28,127 @@ const NON_ATTACHMENT = new Set([
 
 /** 已知附件类型：即便这次没带下载字段也收 —— 取不到会如实说「没到你手上」，不静默丢。 */
 const KNOWN_ATTACHMENT = new Set(['image', 'mface', 'video', 'file', 'flash'])
+
+/**
+ * QQ 自带表情（face 段）的 id → 中文名。
+ * 表见 face-names.mjs（从 LLOneBot 的 face_config.json 生成，289 条）。
+ * 表里没有的一律退回 `[表情]`，**绝不按 id 猜**——猜错就是对她说假话（fork.13）。
+ */
+const FACE_NAME = new Map(Object.entries(FACE_NAMES))
+
+const clip = (s, n = 40) => {
+  const t = String(s ?? '').replace(/\s+/g, ' ').trim()
+  return t.length > n ? `${t.slice(0, n)}…` : t
+}
+
+/**
+ * 卡片（json 段）里能当标题的那句。
+ * QQ 的卡片长得像 `{prompt:"[QQ小程序]xx", meta:{detail_1:{title:"真正的标题"}}}` ——
+ * prompt 带平台前缀且常常只是应用名，**优先取 meta 里的 title/desc**，取不到才退回 prompt。
+ */
+function jsonTitle(raw) {
+  let o
+  try {
+    o = JSON.parse(raw)
+  } catch {
+    return ''
+  }
+  const pick = (v) => (typeof v === 'string' && v.trim() ? v.trim() : '')
+  const m = o?.meta ?? {}
+  for (const k of ['detail_1', 'detail_2', 'title', 'desc']) {
+    const v = m[k]
+    const s = pick(v)
+    if (s) return clip(s)
+    if (v && typeof v === 'object') {
+      for (const kk of ['title', 'desc', 'content']) {
+        const t = pick(v[kk])
+        if (t) return clip(t)
+      }
+    }
+  }
+  const p = pick(o?.prompt)
+  if (p) return clip(p)
+  if (typeof o?.title === 'string' && o.title.trim()) return clip(o.title)
+  return ''
+}
+
+/** 卡片（xml 段）里取 <title>，退而求其次取 <summary>。 */
+function xmlTitle(raw) {
+  for (const tag of ['title', 'summary']) {
+    const m = new RegExp(`<${tag}[^>]*>(?:<!\\[CDATA\\[)?([\\s\\S]*?)(?:\\]\\]>)?</${tag}>`, 'i').exec(raw)
+    if (m && m[1].trim()) return clip(m[1])
+  }
+  return ''
+}
+
+/**
+ * 把「不是文件、但带信息」的段翻成一句可读标记（2026-11-12，用户拍板 B）。
+ *
+ * 以前 face / poke / share / json / xml / dice / rps / location / music / contact
+ * 全被 `classifySegments` 直接跳过（注释写「其余…跳过」）。他发一个表情，她那边
+ * 一个字都没有——在她看来是他没说话，实际是消息被我们吃了。
+ *
+ * 铁律：只说拿得到的事实。拿不到名字就 `[表情]`，解析不出标题就 `[卡片]`。
+ * 返回 '' 表示「这段确实没有可说的」（reply 的正文在别处、anonymous 只是群标识）。
+ */
+export function markOf(seg) {
+  const t = String(seg?.type ?? '')
+  const d = seg?.data ?? {}
+  const str = (k) => String(d[k] ?? '').trim()
+
+  switch (t) {
+    case 'face': {
+      const name = FACE_NAME.get(str('id'))
+      return name ? `[表情:${name}]` : '[表情]'
+    }
+    case 'poke':
+      return '[戳一戳]'
+    case 'dice':
+      return str('result') ? `[骰子:${str('result')}]` : '[骰子]'
+    case 'rps': {
+      const r = str('result')
+      const name = { 1: '石头', 2: '剪刀', 3: '布' }[r]
+      return r ? `[猜拳:${name ?? r}]` : '[猜拳]'
+    }
+    case 'shake':
+      return '[窗口抖动]'
+    case 'location': {
+      const title = str('title') || str('content')
+      return title ? `[位置:${clip(title)}]` : '[位置]'
+    }
+    case 'music': {
+      const title = str('title')
+      const singer = str('singer')
+      if (!title) return '[音乐]'
+      return `[音乐:${clip(title)}${singer ? `-${clip(singer, 20)}` : ''}]`
+    }
+    case 'share': {
+      const title = str('title')
+      const url = str('url')
+      if (title) return `[分享:${clip(title)}]${url ? ` ${url}` : ''}`
+      return url ? `[分享] ${url}` : '[分享]'
+    }
+    case 'contact':
+      return str('id') ? `[名片:${clip(str('id'), 20)}]` : '[名片]'
+    case 'json': {
+      const title = jsonTitle(str('data'))
+      return title ? `[卡片:${title}]` : '[卡片]'
+    }
+    case 'xml': {
+      const title = xmlTitle(str('data'))
+      return title ? `[卡片:${title}]` : '[卡片]'
+    }
+    case 'markdown':
+      return '[卡片]'
+    // reply 只有被引用那条的 id，正文不在这一段里；anonymous 只是群匿名标识。
+    // 都不产生内容，返回空——不重复、也不编。
+    case 'reply':
+    case 'anonymous':
+      return ''
+    default:
+      return ''
+  }
+}
 
 /** data 里出现这些字段（且非空字符串），说明它带着一个可以取回来的东西。 */
 const FILE_FIELD = /^(?:url|file|file_id|file_url|path|file_path|base64)$/i
@@ -61,7 +184,9 @@ export function classifySegments(segs, selfId = '') {
     } else if (t === 'record') audios.push(s)
     else if (t === 'forward' || t === 'node') forwards.push(s)
     else if (isAttachment(s)) files.push({ ...s, _kind: t })
-    // 其余（小黄脸、戳一戳、回执…）跳过
+    // 2026-11-12（用户 m0xxxx）：不是文件、但带信息的段要翻成一句标记，不能静默丢——
+    // 他发个表情，她那边一个字都没有，在她看来就是「他没说话」。
+    else text += markOf(s)
   }
   // mface 有时没有 url，只有一句 summary（「[动画表情]」），拿它当文字兜底
   if (!text && files.length) {
