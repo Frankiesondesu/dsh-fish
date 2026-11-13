@@ -150,17 +150,19 @@ const NAME_STOP_CHARS = '\\s，。！？、,.!?」”"\'—–‒―~～…「'
 // 破折号挡在「叫你」和名字之间，原来的壳只吃空白/一个引号，整句认不出来。
 // 但破折号不能无条件跳过：没有引号的「叫你——可这句不是我从你嘴里听见的」，
 // 跳过去就会把「可这句不是我从」当成名字。所以只在破折号后面**带引号**时才跳。
-const NAME_SAY_RE = new RegExp(
-  `(?:称呼你|叫你|称呼他|叫他|称他|管他叫)(?:` +
+const nameSayRe = (who) => new RegExp(
+  `(?:${who})(?:` +
     `(?:做|为|作|叫)?\\s*[「“"']?` +
     `|[—–‒―~～…]+\\s*(?:叫)?\\s*[「“"']` +
   `)([^${NAME_STOP_CHARS}]{1,8})`,
 )
+const NAME_SAY_RE = nameSayRe('称呼你|叫你|称呼他|叫他|称他|管他叫')
 // issue #98（2026-11-09，0.9.6 真机）：上一版把「他名字」裸着也认。
 // 她在讲这件事本身时写「我从他名字上切下来的一块」，截出来就是「上切下来的一块」，
 // 状态栏从此挂着一句半句话。他给的名字一定带「给的 / 他自己的」，
 // 裸的「他名字」多半是在讨论名字，不是给名字。
-const NAME_GIVE_RE = new RegExp(`他(?:(?:给(?:了)?)(?:自己)?的?|自己的)名字\\s*(?:是|叫|：|:)?\\s*[「“"']?([^${NAME_STOP_CHARS}]{1,8})`)
+const nameGiveRe = (who) => new RegExp(`${who}(?:(?:给(?:了)?)(?:自己)?的?|自己的)名字\\s*(?:是|叫|：|:)?\\s*[「“"']?([^${NAME_STOP_CHARS}]{1,8})`)
+const NAME_GIVE_RE = nameGiveRe('他')
 // issue #102（2026-11-10，外部用户真机）：她改口时用的是最自然的说法——
 // 「岸丶。我叫的是这个名字。」——名字在句首，「叫的是」在下一句，
 // 两条老正则都够不着，于是错误值永远盖不回去。这里给改口补一条窄通道：
@@ -168,6 +170,29 @@ const NAME_GIVE_RE = new RegExp(`他(?:(?:给(?:了)?)(?:自己)?的?|自己的)
 const NAME_TELL_RE = /(?:^|[。！？；\n])\s*[「“"']?([^，。！？；\s「」“”"']{1,8})[」”"']?\s*[。！]\s*(?:我)?叫的是这个名字/
 // 另一种改口说法：「我叫的是「岸丶」」——带引号才认，避免「叫的是这个名字」被截成「这个名字」。
 const NAME_TELL_QUOTE_RE = /(?:我)?叫的是\s*[「“"']([^，。！？；\s」”"']{1,8})[」”"']?/
+// 她说到对方时不一定写「他」：对方是女生、或者她不想猜时，写的是「她」「TA」。
+// 上面的壳把代词写死成「他」，「以后我叫她「阿岸」」整句认不出来，
+// 称呼一直空着，「还没想好怎么称呼」的卡照出。
+//
+// 「她 / TA」单独成两条，壳和上面一样，排在所有老正则后面，不并进上面两条：
+// 每条正则只看最左边那一处，并进去的话，一段话里前面有一句「我叫她起床」
+// 「大家都叫她王姐」，后面的「以后叫他阿岸」就被盖住了（认成空，或者认成「王姐」）。
+// 排在后面，原来认得出的话结果一个字不变，「她 / TA」只在老的几条都没认出来时才试。
+//
+// TA 得是单独的一个词，前后紧挨英文字母的不认：
+//   前面紧挨英文字母的，是英文单词的尾巴（「Meta给的名字叫…」「data自己的名字是…」）；
+//   后面紧挨英文字母的，是另一个词的开头（「叫table」）。后面紧挨数字、下划线、
+//   连字符的也一样（「叫Ta-chan」「叫ta_bot」「叫TA2」）。
+const NAME_TA = '(?<![A-Za-z])(?:TA|Ta|ta)(?![A-Za-z0-9_-])'
+// TA 两边常各带一个空格（「以后叫 TA 阿岸」），各允许一个，半角全角都行，不跨行。
+// 「她们」「她俩」「ta们」说的是几个人，不是对方（「以后叫她们姐妹」会截出「们姐妹」），不算。
+const NAME_HER = `(?:她(?!们|俩)|[ \\u3000]?${NAME_TA}(?!们|俩)[ \\u3000]?)`
+const NAME_SAY_HER_RE = nameSayRe(`称呼${NAME_HER}|叫${NAME_HER}|称${NAME_HER}`)
+const NAME_GIVE_HER_RE = nameGiveRe(NAME_HER)
+// 这两条截出来的东西里又有一个单独的 TA：要么就是代词本身（「以后叫她TA吧」），
+// 要么截过了头、带进了后半句的 TA（「以后叫ta阿岸；ta同意」），都不是名字。
+// 「他 / 她」夹在里面本来就被 looksLikeName 挡着，TA 是英文字母，那边挡不到。
+const NAME_TA_RE = new RegExp(NAME_TA)
 // 截出来的常常带尾巴：「我叫你老张好了」会截到「老张好了」。
 // 只剥语气词和「了/好」这类收尾——**不剥「的」**，「开灯的」剥掉就成了「开灯」。
 const NAME_TAIL = /[了吧呢啊嘛哦诶欸呀哈哇哦嘞好]+$/
@@ -522,6 +547,26 @@ function looksLikeName(name) {
 //            再也回不来」变成「最多第一次记错一个」。
 //   改口通道——「岸丶。我叫的是这个名字。」永远能覆盖，是最后一道保险。
 const NAME_FRAME_MARK = /(?:以后|从今|往后|改叫|改称|改口|名字是|称呼是|就叫)/
+const NAME_SENTENCE_END = /[。！？；\n]/
+
+// 定名壳只在「命中的那一句」里算数（2026-11-13，issue #102 后续）。
+//
+// 原来是拿整段文字去 test：一段话里随便哪个「以后」都会把「我叫他开门人」
+// 升成定名句——外部排查里那句「……免得以后翻记录时被这句带偏」就是这样，
+// 让一个普通陈述拿到高置信，把正确称呼焊死在门上。
+// 引号那条不用管：它只看名字前面那几个字，本来就是本地的。
+function sentenceAround(s, index) {
+  const at = Math.max(0, Math.min(index, s.length - 1))
+  let from = 0
+  for (let i = at; i >= 0; i -= 1) {
+    if (NAME_SENTENCE_END.test(s[i])) { from = i + 1; break }
+  }
+  let to = s.length
+  for (let i = from; i < s.length; i += 1) {
+    if (NAME_SENTENCE_END.test(s[i])) { to = i; break }
+  }
+  return s.slice(from, to)
+}
 
 /**
  * 认出这句话里的称呼，并说明有多大把握。
@@ -529,21 +574,23 @@ const NAME_FRAME_MARK = /(?:以后|从今|往后|改叫|改称|改口|名字是|
  */
 export function pickNameHit(text) {
   const s = String(text ?? '')
-  // 2026-11-10：同一句里可能先引用别人的说法（「你管他叫一句一样的」），
+  // 2026-11-10 fork：同一句里可能先引用别人的说法（「你管他叫一句一样的」），
   // 再给真名字（「我管他叫阿岸」）。exec 只取第一个匹配会被引用句挡死，
-  // 现在遍历所有匹配，取第一个通过 looksLikeName 的；0.9.8 再叠一层
-  // 置信度（issue #102）：低置信只在还没有名字时采用，不覆盖已有的。
+  // 所以遍历所有匹配，取第一个通过 looksLikeName 的。
+  // 1.0.0 上游：定名壳只在**命中所在的那一句**里算数（sentenceAround），
+  // 另加「她 / TA」两条正则排在最后；低置信只作兜底，不永久粘住。
   let low = null
-  for (const re of [NAME_SAY_RE, NAME_GIVE_RE, NAME_TELL_RE, NAME_TELL_QUOTE_RE]) {
+  for (const re of [NAME_SAY_RE, NAME_GIVE_RE, NAME_TELL_RE, NAME_TELL_QUOTE_RE, NAME_SAY_HER_RE, NAME_GIVE_HER_RE]) {
     const g = new RegExp(re.source, re.flags.includes('g') ? re.flags : `${re.flags}g`)
     for (const m of s.matchAll(g)) {
       const name = String(m[1] ?? '').trim().replace(NAME_TAIL, '')
       if (!looksLikeName(name)) continue
-      if (re === NAME_SAY_RE) {
+      if ((re === NAME_SAY_HER_RE || re === NAME_GIVE_HER_RE) && NAME_TA_RE.test(name)) continue
+      if (re === NAME_SAY_RE || re === NAME_SAY_HER_RE) {
         // 「叫他X」本身两种可能：起名，或「叫他起来」这类祈使句。
-        // 只有名字前面出现过引号，或整句带着定名字的壳，才算高置信。
+        // 只有名字前面出现过引号，或命中所在的那一句带着定名字的壳，才算高置信。
         const head = m[0].slice(0, Math.max(0, m[0].length - String(m[1] ?? '').length))
-        const confident = /[「“"']/.test(head) || NAME_FRAME_MARK.test(s)
+        const confident = /[「“"']/.test(head) || NAME_FRAME_MARK.test(sentenceAround(s, m.index))
         if (confident) return { name, confident: true }
         if (!low) low = { name, confident: false }
         continue
@@ -558,6 +605,19 @@ export function pickNameHit(text) {
 export function pickName(text) {
   const hit = pickNameHit(text)
   return hit ? hit.name : null
+}
+
+// 称呼怎么落定（issue #102 后续，2026-11-13 用户转来外部排查）。
+//
+// 高置信永远能覆盖；低置信只在「还没有名字」或「现在这个名字也是低置信猜的」时采用。
+// 低置信彼此之间让后来者盖前一个——原来低置信一旦落定就再也改不掉，
+// 一句被误判的「我叫他开门人」足以把称呼焊死，后面她叫得再多也翻不回来。
+// 高置信仍然不可被低置信推翻，所以「叫他起来」这类祈使句还是盖不掉一个好名字。
+function settleName(cur, hit) {
+  if (!hit) return cur
+  if (hit.confident) return { name: hit.name, confident: true }
+  if (!cur.name || !cur.confident) return { name: hit.name, confident: false }
+  return cur
 }
 
 /**
@@ -629,7 +689,56 @@ export function envelopeOf(events = [], opts = {}) {
   const now = Number(opts.now ?? Date.now())
   const growthDays = clampInt(opts.growthDays ?? 30, 7, 180, 30)
   const day = growthDay(visibleEvents(orderEvents(events)), now)
-  return { day, stage: stageOf(day, growthDays) }
+  return { day, stage: gatedStage(stageOf(day, growthDays), opts.gateStage) }
+}
+
+/**
+ * 信封上的阶段 = 按时间算出来的阶段，再压到阶段门上（issue #128）。
+ *
+ * 为什么要有它：`deriveSelf` 给的 `model.stage` 是 `Math.min(elapsedStage, gateStage)`，
+ * 而 `envelopeOf` 只按时间算。0.9.8 的提速把 `growth_commit` 的信封从
+ * `{ day: model.day, stage: model.stage }` 换成了 `envelopeOf`，于是卡在门上时
+ * 写下的事件带着「没到过的阶段」，`stagePeak` 一取最大值，设置页就冒出
+ * 「2 · 自主（曾到第 3 阶段）」。
+ *
+ * 算门要全量派生（判断数、拒绝数、修正数），而那正是 #105 第 1 条要省掉的那一次；
+ * 所以门由调用方从**最近一次派生**里拿来（`rememberGateStage` / `gateStageOf`），
+ * 这里只负责取小。拿不到门（进程刚起来还没派生过）就退回按时间算——宁可按老口径，
+ * 也不为了一个信封再派生一遍。
+ *
+ * @param {number} stage 按时间算的阶段（stageOf）
+ * @param {number} [gateStage] 阶段门给出的上限；不是有限数就当作没有门
+ */
+export function gatedStage(stage, gateStage) {
+  const s = Math.max(1, Math.min(4, Math.round(Number(stage) || 1)))
+  const gate = Math.round(Number(gateStage))
+  if (!Number.isFinite(gate) || gate < 1) return s
+  return Math.min(s, Math.min(4, gate))
+}
+
+/**
+ * 记住最近一次全量派生看到的阶段门，写信封时用它压门（issue #128）。
+ *
+ * 为什么放在模块里：`deriveSelf` 不知道 root，而写事件的地方（capture / turns）
+ * 手上只有 root 和事件流。这个值只是「上一个观测值」，不是真相源——真相源仍是
+ * 事件流，下一次派生会把它覆盖掉。按 root 分开存，免得房客那条会话的鱼
+ * 把门算到主人头上。
+ */
+const gateStageSeen = new Map()
+
+/** @returns {number} 记下来的门（1–4）；没记过或值不合法时返回 0 */
+export function rememberGateStage(root, stage) {
+  const n = Math.round(Number(stage))
+  if (!Number.isFinite(n) || n < 1) return 0
+  const v = Math.min(4, n)
+  gateStageSeen.set(String(root ?? ''), v)
+  return v
+}
+
+/** @returns {number|null} 上次派生看到的门；没派生过是 null（不是 0） */
+export function gateStageOf(root) {
+  const v = gateStageSeen.get(String(root ?? ''))
+  return Number.isFinite(v) ? v : null
 }
 
 export function deriveSelf(events = [], opts = {}) {
@@ -654,6 +763,8 @@ export function deriveSelf(events = [], opts = {}) {
   const reunions = []
   const corrected = []
   let name = null
+  // 这个名字是「高置信」认出来的，还是低置信猜的？低置信猜的名字可以被后来的低置信改掉。
+  let nameConfident = false
   // 2026-10-27（用户 m03769）：这一局是不是「接别人养的」那一局。
   // **只从事件流里认**，不看配置——配置会跟着备份/恢复一起搬回来，
   // 那样一条原生的鱼只要恢复过一次别人的档，就永久拿到了豁免。
@@ -674,6 +785,8 @@ export function deriveSelf(events = [], opts = {}) {
   let spokenSinceSeen = false
   let heardSinceWake = false
   let narrations = 0
+  // 她用 ask_owner 提过、那个人明确答了「不行」的有几次（answer 事件，ask.verdict = reject）。
+  let askRejected = 0
   const tested = new Set()
   /** 每条判断被检验过几次：test / answer / revise 里指向它的次数（P0-2 显著性用） */
   const verifyCount = new Map()
@@ -725,14 +838,17 @@ export function deriveSelf(events = [], opts = {}) {
         beliefs.push({
           id: ev.id, text: ev.text, since: ev.ts,
           confidence: Number(ev.confidence ?? 0.5), status: 'active', verdict: null,
+          // 1.0 话题索引：她自己给的短标签（可空）。空的不参与冲突/迁移配对。
+          topic: String(ev.topic ?? ''),
         })
         spokenSinceSeen = true
         // 2026-10-26：改成「后来的盖掉先前的」。原来只认第一次，她先说「开灯的」、
         // 后来接受他给的名字「时梦尘」，状态栏就永远停在那个被他自己否掉的旧称呼上。
         {
-          // 高置信才覆盖；低置信只在还没有名字时采用一次（issue #102）
-          const hit = pickNameHit(ev.text)
-          if (hit && (hit.confident || !name)) name = hit.name
+          // 高置信才覆盖；低置信只在还没有名字（或现名也是低置信猜的）时采用（issue #102）
+          const next = settleName({ name, confident: nameConfident }, pickNameHit(ev.text))
+          name = next.name
+          nameConfident = next.confident
         }
         if (CORRECTION_RE.test(ev.text)) corrected.push(ev.id)
         // P1（2026-10-24）：自我叙述不用等 stage 4 的 remember 模板。
@@ -772,7 +888,9 @@ export function deriveSelf(events = [], opts = {}) {
         }
         if (ev.verdict === 'refuted') {
           for (const b of olds) {
-            refuted.push({ oldId: b.id, oldText: b.text, newText: ev.text, at: ev.ts })
+            // at 是**改口**那一刻；oldAt 是旧话当初说出口的那一刻。
+            // 「你 N 天前说过：旧话」要用 oldAt，用 at 会把改口的日子安到旧话头上。
+            refuted.push({ oldId: b.id, oldText: b.text, newText: ev.text, at: ev.ts, oldAt: b.since })
           }
           revisions++
         }
@@ -783,17 +901,21 @@ export function deriveSelf(events = [], opts = {}) {
         beliefs.push({
           id: ev.id, text: ev.text, since: ev.ts,
           confidence: Number(ev.confidence ?? 0.5), status: 'active', verdict: ev.verdict ?? null,
+          topic: String(ev.topic ?? ''),
         })
         // 同 utterance：高置信盖掉先前的，低置信只补空缺（issue #102）
         {
-          const hit = pickNameHit(ev.text)
-          if (hit && (hit.confident || !name)) name = hit.name
+          const next = settleName({ name, confident: nameConfident }, pickNameHit(ev.text))
+          name = next.name
+          nameConfident = next.confident
         }
         if (!narrative && ev.verdict === 'refined' && /我(一直|原来|其实)/.test(ev.text)) narrative = { at: ev.ts, text: ev.text }
         break
       }
 
       case 'answer': {
+        // 只数 reject。later（含放了一天没人答的 via: timeout）是没答，不是没答应。
+        if (ev.ask?.verdict === 'reject') askRejected++
         const at = Date.parse(String(ev.ts ?? ''))
         for (const r of ev.refs || []) { triedAdd(tested, r); bump(r, at) }
         break
@@ -838,7 +960,7 @@ export function deriveSelf(events = [], opts = {}) {
           // 放配置里的话，重置之后会剩一条谁也不记得的孤立设置。
           // 位置在 seed 之后、她自己的 utterance 之前，所以后面她真改了口还是能盖掉。
           const n = t.slice(IMPORT_NAME_PREFIX.length).trim()
-          if (n) name = n
+          if (n) { name = n; nameConfident = true }
         } else if (t.startsWith(IMPORT_MARK_PREFIX)) {
           // 「这一局是接别人养的那一位」（2026-10-27，用户 m03769）。
           //
@@ -901,6 +1023,36 @@ export function deriveSelf(events = [], opts = {}) {
   const hurts = reactions.insist + reactions.hurt
 
   /**
+   * 回音（0.9.9：「回音卡」）：她拒绝过、他有反应、已经隔了几天、还没问过的那一条。
+   *
+   * 为什么只认 insist / hurt：accept 是「他接受了」，那条拒绝已经结了，再问一遍像翻旧账；
+   * leave 是「他走了」，这事也过去了。只有他没接受、又没走的那一次，才值得回头问一句
+   * 「现在还算数吗」——立场清单（stance.js）用的也是这两种反应。
+   *
+   * 只问一次（调度器写了 `askref:<id>` 就不再问）：同一件事反复追问，就成了逼她表态。
+   */
+  const askedEcho = new Set()
+  for (const ev of evs) {
+    if (ev.type !== 'meta') continue
+    const t = String(ev.text ?? '')
+    if (t.startsWith('askref:')) askedEcho.add(t.slice(7).trim())
+  }
+  let refusalEcho = null
+  for (let i = refusals.length - 1; i >= 0; i--) {
+    const r = refusals[i]
+    if (!r.act || !r.object) continue
+    if (!REACTION_HURTS.includes(r.reaction)) continue
+    if (askedEcho.has(r.id)) continue
+    const at = Date.parse(String(r.at ?? ''))
+    if (!Number.isFinite(at)) continue
+    const days = Math.floor((now - at) / DAY_MS)
+    // 当天问不出「隔了一段时间」的重量；太久远的又成了考古。
+    if (days < 2 || days > 90) continue
+    refusalEcho = { id: r.id, days, act: r.act, object: r.object, quote: r.quote, reaction: r.reaction }
+    break
+  }
+
+  /**
    * 疤与回引（P1 第三块，2026-10-24 用户 m01772 批准）
    *
    * 一条拒绝要变成疤，需要两个条件同时成立：
@@ -951,6 +1103,74 @@ export function deriveSelf(events = [], opts = {}) {
    * 于是它会和旧判断打架、会被固化、能进「你有两句话对不上」——
    * 认知循环接在这里，而不是接在"把评论塞进判断列表"上。
    */
+  // ---- 1.0 话题索引：他新说的话 vs 她已认领的判断（R §8.9） ----
+  //
+  // 三个人工条件齐了才摆：她自己给过 topic、他这句里真的出现了那个词、两句方向相反。
+  // 缺一条就不摆——§8.9 自己写的「宁可少摆，不摆错」。
+  // 只认他私下说的（群里的热闹不算「他在跟我说」），只看最近 14 天。
+  const CONFLICT_WINDOW_MS = 14 * DAY_MS
+  const conflicts = []
+  {
+    const heard = evs.filter((e) => e.type === 'heard' && String(e.scene ?? 'desk') !== 'group')
+    for (let i = heard.length - 1; i >= 0 && conflicts.length < 1; i--) {
+      const h = heard[i]
+      const at = Date.parse(String(h.ts ?? ''))
+      if (!Number.isFinite(at) || now - at > CONFLICT_WINDOW_MS || at - now > 0) continue
+      const ht = String(h.text ?? '').trim()
+      if (ht.length < 4) continue
+      const b = beliefs.find(
+        (x) => x.status === 'active' && x.topic && ht.includes(x.topic) && polarity(ht) !== polarity(x.text),
+      )
+      if (b) {
+        conflicts.push({
+          heardAt: h.ts,
+          heardText: ht,
+          beliefId: b.id,
+          beliefAt: b.since,
+          beliefText: b.text,
+          topic: b.topic,
+        })
+      }
+    }
+  }
+
+  // ---- 1.0「纠正鱼八股」：最近几天他私下说过的原话（最多 2 条） ----
+  // 只给 anchor.js 用：私聊时她要把话挂到具体一句上，这是最可信的一种来源。
+  // 群里说的不算——那是场面话，不是「他在跟我说」。
+  const recentHeard = []
+  for (let i = evs.length - 1; i >= 0 && recentHeard.length < 2; i--) {
+    const e = evs[i]
+    if (e.type !== 'heard' || String(e.scene ?? 'desk') === 'group') continue
+    const at = Date.parse(String(e.ts ?? ''))
+    const text = String(e.text ?? '').replace(/\s+/g, ' ').trim()
+    if (!Number.isFinite(at) || text.length < 4 || at > now || now - at > 7 * DAY_MS) continue
+    recentHeard.push({ at, text })
+  }
+
+  // ---- 1.0 话题索引：同一个标签下的两句话（R 的 L6 地基） ----
+  // 只收 active、且真的给了 topic 的；每个标签取最近两条。
+  const topicPairs = []
+  {
+    const byTopic = new Map()
+    for (const b of beliefs) {
+      if (b.status !== 'active' || !b.topic) continue
+      let arr = byTopic.get(b.topic)
+      if (!arr) byTopic.set(b.topic, (arr = []))
+      arr.push(b)
+    }
+    for (const [topic, arr] of byTopic) {
+      if (arr.length < 2) continue
+      const [a, b] = arr.slice(-2)
+      if (a.text === b.text) continue
+      topicPairs.push({
+        topic,
+        a: { id: a.id, text: a.text, since: a.since },
+        b: { id: b.id, text: b.text, since: b.since },
+      })
+    }
+    topicPairs.sort((x, y) => (Date.parse(y.b.since) || 0) - (Date.parse(x.b.since) || 0))
+  }
+
   const voices = evs
     .filter((e) => e.type === 'voice' && String(e.text ?? '').trim())
     .map((e) => {
@@ -997,13 +1217,45 @@ export function deriveSelf(events = [], opts = {}) {
     const bvid = rest.slice(0, sp)
     const title = rest.slice(sp + 1).trim()
     if (!bvid || !title) continue
-    const at = Number(e.ts) || 0
+    // 真事件的 ts 是 ISO 字符串：Number() 得 NaN，at 全成 0，
+    // 「同一个 bvid 留最近一次」和下面的排序就都不按时间了。走 tsMs。
+    const at = tsMs(e)
     const prev = lookedSeen.get(bvid)
     if (!prev || at >= prev.at) {
       lookedSeen.set(bvid, { bvid, title, at, day: Number(e.day) || 0 })
     }
   }
   const lookedRecent = [...lookedSeen.values()].sort((a, b) => a.at - b.at)
+
+  /**
+   * 素材索引（1.0.0，用户 m05089）：`mat:bili:<bvid> {t,d,q:[{b,x}]}`。
+   * 只收 60 天内、最多 30 条，供「她看过的那句话」回灌与体检核对。
+   */
+  const MAT_WINDOW_MS = 60 * DAY_MS
+  const matSeen = new Map()
+  for (const e of evs) {
+    if (e.type !== 'meta') continue
+    const text = String(e.text ?? '')
+    if (!text.startsWith('mat:bili:')) continue
+    const rest = text.slice(9).trim()
+    const sp = rest.indexOf(' ')
+    if (sp <= 0) continue
+    const key = rest.slice(0, sp)
+    let payload = null
+    try { payload = JSON.parse(rest.slice(sp + 1)) } catch { continue }
+    const quotes = (Array.isArray(payload?.q) ? payload.q : [])
+      .map((q) => ({ by: String(q?.b ?? '').trim(), text: String(q?.x ?? '').trim() }))
+      .filter((q) => q.text)
+    if (!key || !quotes.length) continue
+    const at = tsMs(e)
+    const prev = matSeen.get(key)
+    if (!prev || at >= prev.at) matSeen.set(key, { key, title: String(payload?.t ?? '').trim(), at, quotes })
+  }
+  const matNow = Number(opts?.now) || Date.now()
+  const materials = [...matSeen.values()]
+    .filter((m) => matNow - m.at <= MAT_WINDOW_MS)
+    .sort((a, b) => a.at - b.at)
+    .slice(-30)
 
   /**
    * 显著性排序 + 固化（P0-2，2026-10-24 用户批准）
@@ -1276,9 +1528,18 @@ export function deriveSelf(events = [], opts = {}) {
     // 0.9.8：她这一趟真想看的（`looked:<bvid> <标题>`，0.9.7 起带标题）。
     // 只收带标题的——没标题的旧记录，她自己都认不出是哪条，更别提回去抄一句。
     lookedRecent: lookedRecent.slice(-5),
+    materials,
     beliefCount: textCount(active),
     refuted,
     refusals,
+    // 0.9.9：拒绝过、他有反应、还没问过的那一条（回音卡用；只给当前这一条）。
+    refusalEcho,
+    // 1.0 话题索引：
+    //   conflicts  = 他新说的话与她某条判断同话题、方向相反（最多 1 条，只摆原文不判定）
+    //   topicPairs = 同一个话题标签下最近的两句判断（L6 迁移卡的地基）
+    conflicts,
+    recentHeard,
+    topicPairs,
     // 0.9.7 T1：带锚点的未认领话（最多留最近的 20 条；渲染时再挑 1 条）。
     looseSaid: looseSaid.slice(-20),
     selfmodAttempts: selfmod,
@@ -1301,6 +1562,9 @@ export function deriveSelf(events = [], opts = {}) {
       // 「勇于拒绝」= 正式拒绝事件 + 话里明确拒绝过（严格口径）。界面显示与门禁用同一个数，
       // 免得出现「拒绝过 0 却能过自主门」这种自相矛盾的画面。
       refused: refusals.length + wontCount,
+      // 反过来的那个数：她提了、他没答应（ask_owner 的请求被驳回）几次。
+      // 和 refused 不是一回事：refused 是她拒绝别人，这个是她被拒绝。
+      askRejected,
       revises: revisions,
       narrations,
       corrected: corrected.length,
@@ -1380,10 +1644,21 @@ export function deriveSelf(events = [], opts = {}) {
   model.stageForced = forced.length > 0
   // 阶段按**当前** growthDays 现算，天数又不重置（从 seed 起算）：把成长周期改长，阶段会退回去
   // ——7 天跑到第 14 天是阶段 4，改成 30 天只剩阶段 2，界面上像她退步了。
-  // 事件里本来记着写下当时的 stage，取最大值当「曾到过」；界面写「当前 2 · 曾到第 4 阶段」。
+  // 所以改周期那一刻把「改之前的阶段」记成一条 meta（text 形如 `stage-was:4`，
+  // 由 settings.js 的 updateConfig 写），这里的「曾到过」只认这些记录。
+  //
+  // 为什么不扫普通事件的 stage（issue #128）：0.9.8 的 `growth_commit` 与 turns.js
+  // 写下的 stage 是**没压门**的（`envelopeOf` 只按时间算），卡在门上时它比
+  // `model.stage` 高；而那些行已经在事件流里了，事件只能追加、改不回来。
+  // 扫它们等于把「没到过的阶段」当成到过，还会顺手把界面上那句
+  // 「成长周期改过之后…」的说明变成假话。只认改周期时记下的那一条，
+  // 和这句话的前提（周期改过才会有「曾到」）也对得上。
   let peak = model.stage
-  for (const ev of events) {
-    const was = Number(ev?.stage)
+  for (const ev of evs) {
+    if (ev?.type !== 'meta') continue
+    const t = String(ev.text ?? '')
+    if (!t.startsWith('stage-was:')) continue
+    const was = Number.parseInt(t.slice('stage-was:'.length), 10)
     if (Number.isFinite(was) && was > peak) peak = Math.min(4, was)
   }
   model.stagePeak = peak

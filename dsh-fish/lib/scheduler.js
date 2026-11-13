@@ -14,13 +14,13 @@
  */
 
 import { join } from 'node:path'
-import { deriveSelfCached } from './derive.js'
-import { validateEvent } from './schema.js'
+import { deriveSelfCached, deriveSelf } from './derive.js'
+import { validateEvent, tsMs, HER_TYPES } from './schema.js'
 import { readEvents, appendEvent, rootDir, ensureHer, paths, readJson } from './store.js'
 import { loadConfig, dateKey, inWindow, pickWakeTime, updateConfig, biliOn } from './settings.js'
 import { plan } from './generator.js'
 import { findTemplate } from './events.js'
-import { offerPrompt, SLEEP_TODAY } from './persona.js'
+import { offerPrompt, SLEEP_TODAY, sleepPrompt, sleepQuestion } from './persona.js'
 import { offerDueDay, offerLimits, pendingOffer, grantableRules } from './unlock.js'
 import { holdWake } from './wakewin.js'
 import { detectAbsence, lastAbsenceEvent } from './absence.js'
@@ -29,6 +29,7 @@ import { gather, browseCountToday, recordBrowse, lastBrowseAt, browseGapMs } fro
 import { seenOn, pendingGlances, staleGlances, DIGEST_PREFIX } from './whatseen.js'
 import { riskState, browsePlan, noteRisk, isRiskCode } from './risk.js'
 import { scanReplies, renderReplies, repliesScanDue, markRepliesSeen, REPLY_SHOW_MAX } from './comment.js'
+import { atScanDue, scanMentions, renderMentions, recordMentions, markMentionsSeen, mentionsToday, AT_DAY_MAX, AT_SHOW_MAX } from './at.js'
 import { flushReport } from './report.js'
 import { talkSessionId, homeStatus } from './home.js'
 import { refreshSelfDoc } from './selfdoc.js'
@@ -45,7 +46,7 @@ import { deliverWake, ensureSessionLive, reviveIfBlank, WAKE_PING } from './deli
 import { followWake, planWakeCompaction, compactWake, looksLikeNothingSaid, looksLikeStreamFailure } from './compact.js'
 import { logLine } from './log.js'
 import { recordGrant, GRANT_YES, GRANT_NO } from './grant.js'
-import { readNotes, renderNotes } from './note.js'
+import { readNotes, renderNotes, pickNudge, nudgeSeen } from './note.js'
 import { dueAppointment, appointPrompt, markNotified } from './appoint.js'
 import { curiosityOf, renderEcho } from './curiosity.js'
 import { deskFor } from './desk.js'
@@ -226,17 +227,98 @@ function watchTurnEnd(ctx, sessionId, done) {
  * 于是只要摆料开着、窗口里有旧句子，它基本响不了。现在这个判据要早于「判空醒」算，
  * 好让这一轮不判 table、把这句递出去；判据本身也得能单测。
  *
+ * 「递过没有」按成长日认，不只按本地日期：成长日从 seed 的钟点起每 24 小时一格，
+ * 和本地零点对不齐。只看 `sleep:<dk>` 的话，同一个成长日里零点前递过一次，
+ * 零点后日期一换又会再递一次。那条 meta 的信封里本来就写着递的时候是第几天（`day`），
+ * 所以老记录不用迁移。同一个本地日期递过的也照旧不再递。
+ *
  * @param {object} o
  * @param {number} o.every   memory.sleepEveryDays（0 = 不用提醒）
  * @param {number} o.day     成长日（growthDay；不是自然日）
  * @param {string} o.dk      当天 dateKey
- * @param {object[]} [o.events] 全量事件（查 `meta sleep:<dk>`）
+ * @param {object[]} [o.events] 全量事件（查 `meta sleep:…`：信封 day 等于今天的成长日，或者是 `sleep:<dk>`）
  */
 export function sleepPromptDue({ every = 0, day = 1, dk = '', events = [] } = {}) {
   const n = Number(every ?? 0)
   if (!(n > 0) || !(day > 1) || day % n !== 0) return false
   const key = `sleep:${dk}`
-  return !(Array.isArray(events) ? events : []).some((e) => e?.type === 'meta' && String(e.text ?? '').startsWith(key))
+  const today = Number(day)
+  return !(Array.isArray(events) ? events : []).some((e) => {
+    if (e?.type !== 'meta') return false
+    const text = String(e.text ?? '')
+    if (!text.startsWith('sleep:')) return false
+    return text.startsWith(key) || Number(e.day) === today
+  })
+}
+
+/**
+ * 月末那句收束要不要加（1.0，2026-11-12 用户 m01650 定案）。
+ *
+ * 不再是「一个月问一次」，而是**攒够了才收**：这个自然月已经真问过两次以上，
+ * 这一次就在同一张卡后面加一句「这个月你变的那一点」。
+ *
+ * 为什么去掉开关：它原来是一个「每月多问一次」的勾选框，而现在的规则是
+ * 跟着次数走、不按月硬排——开关也就没有要控制的东西了。少一个旋钮。
+ *
+ * @param {object} o
+ * @param {boolean} o.sleepDue 今天是不是「想一想」那一天（且已经决定要问）
+ * @param {string} o.dk        当天 dateKey（YYYY-MM-DD）
+ * @param {object[]} [o.events] 全量事件
+ */
+export function monthlyDue({ sleepDue = false, dk = '', events = [] } = {}) {
+  if (sleepDue !== true) return false
+  const mon = String(dk ?? '').slice(0, 7)
+  if (!/^\d{4}-\d{2}$/.test(mon)) return false
+  const asked = (Array.isArray(events) ? events : []).filter(
+    (e) => e?.type === 'meta'
+      && String(e.text ?? '').startsWith('sleep:')
+      && String(e.text ?? '').slice(6, 13) === mon,
+  )
+  return asked.length >= 2
+}
+
+/**
+ * 主人 @ 她时的一次轻量叫醒（2026-11-11，用户 m00767 / m00816）。
+ *
+ * 不复用 wake()：那条走 plan()、可能被判 quiet，还占 wakesPerDay——
+ * 主人递话不是「今天该醒的那一次」，不该抢掉她自己的醒来机会。
+ * 这里只做三件事：挂一句处境、投一个空白信号、turn/end 时收掉。
+ * 她回不回、看不看，是她自己的判断；这条消息不是任务单。
+ */
+async function wakeForMentions(ctx, sessionId, dk, log) {
+  const sc = ctx.sessionController
+  if (!sc) return { ok: false, why: 'no sessionController' }
+  const now = new Date()
+  const text = [
+    wakeTimeLine(now, { manual: true }),
+    '',
+    '{T}在 B 站 @ 了你，那句话已经放在便条里。',
+    '要不要接、要不要去看那条视频、要不要回{T}，由你自己判断；不回也可以。',
+  ].join('\n')
+  const gen = setWakeSection(text, sessionId)
+  const timer = setTimeout(() => {
+    clearWakeSection(gen, sessionId)
+  }, 5 * 60_000)
+  if (typeof timer.unref === 'function') timer.unref()
+  const watcher = watchTurnEnd(ctx, sessionId, () => {
+    clearTimeout(timer)
+    clearWakeSection(gen, sessionId)
+  })
+  try {
+    const sent = await deliverWake(ctx, sc, sessionId, {
+      text: WAKE_PING,
+      rpcId: `at-${dk}-${Date.now()}`,
+      log,
+    })
+    if (!sent.ok) throw new Error(sent.why ?? '投递失败')
+    return { ok: true }
+  } catch (err) {
+    clearTimeout(timer)
+    clearWakeSection(gen, sessionId)
+    try { watcher.off?.() } catch { /* ignore */ }
+    log('at', `叫醒没送进去：${err?.message ?? err}`)
+    return { ok: false, why: String(err?.message ?? err) }
+  }
 }
 
 export function startScheduler(ctx, deps = {}) {
@@ -709,6 +791,44 @@ export function startScheduler(ctx, deps = {}) {
         log('comment', `扫回复失败：${err?.message ?? err}`)
       }
 
+      // ---- 有人在 B 站 @ 她了吗（2026-11-11，用户 m00767）----
+      // 主人 @ 算一次主动叫醒：递完便条当场叫，不等下一次日程；非主人 @ 只递不叫。
+      // 每天最多 AT_DAY_MAX 条；风控 / 网络失败退避 30 分钟，只记日志，不打扰她。
+      // 这条与「回复扫描」分开：那边是她评论楼里的事，这边是消息中心的 @。
+      try {
+        if (atScanDue(config?.at, now, config) && mentionsToday(events, dk) < AT_DAY_MAX) {
+          const got = await scanMentions({ root, events, dateKey: dk })
+            .catch((err) => ({ ok: false, code: 'FAIL', items: [], message: String(err?.message ?? err) }))
+          const later = got.ok ? {} : (Number(got.code) === -412 || got.code === 'NETWORK')
+            ? { backoffUntil: new Date(now + 30 * 60_000).toISOString() }
+            : {}
+          await updateConfig({ at: { lastScanAt: new Date(now).toISOString(), ...later } }, root).catch(() => {})
+          const fresh = got.ok && Array.isArray(got.items) ? got.items : []
+          const room = Math.max(0, AT_DAY_MAX - mentionsToday(events, dk))
+          const picked = fresh.slice(0, Math.min(AT_SHOW_MAX, room))
+          if (picked.length) {
+            const atModel = deriveSelf(events, { growthDays: config.growthDays })
+            await recordMentions(root, picked, { day: atModel.day, stage: atModel.stage })
+            const txt = renderMentions(picked)
+            if (txt) {
+              await queueNote(root, txt).catch(() => null)
+              const h = await homeStatus(root).catch(() => null)
+              const agent = h?.sessionId ? liveAgentOf(ctx, h.sessionId) : null
+              const ownerOnes = picked.filter((x) => x.fromOwner)
+              const woke = ownerOnes.length > 0 && agent && !isBusy(h.sessionId) && config?.at?.ownerWake !== false
+                ? await wakeForMentions(ctx, h.sessionId, dk, log)
+                : null
+              // 没叫醒（非主人 @ / 她正忙 / 没开屋子）就退成便条：她醒着时补进当前会话。
+              if (!woke?.ok && agent) await deliverQueued(agent, root, { home: true }).catch(() => null)
+              await markMentionsSeen(root, picked, { dateKey: dk }).catch(() => 0)
+              log('at', `有人在 B 站 @ 她了（${picked.length} 条${ownerOnes.length ? '，含主人' : ''}）${woke?.ok ? '，已经叫醒' : ''}。`)
+            }
+          }
+        }
+      } catch (err) {
+        log('at', `扫 @ 失败：${err?.message ?? err}`)
+      }
+
       // ---- 主动说话（0.8.1 本机实验，2026-10-30 用户 m04610）----
       // 它不是唤醒：不占 wakesPerDay，也不推成长事件。只在 .dev 下生效。
       // 开了就 return——这一趟由她自己决定说还是不说，不再叠一次醒一醒。
@@ -1163,9 +1283,12 @@ async function wake(ctx, root, model, config, decision, dk, log, deps = {}) {
   // 有就摆在我最前面。」所以它是正文**第一段**，比「现在是几点」还前。
   // 没有便条时 renderNotes 返回空串，filter(Boolean) 把它跳过，一个字都不多。
   // 读失败也绝不拖垮一次唤醒——她醒着这件事比桌上的纸条重要。
-  const notesLine = await readNotes(root)
-    .then((list) => renderNotes(list, now))
-    .catch(() => '')
+  // 2026-11-12（用户 m01513）：没写日子的改成低频轮换——每 7 天提一张，提过记 `nshow:`。
+  const notesList = await readNotes(root).catch(() => [])
+  const noteEvents = await readEvents(root).then(({ events }) => events).catch(() => [])
+  const seenNudge = nudgeSeen(noteEvents)
+  const nudgeNote = pickNudge(notesList, now, seenNudge)
+  const notesLine = notesList.length ? renderNotes(notesList, now, { seen: seenNudge }) : ''
 
   // ---- 空醒（2026-11-05，用户 m00684）----
   // 见 lib/freewake.js 文件头。摆料要出现的那一次、或者到日子了的那一次，
@@ -1183,12 +1306,38 @@ async function wake(ctx, root, model, config, decision, dk, log, deps = {}) {
   // 于是只要摆料开着、窗口里有旧句子，那句提示就基本响不了，设置页那行字等于骗人。
   // 现在倒过来：这一天先不判空醒，摆料顺延到下一次醒来，仍按正常叫醒把这句递出去。
   let sleepDue = false
+  // 1.0（用户 m01648 / m01650）：这一张卡问哪一句，跟着素材走；没有素材就不递。
+  let sleepAsk = { kind: 'none', ask: '' }
+  // 月末那句收束要不要加：这个自然月已经真问过两次以上。
+  let monthDue = false
   {
     try {
       const { events: evs } = await readEvents(root)
-      // 判据与下面那段一致：用 growthDay 取模（不是自然日），同一天只递一次。
+      // 判据与下面那段一致：用 growthDay 取模（不是自然日），同一个成长日只递一次。
       const everySleep = Number(config?.memory?.sleepEveryDays ?? 0)
-      sleepDue = sleepPromptDue({ every: everySleep, day: model.day, dk, events: evs })
+      const dayDue = sleepPromptDue({ every: everySleep, day: model.day, dk, events: evs })
+      // 「上一次想一想之后」这个窗口里的素材：改过几次口、有没有留下过话。
+      // 没有上次记录时退 30 天——不拿整个事件流当「这阵子」。
+      const askedBefore = evs.filter((e) => e?.type === 'meta' && String(e.text ?? '').startsWith('sleep:'))
+      // `tsMs()` 收的是**事件本身**（读 `ev.ts`），不是时间字符串——传字符串会得 0，
+      // 窗口就永远算成空的（2026-11-12 真机上正是这样让卡不递）。
+      const lastAt = askedBefore.length ? tsMs(askedBefore[askedBefore.length - 1]) : 0
+      const since = Number.isFinite(lastAt) && lastAt > 0 ? lastAt : now.getTime() - 30 * 24 * 3600 * 1000
+      const recent = evs.filter((e) => tsMs(e) >= since)
+      const byId = new Map(evs.map((e) => [e.id, e]))
+      const revisions = recent
+        .filter((e) => e?.type === 'revise')
+        .map((e) => {
+          const before = (e.refs ?? []).map((id) => byId.get(id)).find((x) => x?.text)
+          return { before: String(before?.text ?? ''), after: String(e.text ?? '') }
+        })
+      const anyActivity = recent.some(
+        (e) => HER_TYPES.includes(e?.type) || e?.type === 'looked' || e?.type === 'heard' || e?.type === 'voice',
+      )
+      monthDue = monthlyDue({ sleepDue: dayDue, dk, events: evs })
+      sleepAsk = sleepQuestion(model, { now: now.getTime(), revisions, anyActivity })
+      // 没素材就当今天不是「想一想」的那天：不递卡，也不写 `sleep:`，下一次到点再看。
+      sleepDue = dayDue && sleepAsk.kind !== 'none'
       // 2026-11-06（issue #42）：「兴趣」关掉时不再摆旧句子。
       // 原来 freeWakeFor 只要 tableText 非空就判成 table，而 tableText 根本不看 interest 开关——
       // 于是「关掉摆东西」之后，每 6 小时还是会因为旧句子空醒一次，而且那一轮既不想一想、
@@ -1411,12 +1560,18 @@ async function wake(ctx, root, model, config, decision, dk, log, deps = {}) {
   //   摘要器写出来的自传是"别人替她解释她的一生"。哪怕她写得粗糙、写得少、
   //   写偏了，那也是她自己写的。
   // 判据用 growthDay 取模（不是自然日），这样改了 growthDays 也不会突然连发。
-  // 同一天只用一次，靠 `meta sleep:<dk>` 兜住。
+  // 同一个成长日只用一次，靠 `meta sleep:<dk>` 和它信封里的 day 兜住（见 sleepPromptDue）。
   // 做法写在身份文档（SLEEP_BRIEF），这里只给一句时机标记。
   // 2026-11-09（issue #101）：这一天优先于空醒——判据与「要不要摆料」同在一处算好（`sleepDue`），
   // 摆料顺延到下一次醒来。原来写的是 `!free && …`，空醒一封口这句就永远轮不到。
   let askedSleep = false
-  if (sleepDue) { parts.push('', SLEEP_TODAY); askedSleep = true }
+  // 0.9.9（S-B）：这一天不再只递一句「想一想」——摆一句在当下最具体的问题。
+  // 1.0（user m01648 / m01650）：问题跟着这段时间的素材走（改口 / 两句反着 / 两句像 / 只有经历），
+  // 一张卡只问一句；月末攒够两次才加那句收束。做法（交 utterance、refs 指回去）在 SLEEP_BRIEF 里。
+  if (sleepDue) {
+    parts.push('', SLEEP_TODAY, sleepPrompt(model, { now: now.getTime(), question: sleepAsk, monthly: monthDue }))
+    askedSleep = true
+  }
 
   // ---- 规则解禁申请（R3，2026-10-24）----
   // 时机：由「最后一条证据是哪天」+ 稳定偏移（1–3 天）算出来，不用随机数（每次 tick 重算会抖）。
@@ -1429,7 +1584,7 @@ async function wake(ctx, root, model, config, decision, dk, log, deps = {}) {
   // 空醒里不递规则申请：那是一张要她表态的卡，会把「没有待办」重新变成待办。
   if (!free && config?.rules?.offers !== false) {
     const ev2 = (await readEvents(root).catch(() => ({ events: [] }))).events
-    if (!pendingOffer(ev2, Date.now())) {
+    if (!pendingOffer(ev2, Date.now(), offerLimits(config))) {
       for (const r of grantableRules()) {
         const due = offerDueDay(r.id, model, ev2, offerLimits(config))
         if (due === null || model.day < due) continue
@@ -1574,6 +1729,15 @@ async function wake(ctx, root, model, config, decision, dk, log, deps = {}) {
       { day: model.day, stage: model.stage, source: 'timer' },
       root,
     )
+    // 没写日子的便条提过哪一张：递进去了才算提过（2026-11-12，用户 m01513）。
+    // 和 digestShown 同一个道理——屋子没接上、这次没开口，不该让它进入 7 天冷却。
+    if (nudgeNote?.id) {
+      await appendEvent(
+        { type: 'meta', text: `nshow:${nudgeNote.id} ${dk}` },
+        { day: model.day, stage: model.stage, source: 'timer' },
+        root,
+      ).catch(() => {})
+    }
     // 每条模板都要落 fired 标记（2026-10-24 起）：once 靠它判断用没用过，
     // 可重复的模板靠它的时间戳算冷却（repeat.everyDays）——光有 id 算不出"隔了多久"。
     // 空醒没有动用任何模板，就不该替谁记这一笔。
@@ -1583,6 +1747,15 @@ async function wake(ctx, root, model, config, decision, dk, log, deps = {}) {
         { day: model.day, stage: model.stage, source: 'timer' },
         root,
       )
+      // 这张卡被问过之后要记一笔（回音卡：同一件事只问一次）。卡片自己给 note，
+      // 没给就不写——别凭空造一类记号，derive 会把它当"问过了"，那张卡就再也不出。
+      if (decision.note) {
+        await appendEvent(
+          { type: 'meta', text: String(decision.note) },
+          { day: model.day, stage: model.stage, source: 'timer' },
+          root,
+        )
+      }
     }
     // 预约簿：真的叫醒了她才算「到点提过了」。上面任何一步抛错都不会走到这里，
     // 所以投递失败不会白白吃掉这一次约定——下一个落点还会再试。
@@ -1607,6 +1780,7 @@ async function wake(ctx, root, model, config, decision, dk, log, deps = {}) {
       )
     }
     // 想过了就记一笔，免得同一天再问一次（她可能什么都没写，也算问过了）。
+    // 信封里的 day 是去重要认的：成长日不跟着本地零点翻，光看 dk 会在零点后再问一次。
     if (askedSleep) {
       await appendEvent(
         { type: 'meta', text: `sleep:${dk}` },

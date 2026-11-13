@@ -8,7 +8,7 @@
  * 「你写下的几行字还摊在那儿」。同一张桌上摆两摞清单，看着像系统在盘货。
  *
  * 所以这里只做一件事：把「想知道的」与「写下的旧句子」按配额和去重并成一段。
- * 约定见 `02-我的项目/大肥鱼/docs/L-空醒-方案与兼容约定.md` 第五节。
+ * 约定见维护者本地的空醒方案文档第五节（没随仓库发布）。
  *
  * 三条边界：
  *   1. **只摆事实**。不出现「你应该 / 你可以去 / 值得想想」——派活了就又变成任务清单。
@@ -25,6 +25,7 @@ import { clipText } from './clip.js'
 import { similarity } from './derive.js'
 import { wishLine } from './wish.js'
 import { gapwallLine } from './gapwall.js'
+import { localDaysAgo } from './schema.js'
 
 /** 空醒时最多摆几条没合上的事。 */
 export const DESK_GAP_FREE = 2
@@ -47,9 +48,9 @@ function clip(text, max = DESK_LINE_CLIP) {
   return clipText(t, max)
 }
 
-/** 几天前 / 今天 / 昨天——不给小时数。 */
+/** 几天前 / 今天 / 昨天——不给小时数。按本地日历日数，不按 24 小时整除。 */
 function agoText(at, at0) {
-  const days = Math.floor(Math.max(0, at0 - at) / 86_400_000)
+  const days = localDaysAgo(at, at0)
   if (days <= 0) return '今天'
   if (days === 1) return '昨天'
   return `${days} 天前`

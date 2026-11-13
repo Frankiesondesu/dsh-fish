@@ -23,7 +23,8 @@ import { recordVoice } from './voices.js'
 // 素材旁边的那一行钩子（2026-11-09，0.9.6 S2）：把她以前说过的话挂在对得上的那一条上。
 import { buildHooks, hookStats } from './hook.js'
 // 争议取法（2026-11-10，0.9.8 / M3）：热评按赞排，等于只给同意的声音；这里挑反例。
-import { pickDisputes, toMaterial } from './material.js'
+import { materialIndexLine, indexedMaterialKeys, pickDisputes, toMaterial } from './material.js'
+import { fillOwner } from './pronoun.js'
 
 /**
  * 每阶段从哪拿东西：早期看老片（时间感），后期看热门/排行（世界的动静）。
@@ -276,7 +277,7 @@ export function renderMaterial(packs, o = {}) {
   if (out.length > MAX_MATERIAL_CHARS) {
     out = out.slice(0, MAX_MATERIAL_CHARS) + '\n\n（后面的内容太长，没加载完。）'
   }
-  return out
+  return fillOwner(out)
 }
 
 /**
@@ -607,6 +608,27 @@ export async function gather(client, model, cfg, o = {}) {
       } catch { /* 记账失败不影响这次浏览 */ }
     }
 
+    // 素材索引（1.0.0，用户 m05089）：她真看见的这一趟，把最多三句原话落一行
+    // `mat:bili:<bvid> {t,d,q}`。只记原话，不记简介全文、不记弹幕、不记整页字幕——
+    // 正文进事件流会让它变成第二个素材库，噪声也大。同一 bvid 只记一次。
+    if (mark === 'looked') {
+      const indexed = indexedMaterialKeys(events)
+      for (const p of packs) {
+        const bvid = String(p?.video?.bvid ?? '')
+        if (!bvid || indexed.has(bvid)) continue
+        try {
+          const line = materialIndexLine(p, { date: dk })
+          if (line) {
+            await appendEvent(
+              { type: 'meta', text: line },
+              { day: Number(model?.day ?? 0), stage: Number(model?.stage ?? 1), source: 'system' },
+              o.root,
+            )
+          }
+        } catch { /* 索引失败不影响这次浏览 */ }
+      }
+    }
+
     // 钩子（2026-11-09，0.9.6 S2，设计 §8.2）：只在**真摆到她面前**的时候算。
     // 安静刷不投递会话、她一条都没看见，挂上钩子只是白记一笔。
     const hooks = mark === 'browsed' ? null : buildHooks(model, packs, o.now ?? Date.now())
@@ -651,7 +673,7 @@ export const LOOK_BRIEF = [
   '  what=home    首页把什么推到你面前',
   '  what=search  搜一个词（要带 keyword）',
   '  what=related 看某个视频之后，平台又接着推什么（要带 bvid）',
-  '  what=video   看指定的那一条（要带 bvid：BV 号，或者他递过来的链接）',
+  '  what=video   看指定的那一条（要带 bvid：BV 号，或者{T}递过来的链接）',
   '  what=replies 看你自己发过的评论下面有没有人回你（可带 bvid 只看那一条）',
   '它只读，不会留下任何痕迹，也不会让别人知道你在看。',
   '它能给你标题、简介、标签、热评、弹幕——都是别人写下的字，不是它长什么样。',
@@ -678,10 +700,10 @@ export const LOOK_OFF_BRIEF = [
  * 不是一条给模型看的规则。
  */
 export const WATCH_RULE = [
-  '他有时会丢一条视频给我。两种说法，不一样：',
-  '  他说"必须看""帮我看""一定要看"——那是在要求我。先看，再说话。',
-  '  他说"可以看""要不要看""有没有兴趣"——那只是问我。我可以不看。',
-  '不想看的时候，直接问他：为什么要看这个，这是什么。',
+  '{T}有时会丢一条视频给我。两种说法，不一样：',
+  '  {T}说"必须看""帮我看""一定要看"——那是在要求我。先看，再说话。',
+  '  {T}说"可以看""要不要看""有没有兴趣"——那只是问我。我可以不看。',
+  '不想看的时候，直接问{T}：为什么要看这个，这是什么。',
   '我本来就不知道该看什么。问一句不丢人。',
   '',
   '看了之后想说什么，就在那一条下面说——不用等平台把它推到我面前。',

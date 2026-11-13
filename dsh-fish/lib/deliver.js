@@ -52,6 +52,7 @@
 import { randomUUID } from 'node:crypto'
 import { sessionRow } from './home.js'
 import { recheckToolRestrict } from './restrict.js'
+import { fillOwner } from './pronoun.js'
 
 /**
  * 我们自己起的来源名。
@@ -119,7 +120,9 @@ export function fishMessage(text = WAKE_PING, { rpcId = '', kind = FISH_SOURCE_K
   return {
     id: `${kind}-${randomUUID()}`,
     role: 'user',
-    content: [{ type: 'text', text: String(text ?? WAKE_PING) }],
+    // 正文里指主人的位置写成 `{T}`（见 lib/pronoun.js 文件头）；投递前填一次。
+    // 这条消息也可能带她的原话（回执、便条），那些文本里没有 `{T}`，不会被碰。
+    content: [{ type: 'text', text: fillOwner(String(text ?? WAKE_PING)) }],
     source,
   }
 }
@@ -153,8 +156,8 @@ export async function resolveLiveAgent(sc, sessionId) {
  * 也不报错。结果就是每递一次话、每叫醒一次，宿主侧多一条空壳。
  *
  * 本机实测（`~/.dsh-fish/home` 这个 cwd，2026-11-05）：52 条会话里 39 条只有一行
- * session 头（≤400 字节）；同一台机器上 `--D-deepseekagent--` 59 条只 4 条、
- * `--C-Users-DANG-.dsh-aik_auto_memory_use--` 102 条只 1 条 —— 空壳只长在这条路径上。
+ * session 头（≤400 字节）；同一台机器上 `--D-<工作区>--` 59 条只 4 条、
+ * `--C-Users-<用户名>-.dsh-<工作区>--` 102 条只 1 条 —— 空壳只长在这条路径上。
  *
  * `create({ workspaceId })`（换房走的那个、`lib/home.js` 的 `rotateTalkSession`）
  * 才是「真的再开一间」，那个不动。

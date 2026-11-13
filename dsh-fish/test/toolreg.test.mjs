@@ -36,6 +36,7 @@ const ALL_TOOLS = [
   'bili_look', 'bili_watch', 'bili_zoom', 'her_open', 'her_watch_local', 'bili_speak',
   'ask_owner', 'her_alarm', 'her_help', 'her_voice', 'her_meme', 'her_world',
   'her_draw', 'her_formula', 'her_space', 'her_dream', 'bring_back', 'her_say',
+  'bili_sub', 'ask_pronoun',
 ]
 
 function registerAll() {

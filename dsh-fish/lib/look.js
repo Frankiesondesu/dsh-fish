@@ -16,6 +16,7 @@
 import { createClient } from './bili.js'
 import { readMyReplies, renderMyReplies } from './comment.js'
 import { absorb, renderMaterial, rankVideos, seenBvids, metaTitle, LOOK_BRIEF, WATCH_RULE } from './browse.js'
+import { indexedMaterialKeys, materialIndexLine } from './material.js'
 import { readEvents, rootDir, appendEvent } from './store.js'
 import { loadConfig, dateKey, biliOn } from './settings.js'
 // 评论区里别人的话（2026-10-24，用户 m02454）
@@ -159,6 +160,8 @@ export async function lookOnce(o = {}) {
     const dk = dateKey()
     const who = { day: Number(o.model?.day ?? 0), stage: Number(o.model?.stage ?? 1), source: 'system' }
     const stamp = sessionId ? { sessionId } : {}
+    // 已经建过素材索引的 bvid（同一视频不重复记）
+    const indexedSeen = indexedMaterialKeys(events)
     for (const p of packs) {
       // 0.9.7 T2：标题跟着 `looked:` 落下来（browse.js 的 seenBvids 取第一段 bvid，
       // 兼容「只有 BV 号」和「BV 号 + 标题」两种形状）。
@@ -194,6 +197,17 @@ export async function lookOnce(o = {}) {
         view: Number(p.video.view) || 0,
       }
       await appendEvent({ type: 'meta', text: `look:${dk} ${p.video.bvid} ${JSON.stringify(info)}`, ...stamp }, { ...who }, root).catch(() => {})
+      // 素材索引（1.0.0，用户 m05089）：她点名看过的这条，把最多三句原话落一行。
+      // 与 browse.js 同一口径：只记原话，不记简介全文；同一 bvid 只记一次。
+      try {
+        if (!indexedSeen.has(p.video.bvid)) {
+          const line = materialIndexLine(p, { date: dk })
+          if (line) {
+            await appendEvent({ type: 'meta', text: line }, { ...who }, root)
+            indexedSeen.add(p.video.bvid)
+          }
+        }
+      } catch { /* 索引失败不影响这次浏览 */ }
     }
 
     // 评论区里别人的话（2026-10-24，用户 m02454）：她自己去看的时候也可能读到一句。
@@ -326,7 +340,7 @@ export function registerLook(ctx, deps = {}) {
           description: 'home=首页推给你的；search=你自己搜（要带 keyword）；related=接着某条往下看（要带 bvid）；video=看指定的那一条（要带 bvid）；replies=看你自己发过的评论下面有没有人回你（可带 bvid 只看那一条）。',
         },
         keyword: { type: 'string', required: false, description: 'what=search 时搜什么。' },
-        bvid: { type: 'string', required: false, description: 'what=related 时从哪条接着看；what=video 时看哪一条（BV 号，或者他递过来的链接）；what=replies 时只看这一条视频下面的。' },
+        bvid: { type: 'string', required: false, description: 'what=related 时从哪条接着看；what=video 时看哪一条（BV 号，或者{T}递过来的链接）；what=replies 时只看这一条视频下面的。' },
       }),
       output: {
         schema: {

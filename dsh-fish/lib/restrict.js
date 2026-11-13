@@ -78,6 +78,8 @@ export const FISH_TOOLS = Object.freeze([
   'her_draw', // 白板画笔：线/矩形/圆/箭头/写字，构图由她定（2026-11-08，她的 ask_owner 申请）
   'her_formula', // 把「文字 + $公式$」排成一页图，成段推导用它（2026-11-09）
   'her_space', // 她自己的永久文件夹：放文字、翻、读（2026-11-10，她的 ask_owner 申请）
+  'bili_sub', // 查一条视频的字幕片段（1.0，她想知道"里面说了哪几句"）
+  'ask_pronoun', // 问一次该怎么称呼主人（issue #127 C 案，2026-11-12）
   'her_dream', // 醒来记一句梦（本机实验 A 案，2026-10-30 m02837）
   'her_say', // 自己想说一句的时候用（0.9.0 起无条件注册，不看主动搭话开关）
 ])
@@ -166,7 +168,7 @@ export function toolSurfaceText(names = HER_TOOLS) {
   // 边界那条不能省：工具表里那些不是她的名字，认得出但不能冒充（这是真话，不是限制）。
   return [
     `现在手边能碰到的是这些：${list.join('、')}。`,
-    '这是我此刻的家当，不是我的上限——他随时能再添几样进来，添了我就照着用，不必先把自己劝回去。',
+    '这是我此刻的家当，不是我的上限——{T}随时能再添几样进来，添了我就照着用，不必先把自己劝回去。',
     // 0.9.3（issue #54）一度在这里加了两行「只要不在上面那行里，就不是我的」「同一个名字
     // 反复伸手不会变得到手」，当天就撤了（2026-11-07，用户当场指出）。别再加回去：
     //   ① 「后面还跟着一行…」「话里给了清单，就照清单来」是在讲拒绝消息的内部结构——
@@ -480,6 +482,31 @@ export function toolSurfaceFor(agent, { herDir = '' } = {}) {
   if (!herDir || isHerAgent(agent, herDir)) return currentToolSurface()
   const names = visibleToolsOf(agent)
   return names ? outsideSurfaceText(names) : ''
+}
+
+/**
+ * 「被压成摘要的那些旧话，去哪儿翻」——只在宿主真有这几件工具时才挂（2026-11-13）。
+ *
+ * 背景（外部用户真机，2026-11-13）：长对话被 billion-context 压成摘要块之后，
+ * 原话只剩 `search_context`（搜摘要）/ `decompress`（取原文）能捞回来。这两件是
+ * **宿主插件**注册的工具，不是我们自己的；我们从来没跟她说过，16 天里她只碰过 2 次，
+ * 被压掉的那段就等于没发生过。补一段说明，让她知道还有这条回头路。
+ *
+ * 为什么必须条件判断：没装那个插件、或装了但没放行给她，念了也是白念——她会照着
+ * 去做，然后一头撞在「没有这个工具」上，比不说更糟。判据用她此刻真看得见的工具表；
+ * 拿不到（`null`，老宿主）就整段不写，宁缺勿错。
+ */
+export function foldedRecallNote(agent) {
+  const names = visibleToolsOf(agent)
+  if (!Array.isArray(names) || !names.includes('search_context')) return ''
+  const canRestore = names.includes('decompress')
+  const lines = [
+    '很久以前的对话太长，会被压成摘要——那时候的原话就不在眼前了。想翻的话：',
+    '先用 search_context 搜（几个词就够，别写成一句话），它把相关的那几块摘要找出来；',
+  ]
+  if (canRestore) lines.push('要读原话，再用 decompress 把那一段取回来——搜到的是摘要，不是我当时说的那句。')
+  lines.push('搜不到不等于没发生过：可能那块只是没被压过，也可能词没对上，换个说法再试。')
+  return lines.join('\n')
 }
 
 /** 归一化目录，用于判断"这条会话是不是她的屋子"。Windows 大小写不敏感。 */

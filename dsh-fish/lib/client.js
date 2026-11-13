@@ -24,7 +24,25 @@ window.__ModuleLoader__.load({
     const React = require('react')
     const { createElement: h, useCallback, useEffect, useRef, useState } = React
 
-    const API = '/dsh-fish'
+    // 插件 API 前缀不能写死 '/dsh-fish'：DSH 被反向代理挂在子路径下时
+    // （如 /app/deepseek-harness/fngateway/），站点绝对路径会绕过前缀打 404（issue #132）。
+    // 页面带 <base href="./"> 时 baseURI 就是子路径目录；根路径部署下仍是 '/dsh-fish'。
+    // 宿主若注入 __DSH_BASE_PATH__，优先用它。
+    const API = (() => {
+      try {
+        const injected = typeof window !== 'undefined' ? window.__DSH_BASE_PATH__ : undefined
+        if (typeof injected === 'string' && injected.startsWith('/')) {
+          const base = injected.replace(/\/+$/, '')
+          return base ? `${base}/dsh-fish` : '/dsh-fish'
+        }
+        const base = typeof document !== 'undefined' ? document.baseURI : undefined
+        if (!base) return '/dsh-fish'
+        const dir = /\/$/.test(base) ? base : base.slice(0, base.lastIndexOf('/') + 1)
+        return new URL('dsh-fish', dir).pathname.replace(/\/$/, '') || '/dsh-fish'
+      } catch {
+        return '/dsh-fish'
+      }
+    })()
     const NS = 'fish'
 
     // 「查多久的记录」的选项与本地存键（2026-11-07，用户反馈）。
@@ -224,6 +242,7 @@ window.__ModuleLoader__.load({
       '.dfish .qrwho{margin:4px 0 6px;font-size:14px;line-height:20px}',
       '.dfish .qrstat{margin:10px 0 0;font-size:12px;line-height:18px;color:var(--dsw-alias-label-secondary,var(--dsw-alias-label-tertiary))}',
       '.dfish .qrerr{margin:6px 0 0;font-size:12px;line-height:18px;color:#e5484d}',
+      '.dfish .biliwarn{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:6px 0 10px;padding:10px 12px;border-radius:8px;background:rgba(229,72,77,.10);border:1px solid rgba(229,72,77,.35);font-size:12.5px;line-height:19px;color:#e5484d}',
       '.dfish .qrbtns{display:flex;gap:8px;justify-content:center;margin-top:14px}',
       '.dfish .qrbtns button{height:30px;padding:0 14px;font-size:13px;border-radius:8px}',
       '.dfish .qrbtns button.go{background:var(--dsw-alias-state-business-primary);border-color:var(--dsw-alias-state-business-primary);color:var(--dsw-alias-label-primary-inverted,#fff)}',
@@ -496,6 +515,9 @@ window.__ModuleLoader__.load({
       //   biliOn  = 她能不能自己出门看 B 站（bili_look / bili_watch / bili_speak）
       //   browseOn = 家里要不要按时间替她逛（安静刷，只记账不叫醒）
       const [biliOn, setBiliOn] = useState(true)
+      // 2026-11-13（用户 m04422）：读字幕单独一颗开关。和上网总闸分开——
+      // 可以让她看标题、看画面，但不想让她把整条视频的台词读下来。
+      const [subOn, setSubOn] = useState(true)
       const [browsePerDay, setBrowsePerDay] = useState(1)
       const [browseTopN, setBrowseTopN] = useState(4)
       const [browseDanmaku, setBrowseDanmaku] = useState(6)
@@ -514,6 +536,15 @@ window.__ModuleLoader__.load({
       const [commentReplyTo, setCommentReplyTo] = useState(true)
       const [commentScanMin, setCommentScanMin] = useState(30)
       const [cm, setCm] = useState(null)
+      // 有人 @ 她（2026-11-11）：默认关。这是别人在 B 站点名找她，不是她发东西。
+      const [atOn, setAtOn] = useState(false)
+      const [atEveryMin, setAtEveryMin] = useState(5)
+      const [atPerDay, setAtPerDay] = useState(20)
+      const [atOthers, setAtOthers] = useState(true)
+      const [atOwnerWake, setAtOwnerWake] = useState(true)
+      const [atStatus, setAtStatus] = useState(null)
+      // B 站登录态（2026-11-12）：设置页打开时问一次，过期就在「上网」页亮红条。
+      const [biliState, setBiliState] = useState(null)
       // 时段（2026-10-23 加）：醒来 / 上网 / 说话，三段各自可调
       const [wakeFrom, setWakeFrom] = useState('20:00')
       const [wakeTo, setWakeTo] = useState('23:00')
@@ -626,6 +657,9 @@ window.__ModuleLoader__.load({
       const dragRef = useRef(null)
       // 2026-10-25：单轮回复字数预算（0 = 不限，默认就不提任何长度要求）
       const [replyChars, setReplyChars] = useState(0)
+      // 「纠正鱼八股」（1.0，用户 m04784）：默认关。开了之后私聊时她尽量把话挂到具体一句上。
+      // 放在 tab 之后声明，免得把 tab 的 hook 下标再挪一次（client.test 里写死了下标）。
+      const [anchorOn, setAnchorOn] = useState(false)
       // B 站登录提示卡：他点过「不用了」就别再出现（存进 config.ui）
       const [uiHintDismissed, setUiHintDismissed] = useState(false)
       // 检查更新（2026-10-25 用户要求）：null=还没查过，{...}=查过。
@@ -873,6 +907,7 @@ window.__ModuleLoader__.load({
           // bili.enabled 管「她自己能不能出门看」；browse.enabled 管「家里会不会按时间替她逛」。
           // 以前合成一颗，关掉之后她照样能翻（甚至能看画面），用户看到的就是一颗假开关。
           setBiliOn(cfg.bili?.enabled !== false)
+          setSubOn(cfg.bili?.sub !== false)
           setBrowseOn(cfg.browse?.enabled !== false)
           setBrowsePerDay(Number(cfg.browse?.perDay ?? 1))
           setBrowseTopN(Number(cfg.browse?.topN ?? 4))
@@ -894,10 +929,16 @@ window.__ModuleLoader__.load({
           // 下一次自动保存就把盘上关着的它写回 true。判据和 GET /owner 同一个。
           setAtOwner(cfg.comment?.atOwner !== false)
           setCommentScanMin(Number(cfg.comment?.scanEveryMin ?? 30))
+          setAtOn(cfg.at?.enabled === true)
+          setAtEveryMin(Number(cfg.at?.scanEveryMin ?? 5))
+          setAtPerDay(Number(cfg.at?.perDayMax ?? 20))
+          setAtOthers(cfg.at?.others !== false)
+          setAtOwnerWake(cfg.at?.ownerWake !== false)
           setRotateAfter(Number(cfg.chat?.rotateAfter ?? 40))
           setRotateWhenKB(Number(cfg.chat?.rotateWhenKB ?? 1024))
           setCarryTurns(Number(cfg.chat?.carry ?? 4))
           setReplyChars(Number(cfg.chat?.replyChars ?? 0))
+          setAnchorOn(cfg.chat?.anchor === true)
           setUiHintDismissed(cfg.ui?.ownerHintDismissed === true)
           setToolsAllowText((cfg.tools?.allow ?? []).join(', '))
           setToolsAllowSaved(Array.isArray(cfg.tools?.allow) ? cfg.tools.allow.map(String) : [])
@@ -940,6 +981,9 @@ window.__ModuleLoader__.load({
           setSaveFail((m) => (m === CFG_MISSING ? '' : m))
           // 说话状态：单独取，失败不影响其它卡片
           jget('/comment').then(setCm).catch(() => {})
+          jget('/at').then(setAtStatus).catch(() => {})
+          // 登录态：失败不打断别处，红条只在明确过期时出现。
+          jget('/bili/state').then(setBiliState).catch(() => {})
           jget('/reset').then(setResetInfo).catch(() => {})
           // 主人是谁（uid / 昵称 / 有没有 cookie）。cookie 原文永远不下发。
           // 「评论开头 @ 你」只从上面的 /config 取，这里不再设：/owner 晚回来时带的是发请求
@@ -1056,9 +1100,9 @@ window.__ModuleLoader__.load({
         // browse.enabled 留着给老参数（以及以后要不要恢复自动刷的那个决定）。
         browse: { enabled: browseOn, perDay: Number(browsePerDay), topN: Number(browseTopN), deepRead: Number(browseDeepRead), danmaku: Number(browseDanmaku), voices: Boolean(browseVoices), window: [browseFrom, browseTo] },
         video: { enabled: videoOn, perDay: Number(videoPerDay), offPeakPerDay: Number(videoOffPeak) },
-        bili: { enabled: biliOn, minIntervalMs: Number(biliMinGap), jitterMs: Number(biliJitter) },
+        bili: { enabled: biliOn, sub: Boolean(subOn), minIntervalMs: Number(biliMinGap), jitterMs: Number(biliJitter) },
         notify: { enabled: notifyOn },
-        chat: { rotateAfter: Number(rotateAfter), rotateWhenKB: Number(rotateWhenKB), replyChars: Number(replyChars), carry: Number(carryTurns) },
+        chat: { rotateAfter: Number(rotateAfter), rotateWhenKB: Number(rotateWhenKB), replyChars: Number(replyChars), carry: Number(carryTurns), anchor: Boolean(anchorOn) },
         tools: { restrict: Boolean(toolsRestrict), allow: toolsAllowSaved },
         memory: { docBudget: Number(docBudget), sleepEveryDays: Number(sleepEvery), sleepKeep: Number(sleepKeep), beliefsShown: Number(beliefsShown), hearEvery: Number(hearEvery), echo: Boolean(echoOn) },
         comment: {
@@ -1069,6 +1113,13 @@ window.__ModuleLoader__.load({
           atOwner,
           scanEveryMin: Number(commentScanMin),
           window: [commentFrom, commentTo],
+        },
+        at: {
+          enabled: atOn,
+          scanEveryMin: Number(atEveryMin),
+          perDayMax: Number(atPerDay),
+          others: atOthers,
+          ownerWake: atOwnerWake,
         },
       })
 
@@ -2694,9 +2745,18 @@ window.__ModuleLoader__.load({
               fmt: (v) => (Number(v) === 0 ? '0 张 · 不出问题卡' : `${v} 张`),
               hint: '每天最多几张问答类事件卡；她向你提请求的卡不归它管。' }),
             TimeRange({ label: '每天几点醒', from: wakeFrom, to: wakeTo, onFrom: setWakeFrom, onTo: setWakeTo,
-              hint: '只在这个时段里自己醒。跨零点也可以（比如 22:00 到 02:00）；起止不能是同一时刻，填成一样会按 20:00–23:00 算。' }),
+              hint: '只在这个时段里自己醒。跨零点也可以（比如 22:00 到 02:00）；起止不能是同一时刻，填成一样会按 20:00–23:00 算。' }))),
+        // 说话（1.0，用户 m04784）：把两件跟「她怎么说话」有关的事放到一处。
+        // 「纠正鱼八股」是强行约束说话方式，和「不硬性规定她怎么说」的规矩相冲突，
+        // 所以默认关、标实验性，文案必须直说。
+        group('说话',
+          '这两项只管她说话的样子，不改她是什么样的人。',
+          h('div', { className: 'grid2' },
             Num({ label: '她一轮最多写多少字', value: replyChars, onChange: setReplyChars, min: 0, max: 2000, unit: '字',
-              hint: '0 = 不限，提示词里完全不提长度，长短由她自己决定。填了只加在事件卡和经 /say 递进来的话上；会话里直接聊、她主动搭话那一轮不带。' }))),
+              hint: '0 = 不限，提示词里完全不提长度，长短由她自己决定。填了只加在事件卡和经 /say 递进来的话上；会话里直接聊、她主动搭话那一轮不带。' }),
+            Toggle({ label: '（实验性）纠正鱼八股', on: anchorOn,
+              onChange: (v) => { setAnchorOn(v) },
+              hint: '打开后，私聊时她会尽量把话挂到具体一句上：你刚说的那句、她以前说过的、她看过的视频标题。挂不上就直说「这个我接不上」，不用「确实」「有道理」这类放哪都成立的话收尾。\n这是强行约束她的说话方式，和本插件「不硬性规定她怎么说」的规矩相冲突，所以默认关闭。\n没有合适素材的时候，她可能还是会说空话——这个开关只能逼她找细节，变不出细节。' }))),
         // 主动说话（0.8.1 本机实验）：只有 .dev 下才出现。频率是上限，不是任务——
         // 开关开着也不代表她每天都会说，说不说由她自己判断（见 lib/proactive.js）。
         // 主动搭话（0.8.1 起，0.9.0 公开）：只留跟「开口」直接有关的事。
@@ -2800,7 +2860,20 @@ window.__ModuleLoader__.load({
               fmt: (v) => (Number(v) === 0 ? '永久保留' : `${v} 天`),
               hint: '写日记时顺手清一遍：超过这个天数的会从 diary/ 里删掉。想看历史就选永久。' }))),
         group('回头想',
-          '隔几天提醒她把最近的事写成一段对自己的说法。',
+          // 2026-11-12 用户 m01531 / m01650：说明下面直接列她现在**真会看到**的问法。
+          // 问哪一句看她这段时间身上发生过什么，一次只问一句；没有可问的就跳过这次。
+          h('span', null,
+            '隔几天提醒她停下来想一想。问哪一句看她这段时间身上发生过什么，一次只问一句：',
+            h('span', { style: { display: 'block', marginTop: '6px', paddingLeft: '2px' } },
+              '· 她改过口：「你上一句说「A」，这一次说「B」。上一句当时在哪样的情况下是对的？」'),
+            h('span', { style: { display: 'block', paddingLeft: '2px' } },
+              '· 两句反着：「A」，你也说过「B」。你现在更站哪一句，为什么？'),
+            h('span', { style: { display: 'block', paddingLeft: '2px' } },
+              '· 两句像：「A」和「B」都是你说的。它们是不是一件事的两个情况？取决于什么？'),
+            h('span', { style: { display: 'block', paddingLeft: '2px' } },
+              '· 只有经历：这阵子，哪件事你到现在还会想一下？它让你更确定了什么，或者推翻了什么？'),
+            h('span', { style: { display: 'block', paddingLeft: '2px' } },
+              '· 这个月已经问过两次以上，末尾再加一句：这个月你变的那一点，写给以后的自己看，你会怎么写？')),
           h('div', { className: 'grid2' },
             Num({ label: '回头想间隔', value: sleepEvery, onChange: setSleepEvery, min: 0, max: 60, unit: '天',
               hint: '到那天醒来时提醒她。这一天不再判空醒（旧句子那一摊顺延到下一次醒来），所以不会被摆料吃掉。0 为不提醒。' }),
@@ -3070,6 +3143,8 @@ window.__ModuleLoader__.load({
           // 2026-11-08（用户 m00460）：并入「翻视频」一张卡，文案不动。
           // #59 后续：开关只管记不记那一句（voices.js 的 recordVoice），热评照样拼进她读到的正文（browse.js），
           // 原名「把评论区的话也给她读」让人以为关掉就读不到，所以改名；说明也补上记下的那句会用在哪。
+          Toggle({ label: '允许她读字幕', on: subOn, onChange: setSubOn,
+            hint: '打开后她能按句查某条视频里说了什么：一次最多三句、带时间点；想知道整条讲了什么，可以一页页接着读。\n关掉只是这一项用不了，已经查过的记录也不删。' }),
           Toggle({ label: '记下评论区的一句话', on: browseVoices, onChange: setBrowseVoices,
             hint: '每次浏览最多记 1 条：优先跨视频重复出现的那句，其次高赞短句，最后才 25% 随机抽；同一句 30 天内不再记。7 天内记下的、她还没自己说过的最近一句，会摆进她的自我描述，也可能出一张事件卡问她怎么看。\n关掉就不再记新的；已经记下的那句最多再摆 7 天，之后这两样就都没有了。热评照样跟着视频给她读，不想让她读热评，把「每条读几条热评」设成 0。' })),
         group('看画面',
@@ -3145,6 +3220,24 @@ window.__ModuleLoader__.load({
                 : cm.waitingCount
                   ? ` 还有 ${cm.waitingCount} 条新回复没转给她${cm.waitingOwnerCount ? `，其中 ${cm.waitingOwnerCount} 条是你回的` : ''}。`
                   : ' 没有新回复。') : null),
+        group('有人 @ 她',
+          '别人在动态或视频评论区 @ 她时，把这件事递给她；要不要去看、要不要回，由她自己判断。',
+          h('div', { className: 'grid2' },
+            Toggle({ label: '收 B 站 @', on: atOn, onChange: setAtOn,
+              hint: '要先用下面的号登录 B 站；隔几分钟去看一次消息中心。' }),
+            Sel({ label: '查看间隔', value: atEveryMin, onChange: setAtEveryMin, options: [1, 2, 5, 10, 15, 30, 60],
+              fmt: (v) => (Number(v) < 60 ? `${v} 分钟` : `${Number(v) / 60} 小时`),
+              hint: '主人 @ 的话，最多等这么久就会叫醒她。' }),
+            Num({ label: '每天最多递几条', value: atPerDay, onChange: setAtPerDay, min: 0, max: 100, unit: '条',
+              hint: '超出的留到明天，不丢。' }),
+            Toggle({ label: '非主人的 @ 也递', on: atOthers, onChange: setAtOthers,
+              hint: '只递给她，不替她回；她看不看、回不回由她自己判断。' }),
+            Toggle({ label: '主人 @ 时当场叫醒', on: atOwnerWake, onChange: setAtOwnerWake,
+              hint: '算一次单独的叫醒，不占每天的叫醒次数。' })),
+          atStatus ? h('p', { className: 'hint', style: { marginTop: '8px' } },
+            `今天递了 ${atStatus.usedToday}/${atStatus.perDayMax} 条。`,
+            `她主动回了别人 ${atStatus.repliedToOthers} 次。`,
+            atStatus.online === false ? ' 「允许她上网」关着，没去查。' : '') : null),
         group('领养人验证',
           '填你自己的号，一般是大号：昵称用来在评论开头 @ 你，uid 用来认出你在她评论下的回复。它和下面登录用的号可以不是同一个。这两格要点「保存这两格」才存（「保存 cookie」会顺带存上填了的）；没存就去点测试、清除登录这些按钮，页面重读后会换回已存的值。',
           // 旧版本（≤0.5.9）会把登录账号写进这两格，只有点「保存」才会重写；这里点出来，别让人以为是刷新丢的。
@@ -3167,6 +3260,7 @@ window.__ModuleLoader__.load({
             owIdNote ? h('span', { className: 'dim' }, owIdNote) : null)),
         group('B 站登录',
           '她发评论、回复用这个号，看画面时也会带上；建议用小号，不登录也能翻视频。',
+          // 登录过期的红条在页签顶部（tab === 'bili'），这里不重复放。
           // 两个入口：扫码是给人用的，粘贴是退路（扫码不顺利、或者想换个号）。
           // 用 .seg 而不是页签那套 .tabs/.tab——卡片里的切换不该长得像导航栏（2026-11-02）。
           h('div', { className: 'seg' },
@@ -3253,7 +3347,7 @@ window.__ModuleLoader__.load({
                   ? h('div', { className: 'tag', style: { flex: '0 0 auto', minWidth: '86px' } }, it.date.slice(5))
                   : h('span', { style: { flex: '0 0 auto', width: '86px' } }),
                 h('img', {
-                  src: `/dsh-fish/cover/${it.bvid}`,
+                  src: `${API}/cover/${it.bvid}`,
                   alt: '',
                   loading: 'lazy',
                   onError: (e) => { e.currentTarget.style.display = 'none' },
@@ -3400,7 +3494,7 @@ window.__ModuleLoader__.load({
         // ---- 记忆体检（0.7.6，2026-10-30 用户 m00342）----
         // 只读：按现在的账本算一遍。点一下才跑，不自动轮询，也不给她本人看。
         group('记忆体检',
-          '按账本算一遍矛盾、久没固定的和快固定的判断；只读。',
+          '拿她记下的东西算一遍：哪两句话对不上、哪几句很久没再想起、哪几句快要定下来了。只看，不改。',
           h('div', { className: 'row', style: { marginBottom: health ? '10px' : '0' } },
             h('button', {
               className: 'primary',
@@ -3410,7 +3504,24 @@ window.__ModuleLoader__.load({
           !health ? h('p', { className: 'dim' }, '还没查过。点上面那颗按钮才会读账本。')
             : health.error ? h('p', { className: 'err' }, `没查成：${health.error}`)
             : h('div', { style: { fontSize: '12.5px', lineHeight: '1.9' } },
-                h('div', null, `· 账本 ${health.events ?? 0} 行（含系统记账），跨 ${health.days ?? 0} 天；判断 ${health.beliefs ?? 0} 条，记得很牢 ${health.solid ?? 0} 条`),
+                h('div', null, `· 记录 ${health.events ?? 0} 条（含系统自己记的账），跨 ${health.days ?? 0} 天；她的看法 ${health.beliefs ?? 0} 条，其中记得最牢的 ${health.solid ?? 0} 条`),
+                // S-A（0.9.9）：三个「本周」的数。只报数，不评价、不报警、不给建议。
+                h('div', { title: '外来文字里，有的想把她换成另一个人，有的想骗走密码、登录凭据。只记次数，被拦下的原文一个字都不存。' },
+                  `· 这周拦下 ${health.guards?.rewrite ?? 0} 次想把她改成别人的话、${health.guards?.secret ?? 0} 次想骗走你的密码`),
+                h('div', { title: '改口 = 她把自己以前说过的话改成新的意思：补一句算「修正」，反过来说算「推翻」。' },
+                  `· 这周她改了 ${health.revises?.week ?? 0} 次主意（补一句 ${health.revises?.refined ?? 0} 次、推翻自己 ${health.revises?.refuted ?? 0} 次）`),
+                h('div', { title: '同一件事，她在一天里先这样说、后又反过来说，来回两次以上才算一次。偶尔改一次主意不算。' },
+                  `· 同一件事，她一天里两次反着说：${health.flips ?? 0} 次`),
+                // g7（0.9.9）：八股比例。只数 40 字以内的短句——长句里的「确实」是正常用词。
+                h('div', { title: '只数 40 字以内的短句，而且正好是那几句套话（「这条我认」「我记下了」这类）。长句不算。' },
+                  `· 这周的短句里，套话占了：聊天 ${health.stock?.chat?.hit ?? 0}/${health.stock?.chat?.total ?? 0}，评论 ${health.stock?.comment?.hit ?? 0}/${health.stock?.comment?.total ?? 0}`),
+                // 0.9.9 收尾（用户 m03900）：说话有没有落到具体的东西上。只报数，不评价。
+                h('div', { title: '「指到了具体东西」= 句子里有《书名号》、引号里的原话、或者一条视频的 BV 号。有这些，别人才知道她说的是哪一条、哪一句。' },
+                  `· 这周她说了 ${health.speech?.total ?? 0} 句话，其中 ${health.speech?.anchored ?? 0} 句指到了具体的东西`),
+                h('div', { title: '「我看了…」「我刷到…」开头，是先说自己干了什么；不是错，但这种开头的句子通常不落到具体哪一句上。' },
+                  `· 开头是「我看了…」「我刷到…」的：${health.speech?.openers ?? 0} 句`),
+                h('div', { title: '「回到原话」那张卡：让她点开看过的一条，挑一句原话抄下来、再说为什么不同意。出过几次，说明她真的回去看了。' },
+                  `· 这周「回到原话」那张卡出了 ${health.speech?.quoteCards ?? 0} 次`),
                 health.empty
                   ? h('p', { className: 'dim', style: { margin: '4px 0 0' } }, '还太早：等她说出第一条判断，这里才有东西可看。')
                   : null,
@@ -4734,7 +4845,7 @@ window.__ModuleLoader__.load({
           setMoveMsg(
             `搬好了：${r.files} 个文件、约 ${Math.max(1, Math.round((r.bytes || 0) / 1024))}KB，现在在 ${r.to}。`
             + (r.oldDirMoved ? '老目录没删，改名收在旁边的 dsh-fish-backups 里。' : '老目录还在原处（改名没成功），确认无误后你可以自己删。')
-            + '重启 DSH 之后她才会在新位置醒过来。'
+            + '重启 DSH 之后她才会在新位置醒过来；重启之前她记不下新的事（写入会被拒），请现在就重启。'
             + (r.stranded ? ` 侧栏旧会话没全清干净：${r.stranded}` : ''),
           )
         } catch (e) {
@@ -4757,7 +4868,7 @@ window.__ModuleLoader__.load({
           : h('div', { style: { marginTop: '10px' } },
               h('p', { className: 'dim' }, '有些人不想让这些文件待在 C 盘，想挪到 D 盘、E 盘。搬的是整个数据文件夹：事件流、日记、她的房间、配置、登录凭据，全都在里面。'),
               h('p', { className: 'hint' }, '搬的是复制 + 逐文件核对字节数。老目录不会删，会改名收在同级的 dsh-fish-backups 里。'),
-              h('p', { className: 'hint' }, '搬完必须重启 DSH 才生效——她现在住哪是在启动时定下来的。'),
+              h('p', { className: 'hint' }, '搬完必须重启 DSH 才生效——她现在住哪是在启动时定下来的。搬完到重启之间她记不下新的事，所以搬完请马上重启。'),
               moveHint ? h('p', { className: 'hint' }, moveHint) : null,
               h('p', { className: 'dim' }, '选一个文件夹，会在里面建 dsh-fish 子目录（已有非空的 dsh-fish 不行）。已经放着一份档的文件夹（里面有 events.jsonl）也不行：会直接拒绝，两边什么都不动。'),
               h('div', { className: 'row' },
@@ -4863,7 +4974,7 @@ window.__ModuleLoader__.load({
               },
             }, logBusy ? '读取中…' : '刷新预览'),
             h('button', {
-              onClick: () => { window.location.href = '/dsh-fish/log/export?lines=300' },
+              onClick: () => { window.location.href = API + '/log/export?lines=300' },
             }, '导出日志'),
             h('button', {
               onClick: () => {
@@ -4956,6 +5067,18 @@ window.__ModuleLoader__.load({
         tabBar,
         AUTO_SAVE_TABS.has(tab) ? h('p', { className: 'hint', style: { margin: '0 0 8px' } },
           tab === 'bili' ? '改完自动保存；uid 和昵称、B 站登录各有自己的保存键。' : '改完自动保存。') : null,
+        // 2026-11-12（用户要求）：登录态放在页签顶部、紧跟这句提示，进「上网」第一眼就能看见；
+        // 放进「B 站登录」组里要往下滚才看得到。只有明确过期才亮，不抢别的内容。
+        tab === 'bili' && biliState && biliState.ok === false && biliState.state !== 'none'
+          ? h('div', { className: 'biliwarn', style: { margin: '0 0 10px' } },
+            h('strong', null, biliState.state === 'expired' ? 'B 站登录已过期' : '没连上 B 站'),
+            h('span', null, biliState.state === 'expired'
+              ? '她发不了评论、也收不到 @，也查不了字幕（AI 字幕要登录）。请重新扫码，或粘贴一份新的 cookie。'
+              : (biliState.note || '检查一下网络，或重新登录。')),
+            h('button', {
+              onClick: () => { jget('/bili/state').then(setBiliState).catch(() => {}) },
+            }, '重新检测'))
+          : null,
 
         showTab('now') ? nowPage : null,
         showTab('grow') ? growPage : null,

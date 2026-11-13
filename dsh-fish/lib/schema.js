@@ -32,6 +32,12 @@ export const ALL_TYPES = Object.freeze([
   // 不解释、不加工——她翻到时看到的是「他说：…」，不是"他当时的意思是…"。
   // 系统侧写（不在 HER_TYPES 里）：她不能凭空造一句"他说过"。
   'heard',
+  // 她真发出去的一条评论（2026-11-11，0.9.9 g7）。
+  // 以前只有 meta `comment:<日期> <bvid> <rpid>`，正文不落盘，于是"八股比例多少"
+  // 这个问题在评论区永远答不了。正文落下来，才量得出趋势；也因为她翻得到自己说过什么。
+  // 系统侧写（不在 HER_TYPES 里）：由 comment.js 在**真的发成功之后**写，
+  // 不是她自己"记一条我发过什么"——那样她可以挑一句好听的写进来。
+  'comment',
   // 梦（2026-10-30，本机实验 A 案，用户 m02196 的念头 + m02837 的委托）：
   // 醒来后由她自己记一句，材料只能来自真实发生过的事（refs 指回事件 id）。
   // **不是新信息来源**：梦不进 beliefs、不进成长计数、不能改任何东西。
@@ -168,6 +174,33 @@ export function tsMs(ev) {
 }
 
 /**
+ * 本地日历日的序号（不按 24 小时整除——夏令时与跨零点都靠这个才准）。
+ * 收毫秒数或 Date；算不出来是 NaN。
+ */
+export function localDayIndex(at) {
+  const d = at instanceof Date ? at : new Date(Number(at))
+  if (!Number.isFinite(d.getTime())) return NaN
+  return Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()) / 86_400_000
+}
+
+/**
+ * `at` 那一刻在 `now` 的几个**本地日历日**之前：同一天 0，昨天 1，前天 2。
+ *
+ * 给她看的「今天 / 昨天 / N 天前」都走这里，别用 `Math.floor(毫秒差 / 24 小时)`：
+ * 那样昨晚 22:30 的事在第二天上午还是「今天」，前天 20:00 的是「昨天」，
+ * 跟同一行里按本地钟写的日期对不上（issue #21 在换房间那一句上改过同一种错）。
+ * 算不出来或在未来都是 0。
+ *
+ * @param {number|Date} at 那一刻（毫秒或 Date）
+ * @param {number|Date} [now] 现在
+ * @returns {number} 非负整数
+ */
+export function localDaysAgo(at, now = Date.now()) {
+  const diff = localDayIndex(now) - localDayIndex(at)
+  return Number.isFinite(diff) ? Math.max(0, Math.round(diff)) : 0
+}
+
+/**
  * 这条事件算不算「他来过」的证据（2026-11-06，issue #49 的时钟盲点）。
  *
  * `meta seen:` 是主证据（turns.js 结账时写），`heard` 是兜底（侧栏聊天不写
@@ -234,6 +267,25 @@ class Reject extends Error {
  * 校验一条待写入的事件（不写盘）。
  * @returns {object} 规范化后的完整事件
  */
+/**
+ * 话题标签（1.0 话题索引，2026-11-12）
+ *
+ * 只做形状整理，不做语义判断：去控制字符、压空白、去引号、截到 12 字。
+ *
+ * 为什么是**她自己**写、而不是系统从文本里抽：中文没有分词、项目零依赖，
+ * 用共同子串自动归类，会把「我同意这句」和「我不同意这句」判成同一个话题的
+ * 同一方向（§8.9 自己写的「宁可少摆，不摆错」）。让她自己给一个短标签，
+ * 错了也只是她自己分类错了，系统不替她判。
+ */
+export function normalizeTopic(s) {
+  return String(s ?? '')
+    .replace(/[\u0000-\u001f\u007f]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .replace(/[「」『』“”"']/g, '')
+    .trim()
+    .slice(0, 12)
+}
+
 export function validateEvent(raw, { day, stage, now = Date.now(), source = 'tool', knownIds = null } = {}) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Reject('BAD_SHAPE', '事件必须是对象')
   const type = String(raw.type ?? '')
@@ -347,6 +399,11 @@ export function validateEvent(raw, { day, stage, now = Date.now(), source = 'too
     // 所以不升 EVENT_SCHEMA_VERSION——升了却没迁移函数，等于给自己发假通行证。
     // 只有非 desk 才落库：desk 是默认值，写进去只是把每条老事件都变长一截。
     ...(normalizeScene(raw.scene) === 'desk' ? {} : { scene: normalizeScene(raw.scene) }),
+    // 话题标签（1.0 话题索引，2026-11-12）：只在 utterance/revise 上记。
+    // 纯加法：老事件没有这个字段，读的时候按「没给话题」算，不升 EVENT_SCHEMA_VERSION。
+    ...((type === 'utterance' || type === 'revise') && normalizeTopic(raw.topic)
+      ? { topic: normalizeTopic(raw.topic) }
+      : {}),
     text,
     refs,
     verdict: ['confirmed', 'refuted', 'refined'].includes(raw.verdict) ? raw.verdict : null,

@@ -25,8 +25,9 @@
  */
 
 import { join } from 'node:path'
-import { rootDir, paths, readJson, writeAtomic } from './store.js'
+import { rootDir, paths, readJson, writeAtomic, mutateJson } from './store.js'
 import { dateKey, CARRY_MAX } from './settings.js'
+import { fillOwner } from './pronoun.js'
 import { normalizeScene } from './schema.js'
 
 /** 默认带几轮：老版本写死的 4，现在只是「没设过时的默认值」。 */
@@ -79,15 +80,46 @@ export async function addExchange(root = rootDir(), { me, her, scene = 'desk' } 
   if (!a) return { ok: false, kept: 0 }
   const bucket = bucketOf(scene)
   try {
-    const saved = await readJson(file(root), null)
-    const buckets = readBuckets(saved)
-    const list = buckets[bucket]
-    list.push({ at: new Date().toISOString(), me: a, her: cut(her), ...(bucket === BUCKET_HOME ? {} : { scene: 'group' }) })
-    buckets[bucket] = list.slice(-TALK_MAX)
-    await writeAtomic(file(root), JSON.stringify({ version: 2, buckets }, null, 2))
-    return { ok: true, kept: buckets[bucket].length, bucket }
+    // 排队：两条会话同时结账时，以前后写的那一轮把先写的那一轮盖掉。
+    return await mutateJson(file(root), async () => {
+      const saved = await readJson(file(root), null)
+      const buckets = readBuckets(saved)
+      const list = buckets[bucket]
+      list.push({ at: new Date().toISOString(), me: a, her: cut(her), ...(bucket === BUCKET_HOME ? {} : { scene: 'group' }) })
+      buckets[bucket] = list.slice(-TALK_MAX)
+      await writeAtomic(file(root), JSON.stringify({ version: 2, buckets }, null, 2))
+      return { ok: true, kept: buckets[bucket].length, bucket }
+    })
   } catch {
     return { ok: false, kept: 0 }
+  }
+}
+
+/**
+ * 把她后来才说出口的话补进书房桶的最后一轮（宿主 0.2.2-rc.2 的「继续」）。
+ *
+ * 一轮因为限流、断流失败时，那一轮已经按「her 为空」记下了；他点「继续」，
+ * 她这才答上。那不是新的一轮——他没有再说话——所以不新开一条，只把她的话
+ * 接在那一轮后面（失败前已经说出口半句的，接在半句后面）。
+ *
+ * `me` 必须对得上最后一轮他说的那句：中间要是插进了别的一轮（/say、观测台），
+ * 就不补，免得把她的话安到别的问题下面。
+ */
+export async function amendLastExchange(root = rootDir(), { me, her } = {}) {
+  const a = cut(me)
+  const more = cut(her)
+  if (!a || !more) return { ok: false }
+  try {
+    const saved = await readJson(file(root), null)
+    const buckets = readBuckets(saved)
+    const list = buckets[BUCKET_HOME]
+    const last = list[list.length - 1]
+    if (!last || last.me !== a) return { ok: false }
+    last.her = cut([last.her, more].filter(Boolean).join(' '))
+    await writeAtomic(file(root), JSON.stringify({ version: 2, buckets }, null, 2))
+    return { ok: true }
+  } catch {
+    return { ok: false }
   }
 }
 
@@ -124,8 +156,8 @@ export function renderCarry(list) {
     // 东八区晚上聊的话会被记成前一天。dateKey 走本地钟。
     const at = Date.parse(String(r.at ?? ''))
     const day = dateKey(new Date(Number.isFinite(at) ? at : Date.now()))
-    if (r.me) lines.push(`- ${day} 他说：${r.me}`)
+    if (r.me) lines.push(`- ${day} {T}说：${r.me}`)
     if (r.her) lines.push(`  ${day} 你说：${r.her}`)
   }
-  return lines.join('\n')
+  return fillOwner(lines.join('\n'))
 }

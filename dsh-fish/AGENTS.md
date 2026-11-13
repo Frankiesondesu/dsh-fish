@@ -21,6 +21,7 @@
 - 设置页只放**环境参数**：几点醒、醒几次、一天几条事件、刷不刷 B 站、每天刷几次。这些是「生长环境」，不是她本人。
 - 人格只能**通过事件长出来**。任何让用户直接写「你是一个温柔的…」的入口，等于把产品变回角色扮演，直接违反本项目的立项前提。
 - 判断标准很简单：如果加了之后用户能**直接指定**她是什么样的人，就是错的。
+- **但「怎么称呼用户」不是人格开关（0.9.9 起，issue #127）**：`owner.pronoun`（`他` / `她` / `TA`，默认 `他`）与 `ask_pronoun` 工具只换「给她看的文本里指你的那个字」，不换性格、不影响她怎么说话、不动界面文案。它进 `/config` 白名单、用户能改，都不算违反本节。
 
 **唯一例外：导入别人养过的那一位（0.5.3）**。用户 m03170 明确要「尊重别人的想法」——对方已经在别处养出了样子，接过来是**继承一份既成事实**，不是由用户在这里凭空指定性格。这条通道的三条边界，越界就等于变回角色扮演：
 
@@ -42,17 +43,18 @@
 两条实现原则，改代码时别破坏：
 
 - **物理层与契约层不进提示词。** 写「你不可以读设定」等于告诉她「旁边有份设定，很关键」——那是诱因，不是防线。靠代码不给路径、不给工具来保证。
-- **不要绕过 `lib/guard.js`。** 她是"根本没看见"重塑人格那句话，不是"看见了但被劝住"。任何新的输入口（新工具、新接口、新外部文本源）都必须过 `guard.js`；秘密外发（cookie / token / `sk-` / Bearer / 长 base64）在这里一律拦下。
+- **不要绕过 `lib/guard.js`。** 她是"根本没看见"重塑人格那句话，不是"看见了但被劝住"。任何新的输入口（新工具、新接口、新外部文本源）都必须过 `lib/guard.js`；秘密外发（cookie / token / `sk-` / Bearer / 长 base64）在这里一律拦下。
 
 ## 4. 文案有守门词，改之前先看测试
 
-面向用户的字符串（`lib/client.js` 里的界面文案）有三条硬规矩，全部有测试盯着：
+面向用户的字符串（`lib/client.js` 里的界面文案）有三条硬规矩，全部有测试盯着；另外还有一条管**别的方向**的文本，别混起来：
 
-- **不出现男字旁的「他」**，统一写「你」。`test/p5.test.mjs:187` 逐字扫。例外只有 `其他/其它` 这类词素。她自己的话、引用别人的话不受此限。
+- **不出现男字旁的「他」**，统一写「你」。守着它的是 `test/p5.test.mjs` 里那个逐字扫 `lib/client.js` 字符串字面量的测试（注释不算；不要引用行号，会漂）。例外只有 `其他/其它` 这类词素。她自己的话、引用别人的话不受此限。
+- **给她看的文本里指主人的那个字，写 `{T}`，不要写死「他」（0.9.9 起，issue #127）。** 模板句统一写 `{T}`（`lib/pronoun.js` 的 `OWNER_SLOT`），出口过 `fillOwner(text, pronoun)` 填成 `他` / `她` / `TA`（默认 `他`）；`lib/persona.js` 的 `assemble()` 收尾、`lib/use.js` 的 `description` / `brief` 都已经填过一遍。**上面那条管界面，这条管她读到的文本，两条不冲突**：界面文案永远只写「你」，从不出现第三人称。解析用的正则里写死「他」不算违规（`lib/derive.js` 的 `nameSayRe('称呼你|叫你|称呼他…')` 那类是在认字，不是在称呼）。`test/pronoun.test.mjs` 守着「只认 他/她/TA」「`fillOwner` 只填占位符、不按字替换」。
 - **统一「四个阶段」与「三道瓶颈」**，**禁**「四道门 / 三道门」。`test/principle-zoom.test.mjs` 明确断言 `三道门`/`四道门` 不出现。
 - **立场不是第五关。** 措辞只能是「四个阶段完成之后才会开始有立场」。图上不许再退回「底部一行小字」的表达——立场是独立区块，由 `test/principle.test.mjs`（viewBox 1160 + 含「立场清单」）与 `test/stance.test.mjs`（旧的「纵向长「立场清单」」写法必须不存在）共同守着。
 
-改文案时**先跑这三条**再改别的，否则会来回返工。
+改界面文案时**先跑那三条**再改别的，否则会来回返工。
 
 ## 5. `events.jsonl` 只能追加
 
@@ -60,7 +62,7 @@
 
 - 状态（`state.json`）是派生品，随时可由 `rebuild()` 重算；改它没意义，会被覆盖。
 - 「让她忘」不是删行，是**降低召回**（`lib/persona.js` 的 `foldOlderBeliefs`：更早的判断折成一行「还有 N 条更早的，没摆出来」，疤那类永不折叠），事件原文始终还在 `events.jsonl` 里，她也能用 `her_recall` 翻回去。
-- 重置与恢复都不删数据：`reset.js` 改名前缀封存，`backup.js` 恢复前把旧档搬去 `dsh-fish-backups/pre-restore-*`。
+- 重置与恢复都不删数据：`lib/reset.js` 改名前缀封存，`lib/backup.js` 恢复前把旧档搬去 `dsh-fish-backups/pre-restore-*`。
 - 新增事件类型**不必**改 `lib/schema.js` 的 `EVENT_SCHEMA_VERSION`：旧读者读不认识的 `type` 会跳过（`readEvents` 对未知类型宽容），0.7.6 / 0.8.0 的 `ask`、`answer`、`heard` 都是这样加进去的。但**改字段语义、把可选字段变必填、删字段**必须升 `v` 并写迁移（旧版本遇到新 `v` 要拒，否则静默丢字段）。
 
 ## 6. 改完必须跑全套测试
@@ -69,7 +71,7 @@
 node --test
 ```
 
-当前基线 **2481 个**（fork 合入上游 0.9.8 + #107/#108 后；上游原文写 2202），独立进程跑 `node --test` 应全绿。任何一条红都不许提交——包括看起来"不是我弄的"那条。
+当前基线 **2480 个**，独立进程跑 `node --test` 应全绿。任何一条红都不许提交——包括看起来"不是我弄的"那条。
 
 按环境挑跑法：
 
@@ -142,10 +144,10 @@ GET /dsh-fish/whoami
 ### 7.2 五个配套约定（改桥之后的正确性全押在这五条上）
 
 1. **场次要进事件流**。`validateEvent` 现在接受可选 `scene`（非 `desk` 才落库，纯加法，不升 `EVENT_SCHEMA_VERSION`）。桥注入 `user/message` 时把 `scene` 写进 **`source.scene`**，`classifyMessage` 才会认出来（`lib/turns.js`）。
-2. **外客不动生命体征**。`seen:`、`bumpTurns`、会话轮换只由 desk/private 且非 `guest` 触发；群聊与群友私聊一条都不写。否则群里一天几百句，冷落检测永远不会触发——他一周没露面，面板还显示"今天聊过"。`heard` 分两种：私聊/书房那条算「他来过」，群聊那条（`scene:'group'`）**不算**——`schema.js` 的 `isContactEvent` 已经把群聊的 `heard` 排除掉了（2026-11-08）。**「他来过」也只认她自己的房间**（2026-11-11）：客户端亲手打的字（`source.kind:'user'` 且带 `clientTimeZone`）只有落在她住的那条会话、或 `channels.json` 里登记过的房间才写 `seen:`；本机别的 DSH 会话里他跟其他 agent 说话，不再清零冷落钟（用户报「好几天没回她还不算冷落」就是这条）。桥注入的消息（`kind` 不是 `user`、或没有 `clientTimeZone`）照旧算——QQ 私聊那条路不能断（issue #18）。
+2. **外客不动生命体征**。`seen:`、`bumpTurns`、会话轮换只由 desk/private 且非 `guest` 触发；群聊与群友私聊一条都不写。否则群里一天几百句，冷落检测永远不会触发——他一周没露面，面板还显示"今天聊过"。`heard` 分两种：私聊/书房那条算「他来过」，群聊那条（`scene:'group'`）**不算**——`lib/schema.js` 的 `isContactEvent` 已经把群聊的 `heard` 排除掉了（2026-11-08）。**「他来过」也只认她自己的房间**（2026-11-11）：客户端亲手打的字（`source.kind:'user'` 且带 `clientTimeZone`）只有落在她住的那条会话、或 `channels.json` 里登记过的房间才写 `seen:`；本机别的 DSH 会话里他跟其他 agent 说话，不再清零冷落钟（用户报「好几天没回她还不算冷落」就是这条）。桥注入的消息（`kind` 不是 `user`、或没有 `clientTimeZone`）照旧算——QQ 私聊那条路不能断（issue #18）。
 3. **外来场次必须带说话人前缀**。`lib/say.js` 对 `group` 与 `guest` 都用 `speaker` 拼 `某某在群里说：…` / `某某说：…`。不拼的话，群里三个人的话在她看来跟一个人连说三句一模一样，她会把三个人的观点拼成一个"他"。外来文本统一过 `lib/guard.js` 的 `sanitizeForeign`。
 4. **桥不要用宿主的 `source.form`**。`snapshot`、`notice`、`catalog`、`instructions`、`recall` 是宿主前端的保留词表，`classifyMessage` 见到就当上下文，不算人（`MACHINE_FORMS`）。转述人说的话，要么不带 `form`，要么用 `relay`。
-5. **走宿主 prompt 的桥，`rpcId` 就是记号**。`sessionController.prompt()` 把 `kind` 写死成 `user`，把调用方的 `requestId` 写进 `source.rpcId`，桥传不进自己的 `source`；`clientTimeZone` 是可选字段，忘了不会报错。2026-11-08 起 `classifyMessage` 把「带 rpcId 的 user 消息」也认作人：我们自己的 prompt 用 `PLUGIN_RPC` 前缀先挡掉，`possess.js` / `sessionnote.js` 的 append 没有 rpcId，仍留 unknown。桥仍应带 `clientTimeZone`——`dsh-time-context` 只认「kind user + rpcId + 时区」三者齐全的 source。正文末尾的 `[渠道：…]` / `[Channel: …]` 独立段落只影响记账（`lib/turns.js` 的 `stripChannelNote` 会裁掉），会话原文不动；只有提示的那条不算他来过。
+5. **走宿主 prompt 的桥，`rpcId` 就是记号**。`sessionController.prompt()` 把 `kind` 写死成 `user`，把调用方的 `requestId` 写进 `source.rpcId`，桥传不进自己的 `source`；`clientTimeZone` 是可选字段，忘了不会报错。2026-11-08 起 `classifyMessage` 把「带 rpcId 的 user 消息」也认作人：我们自己的 prompt 用 `PLUGIN_RPC` 前缀先挡掉，`lib/possess.js` / `lib/sessionnote.js` 的 append 没有 rpcId，仍留 unknown。桥仍应带 `clientTimeZone`——`dsh-time-context` 只认「kind user + rpcId + 时区」三者齐全的 source。正文末尾的 `[渠道：…]` / `[Channel: …]` 独立段落只影响记账（`lib/turns.js` 的 `stripChannelNote` 会裁掉），会话原文不动；只有提示的那条不算他来过。
 6. **走 `prompt()` 的桥，发之前先登记这一轮是什么**（2026-11-09，issue #96）。上一条的「带 rpcId 就算人」把群聊、群友私聊、桥自己的定时提醒也一起算成了他本人：涨轮数、换会话、写 `seen:`、记「他说」、撤掉叫醒。桥在调 `sessionController.prompt()` 之前发一条即可：
 
    ```js
@@ -216,6 +218,39 @@ qq_send_message, qq_get_unread_messages, qq_reply
 
 **永远不给人格/人称旋钮**（§2）：多间房不是多个人格，`scene` 只描述"这句话在哪儿说的"，不改变她是谁。
 
+### 7.5 第三方工具接进成长机制：素材契约（1.0.0 起）
+
+§7.4 的白名单只解决「她调得到」，不解决「读进来的话能不能被记住、被引、被核对」。默认情况下，第三方工具返回的只是当轮的工具结果：不进事件流、不写索引、不能引原话、不进八股统计。
+
+契约是**可选、认领制**：工具返回值里带一个对象，形状如下。
+
+```json
+{
+  "dshFishMaterial": 1,
+  "source": "mirror",
+  "key": "一件东西的唯一标识（视频的 bvid、文章的 slug）",
+  "kind": "fact | opinion | fiction",
+  "at": "2026-11-13",
+  "title": "标题",
+  "facts": [{ "text": "可核对的事实", "url": "https://…" }],
+  "quotes": [{ "by": "谁说的", "text": "原话", "url": "https://…" }]
+}
+```
+
+三条硬规则，不可协商：
+
+1. **级别由插件定。** 第三方只能声明 `kind`。`fact` 想当一级材料，必须给锚（`facts` 非空，或 quote 带 `url`），否则插件把它降成二级并记 `fact-without-anchor`。第三方不能自己说「这是事实」。
+2. **原话一字不改。** `quotes[].text` 只裁首尾空白；插件不改写、不压缩、不总结。
+3. **不合规一律降级，不抛错。** 缺 `source`/`key`、空素材、超量、超长、类型不对——整条降为普通工具结果，她照常能看到那段文字，只是不进系统。
+
+落地链路：`lib/contract.js` 的 `coerceMaterial()` → `lib/sources.js` 的 `sourceMaterial()`（内置来源优先，设置里同名覆盖不了 B 站的分级）→ `renderMaterialText()` 渲染（只标「谁写的」，不给她看等级数字）→ 记账 `meta mat:<source>:<key>` → `her_recall` 翻得到，`quote_one`、判断冲突、八股统计可用。
+
+- **得到什么**：她以后能翻到这句话（60 天内、最多 30 条），能引原句，能进八股统计。
+- **得不到什么**：不占身份文档 2400 字预算、不进 beliefs/stance、不算成长。契约管**质量**不管**频率**——它保证拿到的东西可核对，管不了她会不会去调。
+- **明确不做**：不开通用 `read_source` 入口。每个来源的清洗规则不同，通用口只能保证「进得来」、保证不了「好进」。没按契约返回的第三方内容，就当普通工具结果。
+
+参考：`docs/素材契约.md`（给第三方看的完整说明）、`lib/contract.js`（实现）、`test/contract.test.mjs`（14 条）。
+
 ## 8. 每样工具都要有一张能力地图
 
 **新增、改名、删除工具时，`test/toolmap.test.mjs` 是第一道门：它按源码里的 `defineTool` 名字对账，少登记一行就红。**
@@ -233,17 +268,29 @@ qq_send_message, qq_get_unread_messages, qq_reply
 
 落地位置：说明书在身份文档里的工具进 `test/toolmap.test.mjs` 的 `MAP`（工具名、所在说明书段、处境句正则）；本 fork 说明书在工具表 `description` 里的那几件（her_open、her_voice 等）进同文件的 `FORK_DESC_CUES`（处境句从源码 description 里对账）；场景工具进 `SCENE_TOOLS`。三处都没有的新工具，测试不放行。
 
+## 9. 私人插件不写进本仓库
+
+想给自己养的那条鱼加一件只属于你的工具（镜子、专属查询、私人接口），**不要往这个仓库里加 `plugin/`、`user-plugins/`、`extras/` 这类目录**，也不要往 `lib/` 里塞。2026-11-13 收到过这样的 PR（#134），没合并，原因就是下面三条。
+
+- **`lib/` 跟着 npm 包走，升级时整包替换。** 仓库里另开目录也一样：`package.json` 的 `files` 是白名单（`LICENSE`、`lib`、`media`、`cordis.patch.yml`、`README`、`AGENTS`、`CHANGELOG`、`RELEASE-NOTES-*`、`scripts`、`tools`），私人目录进不了 npm 包；硬塞进仓库又会被 `git reset --hard` 还原；还会被 `node --test` 算进我们的绿线，基线从此依赖别人的代码和平台。
+- **正确位置是本仓库外面**：一个普通 DSH 插件（`inject = ['tools']` + `ctx.tools.register()`），用 `dsh plugin --profile <profile> add "link:<那个目录>"` 装进来，再把工具名写进 `config.tools.allow`。面向用户的说明在 `README.md` 的「想给她加一件只属于你的工具」。
+- **放行才念，不念就不会用**：白名单只做加法（§7.4），放行后 `toolBrief()` 会把它念进身份文档；不放行她既调不到，也不知道自己有这只手。
+- **要推荐给别人**：写进 `README.md` 那一节，链接到对方仓库，代码留在对方那儿。不要在 `files` 白名单之外偷偷带一份。
+- **想让她能引你工具里的原话**：按 §7.5 的素材契约返回，不要另开通用口。不按契约返回也能用，只是读进来的东西不会被记住、不能引原句、不进八股统计。
+
 ---
 
 ## 提 PR / 提交前自检
 
 - [ ] 三个依赖字段还是 `{}`
 - [ ] 没有新增人格设置入口
-- [ ] 新输入口都过了 `guard.js`
-- [ ] `node --test` 2481 全绿
-- [ ] 界面文案没有「他」「四道门」「三道门」
+- [ ] 新输入口都过了 `lib/guard.js`
+- [ ] 加 / 改名 / 删了工具，`test/toolmap.test.mjs` 的 `MAP`（或 `lib/toolreg.js` 的 `SCENE_TOOLS`）跟着改了（见 §8）
+- [ ] `node --test` 2480 全绿
+- [ ] 界面文案没有「他」「四道门」「三道门」；给她看的文本里指主人的字写的是 `{T}` 而不是写死「他」（见 §4）
 - [ ] 改了 `EVENT_SCHEMA_VERSION` 的话，`CHANGELOG.md` 里写了迁移说明
 - [ ] 没动包名；真要动，先看下面「包名与装法」那节
+- [ ] 没有往仓库里加 `plugin/` 这类私人插件目录（见 §9）
 - [ ] 动了升级 / 迁移脚本（`scripts/fix-legacy-link.mjs`、`lib/selfupdate.js`）的话，`README.md` 的升级表与 `RELEASE-NOTES-*.md` 同步改了
 
 ---
@@ -256,17 +303,4 @@ qq_send_message, qq_get_unread_messages, qq_reply
 2. **`cordis.patch.yml` 的 `id` 保持短名 `dsh-fish`、`name` 写全名**（与 `@goodandready/dsh-voice` 一致）。`id` 变了会连带 client bundle 的 URL 对不上；`name` 写短名则 import 失败、直接崩在 web boot。
 3. **别删升级脚本里的 normalize 那一步**（`lib/selfupdate.js` 的 `normalizeScript()`，安装脚本第 5/6 步）。0.8.9 之前装的 profile 里旧键还在，不清掉就会同时有两条鱼、两条 insert 撞一个 id，启动报 `duplicate factory registration`。
 4. **`scripts/fix-legacy-link.mjs` 必须三种依赖写法都认**：源码目录 `link:`、`file:` 装的 tgz、`@ssamurias/dsh-fish@x.y.z` 版本号。版本号那条是 issue #43 的根因——照更新说明用 `dsh plugin add` 升上来的人，profile 里留下的就是版本号；脚本过去只认前两种，一句「没有老依赖，跳过」退出 0，旧键与旧 `bundles` 条目原封不动。改它之前先跑 `test/fix-legacy-link.test.mjs`（`migrateOne()` 是给它直接测的）。
-
----
-
-## 发版
-
-完整步骤（发布前自检、push、npm publish、tag、GitHub Release、发布后验证、回滚）写在 **`RELEASE.md`**，动手前通读一遍。三条不能省的顺序：
-
-1. `node --test` 全绿、`npm pack --dry-run` 清单对（见 §6）。
-2. 先推代码，再发 npm：**npm 成功之后才打 tag / 建 Release**——npm 失败时不留悬空 tag。
-3. 发完核对 `npm view @ssamurias/dsh-fish version dist-tags`，再去回 issue。
-
-本机约束另见 `D:\deepseekagent\避坑指南.md` 第 1 节（profile 的 `bundles` 与 `dependencies` 必须一一对应）与第 3 节（运行中替换已加载包会 `ERR_PNPM_EPERM`、`minimumReleaseAge` 会回滚刚发布的版本、`desktop` profile 被应用独占）。
-
 

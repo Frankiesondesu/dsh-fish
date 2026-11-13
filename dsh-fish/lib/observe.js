@@ -33,6 +33,7 @@ import { memoryCooldown } from './bili.js'
 import { avatarFile, avatarInfo, saveAvatar, removeAvatar } from './avatar.js'
 import fs from 'node:fs'
 import { commentCountToday, replyCountToday, herComments, scanReplies } from './comment.js'
+import { repliedToOthers, mentionsToday } from './at.js'
 import { noteSpeakEnabled, speakOn } from './speak.js'
 import { describeState, resetAll } from './reset.js'
 // 迁移工作区（2026-10-28，用户 m06510）：把整个数据目录搬到别的盘。
@@ -82,7 +83,7 @@ import { ensureDataReadme } from './readme.js'
 import { rulesByLayer } from './rules.js'
 // 插话（2026-11-08）：与叫醒共用 fishMessage，但来源另起一个 kind。
 import { fishMessage, FISH_STEER_KIND } from './deliver.js'
-import { ruleStatus, offerHistory, pendingOffer, activeGrants } from './unlock.js'
+import { ruleStatus, offerHistory, pendingOffer, offerLimits, activeGrants } from './unlock.js'
 import { devMode } from './devmode.js'
 import { ruleById } from './rules.js'
 import { appendEvent } from './store.js'
@@ -148,21 +149,6 @@ export function metaIdLines(prefix, ids) {
 }
 
 /**
- * 事件流不以换行结尾时先补一个（只追加，不改已有的字）。
- * 对不上的那趟，文件可能被截在半行上；结算标记粘在那半行后面，两行都读不出来，等于没写。
- */
-function endWithNewline(file) {
-  try {
-    const size = fs.statSync(file).size
-    if (!size) return
-    const last = Buffer.alloc(1)
-    const fd = fs.openSync(file, 'r')
-    try { fs.readSync(fd, last, 0, 1, size - 1) } finally { fs.closeSync(fd) }
-    if (last[0] !== 0x0a) fs.appendFileSync(file, '\n')
-  } catch { /* 文件不在就交给 appendEvent 去建 */ }
-}
-
-/**
  * 把一串 id 拆成几行 `prefix id id …` 追加进事件流（出门 / 请神的结算标记共用）。
  * 写到一半失败时 `lines` 是已经写进去的行数（`total` 是该写的），回执据此说「只写进去一部分」。
  * @returns {Promise<{ ok: boolean, lines: number, total: number, why?: string }>}
@@ -172,7 +158,8 @@ async function appendIdMarks(root, prefix, ids) {
   if (!lines.length) return { ok: true, lines: 0, total: 0 }
   let written = 0
   try {
-    endWithNewline(join(root, 'events.jsonl'))
+    // 对不上的那趟，文件可能被截在半行上。标记不会粘在那半行后面：
+    // appendEvent 写之前自己会补换行（store.js 的 appendLine，以前只有这里补）。
     const { events } = await readEvents(root)
     const { config } = await loadConfig(root)
     const m = deriveSelfCached(events, { growthDays: config.growthDays })
@@ -385,6 +372,13 @@ async function lazyCover(root, bvid) {
 export function registerObserve(ctx, deps = {}) {
   const root = deps.root ?? rootDir()
   const disposers = []
+  // 数据目录被整个换过之后（重开一局、从备份恢复），让这个实例当场把占用声明重新写上。
+  // 没有就什么都不做（单测、启动没认领到的实例）；写不成不影响那两条路本身的结果。
+  const reclaimTenant = async () => {
+    try { await deps.tenancy?.reclaim?.() } catch { /* 下一拍心跳会再试 */ }
+  }
+  // 搬整个数据目录的那一下不和心跳撞在一起（见 index.js 的 tenancy.quiet）。没有心跳的实例直接做。
+  const awayFromBeat = (fn) => (typeof deps.tenancy?.quiet === 'function' ? deps.tenancy.quiet(fn) : fn())
   // 恢复接口一次收多少字节。deps.restoreLimit 只给单测用（不用真造一份 96MB 的包）。
   const restoreLimit = Number(deps.restoreLimit) > 0 ? Number(deps.restoreLimit) : RESTORE_MAX_BYTES
 
@@ -654,9 +648,9 @@ export function registerObserve(ctx, deps = {}) {
         })(),
         // 规则与解锁：她遵守什么、哪些"还不会"、手上有没有一张待裁决的卡。
         // 只给状态与理由，不给任何 0–1 的分（见 rules.js 的 EVIDENCE 注释）。
-        rules: ruleStatus(events, m, Date.now()),
+        rules: ruleStatus(events, m, Date.now(), offerLimits(config)),
         pending: (() => {
-          const p = pendingOffer(events, Date.now())
+          const p = pendingOffer(events, Date.now(), offerLimits(config))
           if (!p) return null
           const r = ruleById(p.grant?.rule)
           return { id: p.id, rule: p.grant?.rule, title: r?.title ?? '', text: p.text ?? '', day: p.day ?? null }
@@ -804,12 +798,11 @@ export function registerObserve(ctx, deps = {}) {
         // persona 不在这里：它是导入动作的副产物（见 lib/import.js），
         // 不给「从设置页直接改」的入口——否则就等于给了一个「关掉那两条禁令」的开关。
         // proactive 是 2026-10-30 加的（本机实验，.dev 专属）：她主动开口的频率与概率。
-        // 2026-11-06：加 world（her_world 查天气的坐标）。
-        // 缺了它客户端整表提交会被 400 挡回来 —— p5 那条「防漂移」测试就是防这个的。
-        // 2026-11-07：加 recall / rules / outing。这三组在 DEFAULTS 里有、normalizeConfig
-        // 会夹紧，但一直没登记进 allowed——DSH 侧设置页存不了它们，而 7788 查看器
-        // 的设置页是直写 updateConfig 的，两边口径不一致（viewer 的防漂移测试抓的）。
-        const allowed = ['growthDays', 'wakesPerDay', 'window', 'daily', 'diary', 'absenceAfterDays', 'avoid', 'browse', 'bili', 'video', 'comment', 'notify', 'chat', 'rooms', 'memory', 'tools', 'observe', 'ui', 'proactive', 'drive', 'interest', 'dream', 'world', 'recall', 'rules', 'outing', 'ask']
+        // 2026-11-06：加 world（her_world 查天气的坐标）；2026-11-07 补 recall/rules/outing。
+        // 缺了它们客户端整表提交会被 400 挡回来（viewer 的防漂移测试抓的）。
+        // owner 是 2026-11-12 加的（issue #127）：主人的代词（他/她/TA），只从 config.json
+        // 或 /config 接口写，设置页没有这一项（不给人格旋钮）。at 是 2026-11-11 的 @ 开关。
+        const allowed = ['growthDays', 'wakesPerDay', 'window', 'daily', 'diary', 'absenceAfterDays', 'avoid', 'browse', 'bili', 'video', 'comment', 'at', 'notify', 'chat', 'rooms', 'memory', 'tools', 'observe', 'ui', 'proactive', 'drive', 'interest', 'dream', 'owner', 'world', 'recall', 'rules', 'outing', 'ask']
         const bad = Object.keys(patch).filter((k) => !allowed.includes(k))
         // 这句话会原样冒到界面上，所以写成人话（界面会把它放在「技术信息」那一行）：
         // 原来那句「不允许修改：bili」既不说人话，也让人以为自己填错了。
@@ -961,10 +954,10 @@ export function registerObserve(ctx, deps = {}) {
       const model = deriveSelfCached(events, config)
       return send(res, 200, {
         layers: rulesByLayer(),
-        status: ruleStatus(events, model, Date.now()),
+        status: ruleStatus(events, model, Date.now(), offerLimits(config)),
         history: offerHistory(events).slice(-20),
         pending: (() => {
-          const p = pendingOffer(events, Date.now())
+          const p = pendingOffer(events, Date.now(), offerLimits(config))
           return p ? { id: p.id, rule: p.grant?.rule || '', why: p.text || '' } : null
         })(),
         offersOn: config?.rules?.offers !== false,
@@ -979,7 +972,8 @@ export function registerObserve(ctx, deps = {}) {
       const verdict = body.verdict === 'approve' || body.verdict === 'reject' ? body.verdict : null
       if (!verdict) return send(res, 400, { error: 'verdict 只能是 approve 或 reject' })
       const { events } = await readEvents(root).catch(() => ({ events: [] }))
-      const p = pendingOffer(events, Date.now())
+      const held = await loadConfig(root).catch(() => ({ config: null }))
+      const p = pendingOffer(events, Date.now(), offerLimits(held.config))
       if (!p) return send(res, 409, { error: '现在没有待裁决的申请' })
       // 0.7.5：写入逻辑搬到 lib/grant.js——会话里的提问卡片也走同一条路，
       // 两个入口必须写同一份事件（两个坑的注释也一起搬过去了）。
@@ -1050,6 +1044,25 @@ export function registerObserve(ctx, deps = {}) {
         return send(res, r.ok ? 200 : 400, r)
       }
       send(res, 405, { error: 'method not allowed' })
+    }],
+
+    // B 站登录态（2026-11-12，用户要求）：设置页打开时问一次，过期就亮红条。
+    // 用户反馈：cookie 过期是静默的——她发不出去、也收不到 @，但页面还显示「已存」。
+    // 这里只回状态，不写盘，也不把 cookie 原文回给页面。
+    ['/bili/state', async (req, res) => {
+      if (req.method !== 'GET') return send(res, 405, { error: '只支持 GET' })
+      const ow = await readOwner(root)
+      if (!ow?.cookie) return send(res, 200, { ok: false, state: 'none', note: '还没存 B 站登录。' })
+      try {
+        const c = createClient({ cookie: ow.cookie, log: () => {} })
+        const me = await c.me()
+        if (!me?.isLogin) {
+          return send(res, 200, { ok: false, state: 'expired', note: 'B 站登录已过期，需要重新登录。', why: me?.why ?? '' })
+        }
+        return send(res, 200, { ok: true, state: 'ok', name: String(me.uname ?? ''), mid: String(me.mid ?? ''), canWrite: Boolean(me.canWrite) })
+      } catch (err) {
+        return send(res, 200, { ok: false, state: 'error', note: `没连上 B 站：${String(err?.message ?? err).slice(0, 60)}` })
+      }
     }],
 
     // 扫码登录（2026-11-01，用户定案）：手动抓 cookie 的那一格保留为退路，扫码是默认。
@@ -1736,6 +1749,21 @@ export function registerObserve(ctx, deps = {}) {
       })
     }],
 
+    // 有人 @ 她（2026-11-11）：只读。返回她主动回过别人多少条，给设置页一句提示。
+    ['/at', async (req, res) => {
+      if (req.method !== 'GET') return send(res, 405, { error: '只支持 GET' })
+      const { events } = await readEvents(root)
+      const { config } = await loadConfig(root)
+      const a = config.at ?? {}
+      send(res, 200, {
+        enabled: a.enabled === true,
+        online: biliOn(config),
+        repliedToOthers: repliedToOthers(events),
+        usedToday: mentionsToday(events, dateKey()),
+        perDayMax: Number(a.perDayMax ?? 20),
+      })
+    }],
+
     // ---- 运行日志导出（2026-10-24）----
     // 用户点名要「运行日志导出」。它的价值不在"能看到日志"，而在**出事之后能拿到现场**：
     // 她某晚没说话、没刷站、没写日记，只看设置页是猜不出来的。
@@ -1830,6 +1858,15 @@ export function registerObserve(ctx, deps = {}) {
       try { b = JSON.parse(raw || '{}') } catch { return send(res, 400, { error: 'body 不是合法 JSON' }) }
       const r = await moveRoot(ctx, { root, target: b.target, log: (m) => logLine('info', [m], root) })
       if (!r.ok) return send(res, 409, { ok: false, error: r.why })
+      // 搬完到重启之间这边只读：事件流的写入口已经在 move.js 里封了（sealRoot），
+      // 这里把占用状态也原地改成只读，观察者、建会话、设置页的「可写」都跟着同一句理由走。
+      // 原地改（不换对象）：有几处拿的是 tenancy.tenant 这个对象本身。
+      // 不改的话 15 秒后心跳续不上，也会变只读，但理由会说成「被另一个实例接管了」。
+      const t = deps.tenancy?.tenant
+      if (t && t.ok !== false) {
+        t.ok = false
+        t.why = '数据文件夹刚搬到了新位置，重启 DSH 之前这边只读，她记不下新的事。'
+      }
       send(res, 200, r)
     }],
 
@@ -1873,7 +1910,10 @@ export function registerObserve(ctx, deps = {}) {
       }
       let b = null
       try { b = JSON.parse(raw || '{}') } catch { return send(res, 400, { error: 'body 不是合法 JSON' }) }
-      const r = await restoreBackup(b, root, { skipBad })
+      const r = await awayFromBeat(() => restoreBackup(b, root, { skipBad }))
+      // 恢复把整个数据目录换了一份，占用声明不在里面（backup.js 不装也不放回）。
+      // 搬走以后才失败的那种也一样要重新写上，所以不看 r.ok。
+      await reclaimTenant()
       if (!r.ok) {
         // issue #65：先点名，再让人选跳不跳过。这时候旧档、新档都还没动。
         if (r.needDecision) {
@@ -2614,8 +2654,12 @@ export function registerObserve(ctx, deps = {}) {
       // ~/.dsh/storages/workspace.json 里，不跟着状态库走 —— 所以先记下 home.json
       // （resetAll 之后它就被搬走了），重置成功再把旧会话归档。
       const home = await readHomeRecord(root)
-      const r = await resetAll(root)
+      const r = await awayFromBeat(() => resetAll(root))
       if (!r.ok) return send(res, 409, { ok: false, error: r.why })
+      // 占用声明（instance.json）跟着旧档一起被搬走了。当场重新写上，不等下一拍心跳：
+      // 下面建新会话、之后她的每一次写入都要认它。没有钥匙可抄回来时 resetAll 不留目录，先建出来。
+      try { await fs.promises.mkdir(root, { recursive: true }) } catch { /* 建不出来声明也写不成，下一拍再试 */ }
+      await reclaimTenant()
       const retired = await retireHomeSessions(ctx, { root, home, log: (m) => console.log('[dsh-fish]', m) })
       // 2026-10-26 修（用户 m00260）：重置只搬状态库 + 归档旧会话，**不会**建新会话——
       // 新建发生在 bootstrapHome，而它只在 DSH 启动时跑。于是「点了重置 → 侧栏空着 →
@@ -2910,12 +2954,12 @@ function isPluginSource(p) {
  * 出门口袋（2026-10-28，用户 m01145 拍板的「干活模式」）。
  *
  * 为什么要有它：她的白板与交接账本按**工作区**注入。只要出门的目标是
- * `D:\deepseekagent`，那些实现细节就会跟着记忆一起进她的会话——
+ * 一个真正的工作区，那些实现细节就会跟着记忆一起进她的会话——
  * 真机 5fd70849 那趟就是这么漏的。口袋是一个**从没写过记忆的空目录**，
  * 注入只剩骨架；她的身份、工具、网络都照常。
  *
  * 代价（写进 UI，不藏着）：沙箱的写权限跟工作区走，她在口袋里写不进
- * `02-我的项目` / `03-我的文档`——要交付就从口袋搬。这条取舍无法两全。
+ * 工作区里的项目目录——要交付就从口袋搬。这条取舍无法两全。
  */
 // 口袋的目录与工作区登记在 lib/pocket.js（0.6.16 搬出去，路由层直接用假 registry 就能测）。
 

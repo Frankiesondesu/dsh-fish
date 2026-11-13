@@ -9,7 +9,9 @@
  */
 
 import { promises as fs } from 'node:fs'
-import { readConfig, writeConfig, paths, readJson } from './store.js'
+import { readConfig, writeConfig, paths, readJson, mutateJson, readEvents, appendEvent } from './store.js'
+import { deriveSelf } from './derive.js'
+import { normalizePronoun } from './pronoun.js'
 // 请求节奏是 bili 客户端的模块级状态，由配置驱动（issue #5）。
 // 这里有 settings → bili 的单向依赖，bili.js 不反过来引 settings，不会成环。
 import { setPacing } from './bili.js'
@@ -30,6 +32,10 @@ export const DEFAULTS = {
   growthDays: 30,          // 7–180
   wakesPerDay: 1,          // 0–4：每天最多主动醒来几次（0 = 只在你找她时才在）
   window: ['20:00', '23:00'],  // 醒来的时间段
+
+  // 主人的代词（0.9.9，issue #127）：他 / 她 / TA。
+  // 只换「给她看的文本」里指主人的那个字，不是她的性格开关；不写 = 他。
+  owner: { pronoun: '他' },
 
   // 每日事件配额（用户 m00497 要的自定义项）
   // 注意：原来还有 daily.proactive，与 wakesPerDay 语义重复且调度器根本不读它，
@@ -156,6 +162,11 @@ export const DEFAULTS = {
     enabled: true,
     minIntervalMs: 800,     // 两次请求之间最少等多久
     jitterMs: 500,          // 在最小间隔上再随机多等 0–jitterMs（打散固定节奏）
+    // 读字幕（2026-11-13，用户 m04422）：她能不能按句查某条视频说了什么。
+    // 和上网总闸分开：有人愿意让她看标题和画面，不想让她读全篇台词——
+    // 后者信息密度高得多，也更容易被带着走。默认开。
+    // 关掉只是 bili_sub 用不了，已经记下的 subs 索引一条不删。
+    sub: true,
   },
 
   // 她自己的三件事（2026-11-05，用户 m02634）：各自一个开关，默认全开。
@@ -210,6 +221,21 @@ export const DEFAULTS = {
     lastScanAt: '',         // 内部用：上次扫回复的时间戳
   },
 
+  // 有人在 B 站 @ 她（2026-11-11，用户 m00767）
+  //
+  // 和 comment 组分开：那边是「她发出去的东西下面有人回」，这边是「别人主动
+  // 在动态/视频评论区 @ 了她」。默认关——它要读消息中心，必须有有效登录。
+  // 递过去的是素材，不是任务：回不回、看不看，由她自己判断。
+  at: {
+    enabled: false,        // 总开关：不去消息中心取 @
+    scanEveryMin: 5,       // 多久去看一眼（分钟）；用户要的是 5–10 分钟内
+    perDayMax: 20,         // 每天最多递几条；多的留到明天，不丢
+    others: true,          // 非主人的 @ 也递（用户 m00816 选 B：只递，不替她回）
+    ownerWake: true,       // 主人 @ 时当场叫醒一次（不占 wakesPerDay）
+    lastScanAt: '',        // 内部用：上次扫 @ 的时间戳
+    backoffUntil: '',      // 内部用：风控/网络失败后退避到什么时候
+  },
+
   // 对话与会话（2026-10-23 加）
   // 一个侧栏会话聊到几百轮，上下文必然撑爆——不是"变慢"，是每轮为几十万字付费，
   // 最后直接失败。所以到点上换新会话，旧的改名留档（不删），原话搬几句过去。
@@ -241,6 +267,11 @@ export const DEFAULTS = {
     // 身份文档里既不许写「你话少」，也没有反向的「可以长」。
     // 有这个数，用户能明确「这一轮最多写多少」，而不必去改她的性格。
     replyChars: 0,          // 单轮最多写多少字（0 = 不限，提示词里不出现任何长度要求）
+    // 「纠正鱼八股」（1.0，用户 m04784）：默认关。
+    // 开了之后私聊时她会被要求尽量把话挂到具体一句上（他刚说的、她以前说的、她看过的）。
+    // 这是**强行约束说话方式**，和「不硬性规定她怎么说」相冲突，所以默认关闭、文案必须写清。
+    // 它不占「身份段字数」预算（material 由 anchor.js 在 assemble 之后追加）。
+    anchor: false,
   },
 
   // 房间（2026-11-05，用户 m00304）
@@ -274,6 +305,9 @@ export const DEFAULTS = {
     // 这是可选段：塞不下时整段丢，不挤核心段。归在 memory 组，
     // 不叫 persona——它管的是"摆什么给她自己看"，不是"她是什么样的人"。
     echo: true,
+    // 2026-11-12（用户 m01648 / m01650）：原来这里有一个「每月多问一次」的开关。
+    // 去掉了：现在月末那句收束是按本月真问过几次自动加的（`monthlyDue`），
+    // 开关没有可控制的东西——少一个旋钮。
   },
 
   // 她自己说过的话（0.9.7 T1）
@@ -336,6 +370,8 @@ const LIMITS = {
   'comment.perDay': [0, 5],
   'comment.replyPerDay': [0, 10],
   'comment.scanEveryMin': [5, 720],
+  'at.scanEveryMin': [1, 60],
+  'at.perDayMax': [0, 100],
   'chat.rotateAfter': [0, 500],
   'chat.rotateWhenKB': [0, 5000],
   'chat.carry': [0, CARRY_MAX],
@@ -416,6 +452,9 @@ export function normalizeConfig(raw = {}) {
   cfg.world.city = String(cfg.world.city ?? '').trim().slice(0, 40)
 
   cfg.growthDays = Math.round(cfg.growthDays)
+  // 主人的代词（0.9.9，issue #127）：只认 他 / 她 / TA，认不出来退回「他」。
+  cfg.owner = { ...DEFAULTS.owner, ...(cfg.owner && typeof cfg.owner === 'object' && !Array.isArray(cfg.owner) ? cfg.owner : {}) }
+  cfg.owner.pronoun = normalizePronoun(cfg.owner.pronoun)
   cfg.diary = { ...DEFAULTS.diary, ...cfg.diary }
   cfg.diary.visible = Boolean(cfg.diary.visible)
   cfg.diary.enabled = Boolean(cfg.diary.enabled)
@@ -446,6 +485,8 @@ export function normalizeConfig(raw = {}) {
   // issue #62 / PR #72：上网总闸也严格化成布尔。没经过 normalize 的配置按「开」算，
   // 所以这里只把明确的 false 留下，其它值统一成 true。
   cfg.bili.enabled = cfg.bili.enabled !== false
+  // 读字幕的开关：同样只把明确的 false 留下（老配置里没有这一项 = 开）。
+  cfg.bili.sub = cfg.bili.sub !== false
 
   // 提醒：布尔严格化 + lastShown 只收字符串（它的值是日期键，不是数字）
   cfg.notify = { ...DEFAULTS.notify, ...cfg.notify }
@@ -463,7 +504,15 @@ export function normalizeConfig(raw = {}) {
     cfg.comment.window = validWindow(cw, DEFAULTS.comment.window)
   }
 
-  // 出门：只存布尔（老配置里没有这一组）
+  // 有人 @ 她（2026-11-11）：开关布尔严格化；两个内部时间戳只收字符串
+  cfg.at = { ...DEFAULTS.at, ...cfg.at }
+  cfg.at.enabled = Boolean(cfg.at.enabled)
+  cfg.at.others = cfg.at.others !== false
+  cfg.at.ownerWake = cfg.at.ownerWake !== false
+  cfg.at.lastScanAt = String(cfg.at.lastScanAt ?? '')
+  cfg.at.backoffUntil = String(cfg.at.backoffUntil ?? '')
+
+  // 出门：只存一个布尔（老配置里没有这一组）
   cfg.outing = { ...DEFAULTS.outing, ...cfg.outing }
   cfg.outing.ack = Boolean(cfg.outing.ack)
   // fork.5：默认关。只有明确写了 true 才开——老配置里没有这一项时是 false。
@@ -489,6 +538,7 @@ export function normalizeConfig(raw = {}) {
 
   // 对话与界面（2026-10-25）：replyChars 由 LIMITS 夹值，这里只补布尔严格化
   cfg.chat = { ...DEFAULTS.chat, ...cfg.chat }
+  cfg.chat.anchor = cfg.chat.anchor === true
   cfg.rooms = { ...DEFAULTS.rooms, ...cfg.rooms }
   cfg.ui = { ...DEFAULTS.ui, ...cfg.ui }
   cfg.ui.ownerHintDismissed = Boolean(cfg.ui.ownerHintDismissed)
@@ -662,16 +712,34 @@ function pushPacing(config) {
 
 /** 合并式更新：只改你传的键，其余保持。传未知键会原样存下（向前兼容）。 */
 export async function updateConfig(patch, root) {
-  const { config: cur } = await loadConfig(root)
-  const merged = deepMerge(cur, patch && typeof patch === 'object' ? patch : {})
-  const next = normalizeConfig(merged)
-  await writeConfig(next, root)
-  // 写穿：立刻把新配置放进缓存，别让下一次 loadConfig 去读自己刚写的盘。
-  // 签名要重新取——writeConfig 走的是 tmp+rename，mtime 是新的。
-  const file = paths(root).config
-  rememberConfig(root, await configStamp(file), { config: next, fresh: false, broken: false })
-  pushPacing(next)
-  return next
+  // 排队：设置页存一项、定时器同时记一个时间戳时，两边读到同一份旧配置，
+  // 后写的会把先写的那一项改回去（1.0.0）。fork 的写穿缓存接在这条队列里。
+  return mutateJson(paths(root).config, async () => {
+    const { config: cur } = await loadConfig(root)
+    const merged = deepMerge(cur, patch && typeof patch === 'object' ? patch : {})
+    const next = normalizeConfig(merged)
+    // issue #128（C）：改成长周期会把阶段按新周期重算，可能比之前低。改之前把
+    // 「当时的阶段」记成一条 meta，derive 的 `stagePeak` 只认这些记录。
+    // 写失败不挡配置保存：少一句「曾到过」，总好过设置存不下去。
+    if (Number(next.growthDays) !== Number(cur.growthDays)) {
+      try {
+        const { events } = await readEvents(root)
+        const before = deriveSelf(events, { growthDays: cur.growthDays })
+        await appendEvent(
+          { type: 'meta', text: `stage-was:${before.stage}` },
+          { day: before.day, stage: before.stage, source: 'system' },
+          root,
+        )
+      } catch { /* 见上：这条只是留痕，不是保存的前置条件 */ }
+    }
+    await writeConfig(next, root)
+    // 写穿：立刻把新配置放进缓存，别让下一次 loadConfig 去读自己刚写的盘。
+    // 签名要重新取——writeConfig 走的是 tmp+rename，mtime 是新的。
+    const file = paths(root).config
+    rememberConfig(root, await configStamp(file), { config: next, fresh: false, broken: false })
+    pushPacing(next)
+    return next
+  })
 }
 
 function deepMerge(base, patch) {

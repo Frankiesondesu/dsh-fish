@@ -53,6 +53,7 @@
 
 import { tsMs } from './schema.js'
 import { similarity } from './derive.js'
+import { fillOwner } from './pronoun.js'
 
 /** 一次最多摆几条。多了就成了许愿清单。 */
 export const WISH_SHOW_MAX = 2
@@ -76,6 +77,15 @@ const TOOL_NAME_MIN = 4
 
 /** subject 开头可以先有的空白和左引号、左括号（「`her_note`：…」「「her_note」…」也算写在最前面）。 */
 const HEAD_OPENERS = /^[\s`'"“‘「『《〈【[(（<]+/
+
+/**
+ * 剥掉标点之后，开头还可能是「用 / 就」这类前缀（issue #109）：
+ * 「用 her_note 记长一点的东西」「就是 bili_look 能看整条的」——说的是手上已有的工具。
+ *
+ * 不放「像」：`像 bash 那样能跑 python 的东西` 是拿手上的工具作比较，要的是另一样东西
+ * （#102 的用例），放行会把「还没有的东西」误判成到手。
+ */
+const HEAD_PREFIX = /^(?:(?:就是|用|就)\s*)+/
 
 const DAY = 86_400_000
 
@@ -156,7 +166,7 @@ function toolNamedIn(has, subject) {
   if (!subject) return ''
   if (toolInHand(has, subject)) return subject
   if (!(has instanceof Set) && !Array.isArray(has)) return ''
-  const head = subject.toLowerCase().replace(HEAD_OPENERS, '')
+  const head = subject.toLowerCase().replace(HEAD_OPENERS, '').replace(HEAD_PREFIX, '')
   let hit = ''
   for (const raw of has instanceof Set ? [...has] : has) {
     const name = String(raw ?? '').trim().toLowerCase()
@@ -184,8 +194,8 @@ export function toolArrived(e, has) {
 
 /** 她那句话怎么收尾——只陈述结局，不给建议。 */
 export function wishTail(verdict) {
-  if (verdict === 'approve') return '他答应了，还没见到'
-  if (verdict === 'later') return '他说以后再说'
+  if (verdict === 'approve') return fillOwner('{T}答应了，还没见到')
+  if (verdict === 'later') return fillOwner('{T}说以后再说')
   if (verdict === 'reject') return '那次不行'
   return '你问过，还没有答复'
 }

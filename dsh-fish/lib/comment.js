@@ -24,8 +24,10 @@ import { loadConfig, dateKey, inWindow, biliOn } from './settings.js'
 import { createClient } from './bili.js'
 import { itemsFromEvents } from './browse.js'
 import { sanitizeForeign } from './guard.js'
+import { recordGuard } from './guardlog.js'
 import { deriveSelf } from './derive.js'
 import { redactOwner } from './redact.js'
+import { fillOwner } from './pronoun.js'
 
 /** 出口脱敏用的名字：派生失败就当没有名字，绝不让一次发布因为派生失败而中断。 */
 function safeOwnerName(events, override) {
@@ -209,7 +211,11 @@ export async function scanReplies(o = {}) {
       if (seen.has(s.rpid)) continue
       if (self && Number(s.mid) === self) continue    // 她自己又补了一句，不算"别人回她"
       const dirty = sanitizeForeign(s.text)
-      if (!dirty.text.trim()) continue               // 整条都是指令味，丢掉
+      if (!dirty.text.trim()) {
+        // 整条都是指令味，丢掉——并记一笔（0.9.9 S-A）。只记类别，不记原文。
+        await recordGuard(root, 'rewrite')
+        continue
+      }
       out.push({
         bvid: c.bvid, aid, rootRpid: c.rpid, rpid: s.rpid, user: s.user,
         text: dirty.text, ctime: s.ctime,
@@ -349,7 +355,11 @@ export async function readMyReplies(o = {}) {
       if (!s.rpid || !s.text) continue
       if (self && Number(s.mid) === self) continue   // 她自己补的那句不算"别人说的"
       const dirty = sanitizeForeign(s.text)
-      if (!dirty.text.trim()) continue
+      if (!dirty.text.trim()) {
+        // 同 scanReplies：整条只剩指令味就丢，并记一笔拦了几次（0.9.9 S-A）。
+        await recordGuard(root, 'rewrite')
+        continue
+      }
       out.push({
         bvid: c.bvid, aid, rootRpid: c.rpid, rpid: s.rpid, user: s.user,
         text: dirty.text, ctime: s.ctime,
@@ -370,9 +380,9 @@ export function renderMyReplies(list, { bvid = '' } = {}) {
   // 2026-11-07：他的话和路人的话分开摆。原来一律叫「陌生人写的」，
   // 主人自己回一句也被当外人（用户反馈）。这里只陈述事实，判断留给她。
   if (fromOwner.length) {
-    lines.push('他在你那条评论下面回了一句。你可以回，也可以不回。', '')
+    lines.push('{T}在你那条评论下面回了一句。你可以回，也可以不回。', '')
     for (const x of fromOwner.slice(0, 10)) {
-      const who = x.user || '他'
+      const who = x.user || '{T}'
       lines.push(`- ${who}（BV ${x.bvid}）：${oneLine(x.text, 200)}  [reply=${x.rpid} parent=${x.rootRpid}]`)
     }
   }
@@ -386,7 +396,7 @@ export function renderMyReplies(list, { bvid = '' } = {}) {
       lines.push(`- ${who}（BV ${x.bvid}）：${oneLine(x.text, 200)}  [reply=${x.rpid} parent=${x.rootRpid}]`)
     }
   }
-  return lines.join('\n')
+  return fillOwner(lines.join('\n'))
 }
 
 /**
@@ -406,9 +416,9 @@ export function renderReplies(list) {
   // 和路人挤在一张表里。现在分两段：他的话只陈述事实（他在你那条评论下面
   // 回了一句，你可以回，也可以不回），是不是要当回事留给她自己判断。
   if (fromOwner.length) {
-    lines.push('## 他在你下面说话了', '他是在你那条评论下面回了一句。你可以回，也可以不回。', '')
+    lines.push('## {T}在你下面说话了', '{T}是在你那条评论下面回了一句。你可以回，也可以不回。', '')
     for (const x of fromOwner.slice(0, REPLY_SHOW_MAX)) {
-      const who = x.user || '他'
+      const who = x.user || '{T}'
       lines.push(`- ${who}（BV ${x.bvid}）：${oneLine(x.text, 200)}`)
     }
   }
@@ -426,7 +436,7 @@ export function renderReplies(list) {
       lines.push(`- ${who}（BV ${x.bvid}）：${oneLine(x.text, 200)}`)
     }
   }
-  return lines.join('\n')
+  return fillOwner(lines.join('\n'))
 }
 
 /**
@@ -497,7 +507,7 @@ export async function postComment(o = {}) {
   if (!t) {
     // 他递过来但还没看一眼的那条，拒绝理由说得更准（她才知道下一步是"去看一眼"）
     const handed = metas(events, `hand:${dk} `).some((line) => line.split(/\s+/)[1] === bvid)
-    return { ok: false, why: handed ? '这条是他递过来的，你还没看' : '这个视频你今天没看' }
+    return { ok: false, why: handed ? '这条是{T}递过来的，你还没看' : '这个视频你今天没看' }
   }
 
   const ow = await readOwner(root)
@@ -511,6 +521,14 @@ export async function postComment(o = {}) {
 
   await appendEvent(
     { type: 'meta', text: `comment:${dk} ${bvid} ${r.data?.rpid ?? 0}` },
+    { day: 0, stage: 1, source: 'system' },
+    root,
+  ).catch(() => {})
+
+  // 正文也落一条（0.9.9 g7）：meta 那行只够记账，量不出"她是不是在说同一句话"。
+  // 写失败不影响已发出去的评论，所以照旧吞掉错误。
+  await appendEvent(
+    { type: 'comment', text: safeText.slice(0, 1000), bvid, rpid: Number(r.data?.rpid) || 0 },
     { day: 0, stage: 1, source: 'system' },
     root,
   ).catch(() => {})

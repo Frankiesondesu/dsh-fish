@@ -76,6 +76,8 @@ export const SETTINGS = [
 
   { group: 'B 站总闸', key: 'bili.enabled', label: '她能自己上 B 站', kind: 'bool', danger: true, hint: '彻底断网那一项：关掉后 bili_look / bili_watch、评论与定时查回复全停（0.9.x 起）。上面「刷站」只管按时间自动替她翻首页，不受这一项影响' },
 
+  { group: 'B 站总闸', key: 'bili.sub', label: '允许她读字幕', kind: 'bool', hint: '上游 1.0：关掉只是 bili_sub 用不了；看标题、看画面、已经查过的记录都不动。想读完整要她自己一页页翻' },
+
   { group: '请求节奏', key: 'bili.minIntervalMs', label: '两次 B 站请求至少间隔', kind: 'num', min: 200, max: 120000, step: 100, hint: '毫秒；机房 IP 要放慢（服务端最少 200）' },
   { group: '请求节奏', key: 'bili.jitterMs', label: '在间隔上再随机多等', kind: 'num', min: 0, max: 60000, step: 100, hint: '毫秒' },
 
@@ -97,6 +99,13 @@ export const SETTINGS = [
   { group: '对话', key: 'chat.carry', label: '换新会话时带几轮原话', kind: 'num', min: 0, max: 20, step: 1, hint: '0 = 不带。换窗口时把最后这几轮原话原样搬过去（「上次我们说到这」），一句不改、不总结；带得越多，换窗口后的头几轮越占地方' },
   { group: '对话', key: 'chat.rotateWhenKB', label: '会话内容多大换新', kind: 'num', min: 0, max: 5000, step: 100, hint: 'KB，0 = 不看大小。轮数和上下文大小不挂钩（一轮调很多次工具也会顶爆），量的是会话日志里会进上下文的内容（估），与轮数谁先到谁生效。默认 1MB（2026-11-10 计量修准后调上来；800 是旧口径虚高时的保守值）' },
   { group: '对话', key: 'chat.replyChars', label: '单轮最多写多少字', kind: 'num', min: 0, max: 2000, step: 100, hint: '0 = 不限（默认），提示词里不出现任何长度要求' },
+
+  { group: '有人 @ 她', key: 'at.enabled', label: '去消息中心取 @', kind: 'bool', hint: '上游 1.0：有人 @ 她时递过来；关掉就完全不取' },
+  { group: '有人 @ 她', key: 'at.scanEveryMin', label: '多久看一眼', kind: 'num', min: 1, max: 60, step: 1, hint: '分钟' },
+  { group: '有人 @ 她', key: 'at.perDayMax', label: '每天最多递几条', kind: 'num', min: 0, max: 100, step: 1, hint: '多的留到明天，不丢' },
+  { group: '有人 @ 她', key: 'at.others', label: '别人的 @ 也递', kind: 'bool', hint: '只递，不替她回' },
+  { group: '有人 @ 她', key: 'at.ownerWake', label: '主人 @ 时当场叫醒', kind: 'bool', hint: '不占每天醒来次数' },
+  { group: '对话', key: 'chat.anchor', label: '纠正鱼八股（实验性）', kind: 'bool', hint: '上游 1.0 默认关：打开后身份文档多一段「把话说到具体处」，强行约束她怎么说，与「不硬性规定她怎么说」相冲突' },
 
   { group: '房间', key: 'rooms.groupRotateDays', label: '群房用几天换新', kind: 'num', min: 0, max: 365, step: 1, hint: '0 = 不换；书房按 chat.rotateAfter 的轮数换' },
 

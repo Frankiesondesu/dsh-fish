@@ -43,10 +43,17 @@ export const BACKUP_FORMAT = 'dsh-fish-backup/1'
 /** 不搬的目录（相对状态库根）。 */
 const SKIP_DIRS = new Set(['logs', 'backups', 'dsh-fish-backups', 'node_modules'])
 
-/** 不搬的单个文件（相对状态库根）。local.key 是本机通路的鉴权密钥（回环 + local.key）：
- *  首次启动自动再生成，换机后各端重连即可。备份文件是最容易被传网盘/发微信的东西，
- *  钥匙跟着走等于把「谁能冒充本机」一起打包——所以永远不搬，跳过原因在 skipped 里写明。 */
-const SKIP_FILES = new Set(['local.key'])
+/** 不搬的文件（只认状态库顶层）。
+ *  · local.key            本机通路的鉴权密钥（回环 + local.key）：首次启动自动再生成，
+ *                         换机后各端重连即可。备份文件最容易被传网盘/发微信，钥匙跟着走
+ *                         等于把「谁能冒充本机」一起打包——所以永远不搬（fork 定案）。
+ *  · instance.json        占用声明（tenant.js）。带进包再放回去，盘上就是导出那次运行的
+ *                         instanceId，正在跑的实例心跳对不上，会把自己当成被接管、从此只读。
+ *  · .talk-session.lock   建会话的那把锁（home.js）。导出时正好有人拿着，放回去就是一把没人会放的锁。
+ *  · .instance.lock       认领占用声明的那把锁（tenant.js 的 claimRoot），同上。
+ * 老包里有它们：恢复时同样不放回（restoreBackup）。跳过原因在 skipped 里写明。
+ */
+const SKIP_FILES = new Set(['local.key', 'instance.json', '.talk-session.lock', '.instance.lock'])
 
 /** 单个文件上限：8MB（头像 2MB 够用，日记再长也不该破这个数）。 */
 const MAX_FILE_BYTES = 8 * 1024 * 1024
@@ -252,7 +259,9 @@ export async function collectBackup(root = rootDir(), { now = new Date(), core =
         continue
       }
       if (SKIP_FILES.has(rel)) {
-        out.push({ rel, why: '不搬：本机钥匙，首次启动自动再生成' })
+        // fork 的钥匙要写进 skipped（人要看得见为什么没进包）；
+        // 上游 1.0.0 的运行态占用声明与锁不算「没装进去」，静默跳过即可。
+        if (rel === 'local.key') out.push({ rel, why: '不搬：本机钥匙，首次启动自动再生成' })
         continue
       }
       if (core && !isCorePath(rel)) {
@@ -508,6 +517,8 @@ export async function restoreBackup(bundle, root = rootDir(), { now = new Date()
     }
   }
   const badSet = new Set(bad)
+  // 0.9.8 及以前的包带着导出那次运行的占用声明和会话锁：不放回（见 SKIP_FILES）。
+  const stale = bundle.files.filter((f) => SKIP_FILES.has(f.path)).length
 
   const quarantined = await quarantineDirFor(root, now)
   let hadOld = false
@@ -532,7 +543,7 @@ export async function restoreBackup(bundle, root = rootDir(), { now = new Date()
   try {
     await fs.mkdir(root, { recursive: true })
     for (const f of bundle.files) {
-      if (badSet.has(f.path)) continue
+      if (badSet.has(f.path) || SKIP_FILES.has(f.path)) continue
       const dest = join(root, ...f.path.split('/'))
       await fs.mkdir(dirname(dest), { recursive: true })
       await fs.writeFile(dest, f.enc === 'base64' ? Buffer.from(f.data, 'base64') : f.data, {
@@ -551,7 +562,7 @@ export async function restoreBackup(bundle, root = rootDir(), { now = new Date()
   const unlisted = unlistedInBundle(bundle)
   return {
     ok: true,
-    restored: bundle.files.length - badSet.size,
+    restored: bundle.files.length - badSet.size - stale,
     quarantined: hadOld ? quarantined : '',
     schemaFrom: Number(bundle.schema ?? 0),
     skipped: missing.slice(0, 200),

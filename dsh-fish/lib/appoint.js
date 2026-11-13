@@ -24,10 +24,11 @@
 import { join } from 'node:path'
 import { clipText } from './clip.js'
 import { toJsonSchema } from './toolschema.js'
-import { rootDir, readJson, writeAtomic } from './store.js'
+import { rootDir, readJson, writeAtomic, mutateJson } from './store.js'
 import { dateKey } from './settings.js'
 import { defineTool } from './tool.js'
 import { guardWrite } from './tenant.js'
+import { fillOwner } from './pronoun.js'
 
 /** 预约文件叫什么。和 notes.json 并排，人能直接打开看。 */
 export const APPOINT_FILE = 'appointments.json'
@@ -140,14 +141,22 @@ export async function nextAppointment(root = rootDir(), now = Date.now()) {
   return rows.find((a) => !a.notifiedAt && a.days > 0) ?? null
 }
 
+/**
+ * 改预约簿的四个入口（约、关、改期、记「提过了」）都是「读整份 → 改一条 → 写回」，
+ * 排成一队：定时器记「提过了」和她这边改期/关掉撞上时，以前后写的把先写的盖掉。
+ */
+const mutateAppointments = (root, fn) => mutateJson(appointPath(root), fn)
+
 /** 记下「这一条到点提过了」，免得同一个 tick 反复叫。 */
 export async function markNotified(root, id, now = Date.now()) {
-  const rows = await readAppointments(root)
-  const hit = rows.find((a) => a.id === id)
-  if (!hit || hit.status !== 'open' || hit.notifiedAt) return false
-  hit.notifiedAt = new Date(now).toISOString()
-  await writeAppointments(root, rows)
-  return true
+  return mutateAppointments(root, async () => {
+    const rows = await readAppointments(root)
+    const hit = rows.find((a) => a.id === id)
+    if (!hit || hit.status !== 'open' || hit.notifiedAt) return false
+    hit.notifiedAt = new Date(now).toISOString()
+    await writeAppointments(root, rows)
+    return true
+  })
 }
 
 /**
@@ -167,6 +176,7 @@ export async function makeAppointment(root = rootDir(), { what, due, now = Date.
   if (gap < APPOINT_MIN_DAYS) return { ok: false, id: '', note: '最早只能约到明天。' }
   if (gap > APPOINT_MAX_DAYS) return { ok: false, id: '', note: `最远只能约到 ${APPOINT_MAX_DAYS} 天后。` }
   try {
+    return await mutateAppointments(root, async () => {
     const rows = await readAppointments(root)
     if (rows.length >= APPOINT_MAX) return { ok: false, id: '', note: '预约簿满了，先关掉几条旧的。' }
     const open = openAppointments(rows, { now })
@@ -185,6 +195,7 @@ export async function makeAppointment(root = rootDir(), { what, due, now = Date.
     rows.push(row)
     await writeAppointments(root, rows)
     return { ok: true, id: row.id, note: '约好了。', echo: row.what }
+    })
   } catch {
     return { ok: false, id: '', note: '这会儿写不进去，等一下再试。' }
   }
@@ -206,6 +217,7 @@ export async function closeAppointment(root = rootDir(), { id, what, action = 'd
   if (act === 'cancel' && !why) return { ok: false, id: '', note: '取消要说一句为什么——不然就跟没约过一样。' }
   if (act === 'cancel' && why.length > 200) return { ok: false, id: '', note: '原因太长了，压到 200 字以内。' }
   try {
+    return await mutateAppointments(root, async () => {
     const rows = await readAppointments(root)
     const hit = locateOpen(rows, { id, what })
     if (!hit) return { ok: false, id: '', note: '预约簿里没有这一条还没关掉的。' }
@@ -215,6 +227,7 @@ export async function closeAppointment(root = rootDir(), { id, what, action = 'd
     if (why) hit.reason = clipText(why, 200, '')
     await writeAppointments(root, rows)
     return { ok: true, id: hit.id, note: act === 'done' ? '记下了。' : '取消了。' }
+    })
   } catch {
     return { ok: false, id: '', note: '这会儿写不进去，等一下再试。' }
   }
@@ -229,6 +242,7 @@ export async function moveAppointment(root = rootDir(), { id, what, newDue, now 
   if (gap < APPOINT_MIN_DAYS) return { ok: false, id: '', note: '最早只能改到明天。' }
   if (gap > APPOINT_MAX_DAYS) return { ok: false, id: '', note: `最远只能改到 ${APPOINT_MAX_DAYS} 天后。` }
   try {
+    return await mutateAppointments(root, async () => {
     const rows = await readAppointments(root)
     const hit = locateOpen(rows, { id, what })
     if (!hit) return { ok: false, id: '', note: '预约簿里没有这一条还没关掉的。' }
@@ -236,6 +250,7 @@ export async function moveAppointment(root = rootDir(), { id, what, newDue, now 
     hit.notifiedAt = null
     await writeAppointments(root, rows)
     return { ok: true, id: hit.id, note: `改到 ${day} 了。`, echo: hit.what }
+    })
   } catch {
     return { ok: false, id: '', note: '这会儿写不进去，等一下再试。' }
   }
@@ -264,9 +279,9 @@ export function appointPrompt(appt, now = Date.now()) {
   const today = dateKey(new Date(now))
   const late = daysBetween(appt?.due, today)
   const when = late <= 0 ? '就是今天' : `已经过了 ${late} 天`
-  return (
-    `你跟他约好的日子${when}（${appt?.due}），约的是：「${appt?.what}」。` +
-    '现在先说这件事：你自己做到没有，他有没有来。没来也别替他找理由。'
+  return fillOwner(
+    `你跟{T}约好的日子${when}（${appt?.due}），约的是：「${appt?.what}」。` +
+    '现在先说这件事：你自己做到没有，{T}有没有来。没来也别替{T}找理由。',
   )
 }
 
@@ -283,7 +298,7 @@ export function registerAppoint(ctx, deps = {}) {
     defineTool({
       name: 'her_appoint',
       description:
-        '跟他约一件具体的事：写清哪一天、要做什么。到那天你醒来会先想起它。' +
+        '跟{T}约一件具体的事：写清哪一天、要做什么。到那天你醒来会先想起它。' +
         '约的时候给 what 和 due（日子写成 2026-11-11）；看预约簿给 action:"list"；' +
         '改日子给 action:"move" 和 newDue；做到了给 action:"done"；' +
         '不做了给 action:"cancel"，并说一句 reason。',

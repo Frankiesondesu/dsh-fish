@@ -25,7 +25,8 @@
  */
 
 import { isProofOnly, similarity } from './derive.js'
-import { HER_TYPES, tsMs } from './schema.js'
+import { HER_TYPES, tsMs, localDaysAgo } from './schema.js'
+import { fillOwner } from './pronoun.js'
 
 /** 一次醒来最多摆几个口子。多了就成了清单，不是惦记。 */
 export const CURIOSITY_SHOW_MAX = 3
@@ -128,9 +129,9 @@ export function curiosityOf(events = [], now = Date.now()) {
   return out
 }
 
-/** 几天前 / 今天 / 昨天——不给小时数，那不是她会算的东西。 */
+/** 几天前 / 今天 / 昨天——不给小时数，那不是她会算的东西。按本地日历日数。 */
 function agoText(at, at0) {
-  const days = Math.floor(Math.max(0, at0 - at) / 86400000)
+  const days = localDaysAgo(at, at0)
   if (days <= 0) return '今天'
   if (days === 1) return '昨天'
   return `${days} 天前`
@@ -198,6 +199,6 @@ export function renderEcho(events = [], now = Date.now()) {
   const age = at0 - leave
   if (age < 0 || age > ECHO_HOURS * 3600000) return ''
   const seen = lastSeenAt(events)
-  if (seen >= leave) return '你上次留的那句话，他后来来过了。'
-  return '你上次留的那句话，他还没来过。'
+  if (seen >= leave) return fillOwner('你上次留的那句话，{T}后来来过了。')
+  return fillOwner('你上次留的那句话，{T}还没来过。')
 }

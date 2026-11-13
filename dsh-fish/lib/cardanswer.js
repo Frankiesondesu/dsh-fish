@@ -21,7 +21,9 @@ import { picked } from './askinchat.js'
 import { decideKeepsake } from './keepsake.js'
 import { YES as KEEP_YES, NO as KEEP_NO } from './keep.js'
 import { recordGrant, GRANT_YES, GRANT_NO } from './grant.js'
-import { pendingOffer } from './unlock.js'
+import { pendingOffer, offerLimits } from './unlock.js'
+import { loadConfig } from './settings.js'
+import { applyPronounAnswer } from './pronounask.js'
 
 const ASK_VERDICTS = ['approve', 'reject', 'later']
 
@@ -41,6 +43,11 @@ async function answerAsk(root, askId, label) {
   return r.ok ? { ok: true } : { ok: false, why: r.why }
 }
 
+// issue #127 C 案：pronoun:<问的那次 meta id>。只认三个值本身，别的一概不写。
+function answerPronoun(root, ref, label) {
+  return applyPronounAnswer(root, ref, label)
+}
+
 function answerKeepsake(root, id, label) {
   if (label !== KEEP_YES && label !== KEEP_NO) return { ok: false, why: '这张卡没有这个选项' }
   const d = decideKeepsake(root, { id, yes: label === KEEP_YES })
@@ -51,7 +58,9 @@ async function answerGrant(root, offerId, label) {
   if (label !== GRANT_YES && label !== GRANT_NO) return { ok: false, why: '这张卡没有这个选项' }
   // 读不到账要照实说，不能说成申请不在了。
   const { events } = await readEvents(root)
-  const offer = pendingOffer(events)
+  // 几天算搁置跟设置走（rules.holdDays），和调度器、观测台同一个口径。
+  const { config } = await loadConfig(root).catch(() => ({ config: null }))
+  const offer = pendingOffer(events, Date.now(), offerLimits(config))
   if (offer?.id !== offerId) return { ok: false, why: '这张申请已经不在等了' }
   const w = await recordGrant(root, { offerId, rule: offer.grant?.rule || '', verdict: label === GRANT_YES ? 'approve' : 'reject' })
   return w.ok ? { ok: true } : { ok: false, why: w.error }
@@ -73,6 +82,7 @@ export async function answerCard(root = rootDir(), answer = {}) {
     if (!label) return { ok: false, why: '没选' }
     switch (id.slice(0, at)) {
       case 'ask': return await answerAsk(root, ref, label)
+      case 'pronoun': return await answerPronoun(root, ref, label)
       case 'keepsake': return answerKeepsake(root, ref, label)
       case 'grant': return await answerGrant(root, ref, label)
       default: return { ok: false, why: '不认识这种卡' }

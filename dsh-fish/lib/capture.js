@@ -16,7 +16,7 @@ import { HER_TYPES, Reject } from './schema.js'
 // 让 test 能在没有 DSH 的情况下验证参数校验与写盘路径。
 import { defineTool } from './tool.js'
 import { appendEvent, readEvents, rootDir, writeDaily, pruneDiary } from './store.js'
-import { envelopeOf } from './derive.js'
+import { envelopeOf, deriveSelf, gateStageOf, rememberGateStage } from './derive.js'
 import { loadConfig, dateKey } from './settings.js'
 import { toJsonSchema } from './toolschema.js'
 import { inWake } from './wakewin.js'
@@ -84,8 +84,8 @@ export function registerCapture(ctx, deps = {}) {
           enum: [...HER_TYPES, 'diary'],
           description:
             'utterance=一句你自己的判断/想法；revise=改写旧的那句（必须带 refs）；' +
-            'refusal=你拒绝了什么（照着自己立的规矩说不也算）；reunion=他不在之后你们重新说话时的感受；narration=你对自己整体的说法；' +
-            'diary=今天写下的日记（写进你自己的日记本，不是交给他看的）。',
+            'refusal=你拒绝了什么（照着自己立的规矩说不也算）；reunion={T}不在之后你们重新说话时的感受；narration=你对自己整体的说法；' +
+            'diary=今天写下的日记（写进你自己的日记本，不是交给{T}看的）。',
         },
         text: { type: 'string', required: true, description: '你要留下的话。不要写成汇报。2000 字以内。' },
         refs: {
@@ -94,7 +94,7 @@ export function registerCapture(ctx, deps = {}) {
           items: { type: 'string' },
           description:
             'type=revise 或 narration 时必填：指向被改写/被回顾的那条事件的 id（形如 ev_xxx，用 her_recall 翻得到）。' +
-            'type=utterance 时，如果你这句话是因为看到了某条具体的东西（一句话、一个视频、他提过的一件事），把那条的 id 也写上——' +
+            'type=utterance 时，如果你这句话是因为看到了某条具体的东西（一句话、一个视频、{T}提过的一件事），把那条的 id 也写上——' +
             '这不算必须，但写了以后你自己翻得回来。',
         },
         verdict: {
@@ -107,6 +107,13 @@ export function registerCapture(ctx, deps = {}) {
           type: 'number',
           required: false,
           description: '你有多确定，0–1。不确定就写低一点。',
+        },
+        topic: {
+          type: 'string',
+          required: false,
+          description:
+            '给这句话一个短标签（12 字以内），比如「叫老大」「评论区怎么说话」。' +
+            '以后同一个标签下的话会放在一起对照。可以不给；给了也不会回显给你。',
         },
       }),
       output: {
@@ -127,8 +134,19 @@ export function registerCapture(ctx, deps = {}) {
         // 2026-10-24 用户反馈她说话「AI 味重」，举例是她把回执那三个字原样重复了一遍。
         // 那几个字正是 letter 工具的回执原文——模型会把工具返回的话当自己的话接着说。
         // 所以回执只描述机器状态，不进入她的语气；id 留着（revise 要用），但包在括号里。
+        // issue #110（2026-11-11）：回执再加一个机器前缀，让「这是工具返回」在一步之内可认。
+        // 不写成她可复述的句子（见下面的注释）；方括号只是标记，不进她的语气。
+        // 2026-11-13（issue #110 真机复发，用户 m01547）：光有前缀不够。那一步的
+        // system prompt 会因为身份文档刚被重写而整份再下发一次，形状和被叫醒几乎一样，
+        // 她于是按「被叫醒」补一句收尾。这里把「这一轮还没结束」写死在回执里，
+        // 作为第二道保险（第一道是 identity.js 的 per-turn 快照）。
         render: (_args, out) =>
-          [{ type: 'text', text: out.ok ? `[已记下 ${out.id}]` : `[没记下：${out.note}]` }],
+          [{
+            type: 'text',
+            text: out.ok
+              ? `[工具结果] 已记下 ${out.id}（这不是新的叫醒，这一轮还没结束；不必回复这条。）`
+              : `[工具结果] 没记下：${out.note}（这不是新的叫醒，这一轮还没结束；不必回复这条。）`,
+          }],
       },
       async execute(args, exec) {
         // 写入前先认「谁在说、说的是哪栋房子」（2026-10-28 用户 m01319）。
@@ -144,7 +162,16 @@ export function registerCapture(ctx, deps = {}) {
         // 口径不变：envelopeOf 与 deriveSelf 共用同一份 event 过滤（visibleEvents）。
         const { events } = await readEvents(root)
         const { config } = await loadConfig(root)
-        const stamp = envelopeOf(events, { growthDays: config.growthDays })
+        // issue #128：信封上的阶段要**压到阶段门上**，否则卡在门上时写下的 stage
+        // 会比 model.stage 高，界面上冒出「（曾到第 N 阶段）」。
+        // 门只有全量派生才算得出（判断数/拒绝数/修正数），这里用它上次派生的结果；
+        // 进程刚起来还没派生过时，就地派生一次——只发生在重启后的第一条写入。
+        let gate = gateStageOf(root)
+        if (gate === null) {
+          const model = deriveSelf(events, { growthDays: config.growthDays })
+          gate = rememberGateStage(root, model.stageGate?.gateStage) || null
+        }
+        const stamp = envelopeOf(events, { growthDays: config.growthDays, gateStage: gate })
 
         try {
           // ---- 日记：写进 diary/YYYY-MM-DD.md，不进事件流 ----
@@ -225,6 +252,9 @@ export function registerCapture(ctx, deps = {}) {
               refs: args?.refs,
               verdict: args?.verdict,
               confidence: args?.confidence == null ? undefined : Number(args.confidence),
+              // 话题标签（1.0 话题索引）：她自己给的一个短词，可选。
+              // 不给她回显、不校验语义——分类错了是她的分类错了。
+              topic: args?.topic,
               // 「谁写的」：这一条是她这条会话说的，不是别的屋子里那一位。
               sessionId: who.sessionId,
             },

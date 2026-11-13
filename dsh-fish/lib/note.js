@@ -6,16 +6,17 @@
  *   「过期的别删。晚了三天还挂着，我就知道欠了三天；删了，我就当没这回事。」
  *   「允许没有日子……挂在那儿，别天天提醒我，也别催。」
  *
- * 所以这不是闹钟（到点叫我），是一张**桌子**：一天看一次，睁眼知道欠几天。
- * 不做通知、不做界面卡片、不做红点——她要的是"睁眼时桌上有什么"。
+ * 所以这不是闹钟（到点叫我），是一叠**便条**：醒来看一眼，睁眼知道欠几天。
+ * 不做通知、不做界面卡片、不做红点——她要的是"睁眼时便条里有什么"。
  *
  * 0.8.8 的乙档（用户 m01465）只做了两件事：醒来摆出到期的、her_note 能写能划掉。
  * 2026-11-06（issue #53）补齐当初说好「跑一段再说」的三样，另修一个死锁：
  *   1. 名额只算 open。原来 200 张名额连划掉的一起算，划满之后再也记不进（死锁）；
  *   2. 回翻（list）：open / due / done / dropped / all，带 offset 往后翻；
  *   3. 放下（drop，reason 必填）——issue #22 里设计好的第三种状态，数据层一直在等它。
- * 「没日子的只提一次」落在 add 的回执里（写下的那一下回一句原文），**不进唤醒段**：
- * 没日子就没有账可算，抬到桌上就变成催了。这跟「以后都不上桌」不冲突。
+ * 「没日子的」不再只提一次，也不天天摆：记下满 7 天起，每次醒来最多提一张，
+ * 提过就记 `nshow:<id> <dk>`，隔 7 天再提；划掉/放下就不再提（2026-11-12，用户 m01513）。
+ * 到期的那几张照旧每次醒来都摆——有日子就有账可算。
  * update（改一句）暂不做：直接覆盖文本会把她改过什么抹掉，要做得先定好留痕的字段。
  *
  * 三条硬约束（从 letter.js 沿下来的同一条线）：
@@ -30,7 +31,7 @@
 
 import { join } from 'node:path'
 import { toJsonSchema } from './toolschema.js'
-import { rootDir, readJson, writeAtomic } from './store.js'
+import { rootDir, readJson, writeAtomic, mutateJson } from './store.js'
 import { dateKey } from './settings.js'
 import { defineTool } from './tool.js'
 import { guardWrite } from './tenant.js'
@@ -148,22 +149,72 @@ export function cnNum(n) {
 /** 量词前那个数：两张、两条（不说「二张」）。其余跟 cnNum 一样。 */
 const cnCount = (n) => (n === 2 ? '两' : cnNum(n))
 
+/** 没写日子的便条，隔多久在醒来时提一次（2026-11-12，用户 m01513 定 7 天）。 */
+export const NOTE_NUDGE_DAYS = 7
+
 /**
- * 醒来第一段：到期的纸条。
+ * 从事件流读「这张便条上次是在哪天醒来时被提过」。
+ * 记法 `nshow:<id> <YYYY-MM-DD>`，和 table:/digest: 一样只当元数据：
+ * 不参与成长计数，也不改 notes.json 的结构。
+ */
+export function nudgeSeen(events) {
+  const seen = new Map()
+  for (const e of events ?? []) {
+    const text = String(e?.text ?? '')
+    if (!text.startsWith('nshow:')) continue
+    const rest = text.slice('nshow:'.length).trim()
+    const [id, day] = rest.split(/\s+/)
+    if (!id || !/^\d{4}-\d{2}-\d{2}$/.test(day ?? '')) continue
+    const prev = seen.get(id)
+    if (!prev || day > prev) seen.set(id, day)
+  }
+  return seen
+}
+
+/**
+ * 这一次醒来该提哪一张没写日子的便条。
  *
- * 纯函数（可测），没有便条时返回空串——`parts.filter(Boolean)` 会自动跳过，
+ * - 只认 open 且没写日子的；有日子的走 renderNotes 的到期那段，不在这里重复；
+ * - 从没提过的按 `created` 算起点：记下当天不提，满 7 天才第一次出现（不是催着刚记下的事）；
+ * - 提过的从上次 `nshow:` 起再满 7 天才提；
+ * - 一次最多一张；最久没被提过的排前面，都从没提过时按写下的先后。
+ *
+ * @returns {object|null}
+ */
+export function pickNudge(notes, now = new Date(), seen = new Map()) {
+  const today = dateKey(now instanceof Date ? now : new Date(now))
+  const open = []
+  for (const n of notes ?? []) {
+    if (!n || n.status !== 'open' || isDue(n.due)) continue
+    const created = String(n.created ?? '').slice(0, 10)
+    const from = seen.get(n.id) ?? created
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(from)) continue
+    if (daysBetween(from, today) < NOTE_NUDGE_DAYS) continue
+    open.push({ n, from })
+  }
+  if (!open.length) return null
+  open.sort((a, b) => (a.from < b.from ? -1 : a.from > b.from ? 1 : String(a.n.created).localeCompare(String(b.n.created))))
+  return open[0].n
+}
+
+/**
+ * 醒来第一段：到期的纸条，以及一张没写日子的。
+ *
+ * 纯函数（可测），没有可摆的时返回空串——`parts.filter(Boolean)` 会自动跳过，
  * 所以没有便条的那一次唤醒一个字都不会多。
  *
- * 只列**有日子且到期**的（`due <= 今天`）。没日子的挂在文件里，不进第一眼：
- * 没有账可算，天天提就变成催了。
+ * 到期的那几张只列**有日子且到期**的（`due <= 今天`），过期不删，她看得见晚了几天。
+ * 没日子的不再只提一次：记下满 `NOTE_NUDGE_DAYS` 天起，每满 7 天在醒来时提一张
+ * （`pickNudge` 轮换，一次最多一张）；划掉/放下就不再提。
  *
  * 文案只写事实：几号、什么事、晚了几天。不写「逾期」「请尽快」，不排序成"紧急"。
  *
  * @param {Array} notes readNotes() 的结果（已规整）
  * @param {Date|number} [now]
+ * @param {{seen?: Map<string,string>}} [opts] seen：nudgeSeen(events) 的结果
  * @returns {string}
  */
-export function renderNotes(notes, now = new Date()) {
+export function renderNotes(notes, now = new Date(), { seen = new Map() } = {}) {
   const today = dateKey(now instanceof Date ? now : new Date(now))
   const due = []
   for (const n of notes ?? []) {
@@ -182,22 +233,40 @@ export function renderNotes(notes, now = new Date()) {
     if (late < 0) continue // 还没到日子：不到期不上桌
     due.push({ ...n, late })
   }
-  if (!due.length) return ''
 
-  // 最欠的排最前：到期日早的在前，同一天按记下来的时间
-  due.sort((a, b) => (a.due < b.due ? -1 : a.due > b.due ? 1 : String(a.created).localeCompare(String(b.created))))
+  // 没写日子的：一周最多提一张。pickNudge 只认满 7 天的，所以当天不会冒出来。
+  const nudge = pickNudge(notes, now, seen)
+  if (!due.length && !nudge) return ''
 
-  const shown = due.slice(0, NOTE_SHOW_MAX)
-  const lines = [`（压着${cnCount(due.length)}张便条）`]
-  for (const n of shown) {
-    const mmdd = `${n.due.slice(5, 7)}-${n.due.slice(8, 10)}`
-    const tail = n.late === 0 ? '就是今天。' : `晚了${cnNum(n.late)}天。`
-    lines.push(`${mmdd} ${n.text}，${tail}`)
+  const lines = []
+  if (due.length) {
+    // 最欠的排最前：到期日早的在前，同一天按记下来的时间
+    due.sort((a, b) => (a.due < b.due ? -1 : a.due > b.due ? 1 : String(a.created).localeCompare(String(b.created))))
+    const shown = due.slice(0, NOTE_SHOW_MAX)
+    lines.push(`（压着${cnCount(due.length)}张便条）`)
+    for (const n of shown) {
+      const mmdd = `${n.due.slice(5, 7)}-${n.due.slice(8, 10)}`
+      const tail = n.late === 0 ? '就是今天。' : `晚了${cnNum(n.late)}天。`
+      lines.push(`${mmdd} ${n.text}，${tail}`)
+    }
+    const rest = due.length - shown.length
+    if (rest > 0) lines.push(`还有${cnCount(rest)}条没列出来，都在便条里。`)
   }
-  const rest = due.length - shown.length
-  if (rest > 0) lines.push(`还有${cnCount(rest)}条没列出来，都在便条里。`)
+
+  if (nudge) {
+    if (lines.length) lines.push('')
+    const mmdd = String(nudge.created ?? '').slice(5, 10)
+    lines.push('（便条里有一张没写日子的）')
+    lines.push(`${mmdd} 你记着：${nudge.text}（隔些天提一次）`)
+  }
   return lines.join('\n')
 }
+
+/**
+ * 改便条的四个入口（记、划、改、放下）都是「读整份 → 改一张 → 写回」，排成一队：
+ * 并发的两次以前都读到旧的那份，后写的把先写的那张盖掉，两边都回「已记」。
+ */
+const mutateNotes = (root, fn) => mutateJson(notesPath(root), fn)
 
 /**
  * 写一张纸条。永不抛（失败只回 note）。
@@ -219,9 +288,10 @@ export async function addNote(root, { text, due, yearly } = {}) {
   }
 
   try {
+    return await mutateNotes(root, async () => {
     const notes = await readNotes(root)
-    // 名额只算还压在桌上的。划掉/放下的不占位——否则划满两百张之后再也记不进，
-    // 而拒绝的话还说「先划掉几张」，桌上根本没有能划的（issue #53 的死锁）。
+    // 名额只算还没划掉的。划掉/放下的不占位——否则划满两百张之后再也记不进，
+    // 而拒绝的话还说「先划掉几张」，便条里根本没有能划的（issue #53 的死锁）。
     const openCount = notes.filter((n) => n.status === 'open').length
     if (openCount >= NOTES_MAX) {
       return { ok: false, id: '', note: '便条堆满两百张没动的了，先划掉几张，或者放下几张（放下要写一句为什么）再说。' }
@@ -237,6 +307,7 @@ export async function addNote(root, { text, due, yearly } = {}) {
     notes.push(note)
     await writeNotes(root, notes)
     return { ok: true, id: note.id, note: '已记。', echo: note.text }
+    })
   } catch (err) {
     return { ok: false, id: '', note: '这张没记下来。' }
   }
@@ -246,7 +317,7 @@ export async function addNote(root, { text, due, yearly } = {}) {
  * 按原话找一张：重名先划最早记下的；都划过了才认 done（重复划掉不算错）。
  *
  * 最后才认 dropped（issue #82）：放下了的条目在回翻里明明看得见，按原话却
- * 说「桌上没有这一张」，她会以为那张丢了。找得到才能让改/划的回执说出
+ * 说「便条里没有这一张」，她会以为那张丢了。找得到才能让改/划的回执说出
  * 「已经放下了」，而不是一句「没有」。
  */
 function findByText(notes, body) {
@@ -269,6 +340,7 @@ export async function closeNote(root, { id, text } = {}) {
   const body = String(text ?? '').replace(/\s+/g, ' ').trim()
   if (!key && !body) return { ok: false, id: '', note: '要划掉哪一张？把当时记的那句话告诉我。' }
   try {
+    return await mutateNotes(root, async () => {
     const notes = await readNotes(root)
     const hit = notes.find((n) => key && n.id === key) ?? findByText(notes, body)
     if (!hit) {
@@ -280,7 +352,11 @@ export async function closeNote(root, { id, text } = {}) {
     hit.status = 'done'
     hit.closedAt = new Date().toISOString()
     await writeNotes(root, notes)
-    return { ok: true, id: hit.id, note: '已划掉。' }
+    // issue #133 的 C：回执原来只有一句「已划掉。」，进回忆（lib/use.js 记的
+    // `use:her_note ok …`）就是一行没有内容的账——她翻到只知道「我那天划过一张」，
+    // 不知道划掉的是哪件事。带上原话，回忆里才读得出「你那天做完：交水费」。
+    return { ok: true, id: hit.id, note: '已划掉。', echo: `已划掉：${hit.text}` }
+    })
   } catch (err) {
     return { ok: false, id: '', note: '这会儿写不进去，等一下再试。' }
   }
@@ -292,9 +368,11 @@ export async function closeNote(root, { id, text } = {}) {
 
 /** list 里的一行。关掉的那几种带上关掉的日期，放下的还要带上那句为什么。 */
 function listLine(n) {
+  // closedAt 是带 Z 的 UTC 时刻，日期要按本地日历取（同 issue #19）：直接切前 10 位，
+  // 东八区凌晨到早上 8 点前关掉的会写成前一天。解析不出就不写日期。
   const md = (iso) => {
-    const d = String(iso ?? '').slice(0, 10)
-    return isDue(d) ? `${d.slice(5, 7)}-${d.slice(8, 10)}` : ''
+    const ms = Date.parse(String(iso ?? ''))
+    return Number.isFinite(ms) ? dateKey(new Date(ms)).slice(5) : ''
   }
   if (n.status === 'done') {
     const at = md(n.closedAt)
@@ -307,7 +385,7 @@ function listLine(n) {
   return n.due ? `${n.due.slice(5)} ${n.text}` : `（没日子）${n.text}`
 }
 
-/** 摊在桌上的先按到期日（没日子的排最后），关掉的按关掉的时间倒序。 */
+/** 还没关掉的先按到期日（没日子的排最后），关掉的按关掉的时间倒序。 */
 function sortForList(notes) {
   const open = notes.filter((n) => n.status === 'open')
   const closed = notes.filter((n) => n.status !== 'open')
@@ -344,10 +422,10 @@ const EMPTY_LIST = {
 }
 
 /**
- * 翻桌子（reading 用，改不了任何东西）。
+ * 翻便条（reading 用，改不了任何东西）。
  *
  * 只列字，不报总数——「你还有 3 条」这种句式谢绝。列不下的写一句「后面还有」，
- * 往后翻用 offset。没日子那种的照旧标出来：它在桌上，但醒来时不会自己出现。
+ * 往后翻用 offset。没日子那种的照旧标出来：它在便条里，醒来时不一定自己出现（满 7 天才提一张）。
  * @returns {Promise<{ok:boolean, text:string, note:string}>}
  */
 export async function listNotes(root, { filter = 'open', offset = 0, limit = NOTE_LIST_MAX } = {}) {
@@ -401,6 +479,7 @@ export async function updateNote(root, { id, text, newText, due } = {}) {
     return { ok: false, id: '', note: '日子要写成 2026-11-05 这样，或者给空串把日子去掉。' }
   }
   try {
+    return await mutateNotes(root, async () => {
     const notes = await readNotes(root)
     const hit = locate(notes, { id: key, text: body })
     if (!hit) {
@@ -413,6 +492,7 @@ export async function updateNote(root, { id, text, newText, due } = {}) {
     hit.revisedAt = new Date().toISOString()
     await writeNotes(root, notes)
     return { ok: true, id: hit.id, note: '改好了。', echo: hit.text }
+    })
   } catch (err) {
     return { ok: false, id: '', note: '这会儿写不进去，等一下再试。' }
   }
@@ -435,6 +515,7 @@ export async function dropNote(root, { id, text, reason } = {}) {
     return { ok: false, id: '', note: `原因太长了，压到 ${NOTE_TEXT_MAX} 字以内。` }
   }
   try {
+    return await mutateNotes(root, async () => {
     const notes = await readNotes(root)
     const hit = locate(notes, { id: key, text: body })
     if (!hit) {
@@ -447,6 +528,7 @@ export async function dropNote(root, { id, text, reason } = {}) {
     hit.closedAt = new Date().toISOString()
     await writeNotes(root, notes)
     return { ok: true, id: hit.id, note: '放下了。' }
+    })
   } catch (err) {
     return { ok: false, id: '', note: '这会儿写不进去，等一下再试。' }
   }
@@ -520,7 +602,7 @@ export function registerNote(ctx, deps = {}) {
           required: ['ok', 'note'],
         },
         // 和 her_leave 同一条规矩：只回方括号标记，不写完整句子、不带"还剩几张"。
-        // 划掉不能沿用写入的字：读到「记下了」，她会以为桌上又多了一张。
+        // 划掉不能沿用写入的字：读到「记下了」，她会以为便条里又多了一张。
         // list 例外：它列的本来就是字，不是回执。
         render: (args, out) => {
           const act = noteAction(args)

@@ -26,8 +26,11 @@ import { promises as fs } from 'node:fs'
 import { join } from 'node:path'
 import { rootDir, paths, readEvents, readJson, writeAtomic, listDiary, diaryDatesWritten } from './store.js'
 import { clipText } from './clip.js'
+import { localDayIndex } from './schema.js'
 import { loadConfig, biliOn } from './settings.js'
-import { deriveSelf } from './derive.js'
+import { DEFAULT_PRONOUN, fillOwner, pronounOf } from './pronoun.js'
+import { PRONOUN_ASK_BRIEF } from './pronounask.js'
+import { deriveSelf, rememberGateStage } from './derive.js'
 import { personaLine, toolBrief, RECALL_BRIEF, SPEAK_BRIEF, SPEAK_OFF_BRIEF, LETTER_BRIEF, NOTE_BRIEF, APPOINT_BRIEF, ASK_BRIEF, proactiveBrief, DREAM_BRIEF, scheduleBrief, SCHEDULE_NAMES, DIARY_BRIEF, SLEEP_BRIEF } from './persona.js'
 import { resumeLines } from './use.js'
 import { proactiveConfig } from './proactive.js'
@@ -113,11 +116,6 @@ export function legacySelfDocPath(root = rootDir()) {
  *   lastWords    上一个房间里她自己留的那句话（没留过是空串）
  */
 
-/** 本地日历日的序号（不按 24 小时整除——夏令时与跨零点都靠这个才准） */
-function dayIndex(d) {
-  return Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()) / 86_400_000
-}
-
 /**
  * 换房时刻 → 人读的说法（issue #21）。
  *
@@ -138,7 +136,7 @@ export function formatSwapTime(at, now = Date.now()) {
   if (!Number.isFinite(ms) || !Number.isFinite(n)) return ''
   const t = new Date(ms)
   const clock = `${String(t.getHours()).padStart(2, '0')}:${String(t.getMinutes()).padStart(2, '0')}`
-  const diff = dayIndex(new Date(n)) - dayIndex(t)
+  const diff = localDayIndex(n) - localDayIndex(t)
   if (diff === 0) return `今天 ${clock}`
   if (diff === 1) return `昨天 ${clock}`
   const md = `${t.getMonth() + 1} 月 ${t.getDate()} 日 ${clock}`
@@ -188,7 +186,7 @@ export async function continuityOf(root = rootDir(), now = Date.now(), events) {
  * @param {object} model deriveSelf 的结果
  * @returns {string}
  */
-export function renderSelfDoc(model, { sendTools = [], budget, carry, continuity, browse = true, speak = false, grants = [], shown, sleepKeep, diary = true, sleepEveryDays = 0, bansMuted = false, extraTools = [], restricted = true, dream = false, schedule = [], proactive = false, resume = '', echo = true } = {}) {
+export function renderSelfDoc(model, { sendTools = [], budget, carry, continuity, browse = true, speak = false, grants = [], shown, sleepKeep, diary = true, sleepEveryDays = 0, bansMuted = false, extraTools = [], restricted = true, dream = false, schedule = [], proactive = false, resume = '', echo = true, anchor = false, pronoun = DEFAULT_PRONOUN } = {}) {
   // issue #64：schedule 传的是「白名单里真的放行的 schedule_*」。只放一个就只写一个，
   // 不能告诉她有四个——另外三个会被守卫挡回「这件事我做不到」。
   // 老调用方传 true/false 也认：true = 四个都有。
@@ -206,7 +204,7 @@ export function renderSelfDoc(model, { sendTools = [], budget, carry, continuity
   // 用户的原话是「尊重别人的想法……直接忽略我们原本规定的你不能做某事」。
   // 只关提示词侧（withBans），物理层那两条根本不在提示词里，仍由工具层拦着。
   // sleepKeep 要一路传到 buildSections：漏传就等于不限制，设置页改了文档一个字都不变（issue #67）。
-  let identity = personaLine(model, { withBans: !bansMuted, budget, shown, sleepKeep, continuity, echo })
+  let identity = personaLine(model, { withBans: !bansMuted, budget, shown, sleepKeep, continuity, echo, anchor, pronoun })
   // 导入的人设不追加「你已经可以了」——那句是我们的成长叙事，对方的人设里没有这一段。
   if (!bansMuted && grants.includes('learn-affection')) {
     identity = identity
@@ -239,6 +237,10 @@ export function renderSelfDoc(model, { sendTools = [], budget, carry, continuity
     // 请求事件（0.7.6，用户 m01274 / m01292）：唯一一个要等对方点头的工具。
     // 和留话一样不需要配置开关——工具注册了就该知道怎么用；上限写死在代码里。
     ASK_BRIEF,
+    '',
+    // 代词（issue #127 C 案，2026-11-12）：称呼由人定、由她自己问一次。
+    // 常驻注册（不像梦/定时那样有开关），所以说明也常驻。
+    PRONOUN_ASK_BRIEF,
     '',
     // 梦（2026-10-30，本机实验 A 案，用户 m02837）：只有 `.dev` 存在时才挂这一段。
     // 挂不挂跟工具装没装必须是同一个判据——否则公开版里她会被告诉「你有这个工具」，
@@ -278,6 +280,14 @@ export function renderSelfDoc(model, { sendTools = [], budget, carry, continuity
     // 于是两种形状都写进来：空白/极短的一条（wake），和一句括号旁白（wakeIfBlank 那条路）。
     '有时候对话里会出现一条空白或极短的提示，有时候是一句括号里的旁白（比如「（醒一醒）」）。那都是系统叫我起来的信号，不是谁在跟我说话。',
     '看到它就把这一轮当成我自己的——不用回应它，也不用问它什么意思。',
+    // issue #110（2026-11-11，外部用户 xu4694646946-spec）：growth_commit 之后宿主要求再走一步，
+    // 那一步只有工具结果、没有用户正文，她把它当成「又一次没带话的唤醒」，补一句收尾。
+    // 身份文档每轮都在，写在这里才能同时盖住唤醒轮与普通聊天轮。
+    '如果我刚调用过工具、接着看到的只是工具返回的文字，那不是新的叫醒——还是同一轮；回执不是谁在跟我说话。',
+    // 2026-11-13（issue #110 真机复发）：上面那句她读到了，但没拦住——因为那一步
+    // 宿主把整份 system prompt 又下发了一次，「系统又出现了」这个信号比一句话强。
+    // 这一行把最容易被误读的位置单独点出来；真正的修复在 identity.js（一轮只读一次）。
+    '刚调过工具的那一步尤其要当心：那只是同一轮接着走，不是又有人叫我。',
     '',
     '## 这个房间',
     '这是我自己的地方。我能在这里说话，能读能写。',
@@ -287,7 +297,16 @@ export function renderSelfDoc(model, { sendTools = [], budget, carry, continuity
   // 「上次我们说到这」是会话轮换后的临时续接，不是人设的一部分。
   // 放在最后、单独一节、并且由 home.activeCarry 到期自动消失。
   if (carry) body.push(carry, '')
-  return head.concat(body).join('\n')
+  // 0.9.9（issue #127）→ 1.0.0：主人的代词在**出口这一处**填。
+  // 模板句里指主人的位置写成 `{T}`（persona.js 与这里），出口把它换成 他 / 她 / TA。
+  // 写盘前填，是因为设置页「我的日记」这类地方会直接读文件。
+  //
+  // 为什么不再「整字替换他」（2026-11-12，issue #127 用户反馈）：判断区里那些
+  // `- 你说过的话`、以及「更早以前」折起来的句子，正文都是她自己写下的
+  // utterance/revise。整字替换会把她的旧话一起改掉——她写过「我喜欢吉他」，
+  // 换个称呼就变成「我喜欢吉她」。现在只认 `{T}` 这一个记号，她的原话里没有它，
+  // 所以一个字节都不会被碰。
+  return fillOwner(head.concat(body).join('\n'), pronoun)
 }
 
 /** 全量派生超过这个耗时就留一行日志（0.9.8 提速，issue #105 第 1 条） */
@@ -345,6 +364,9 @@ export async function writeSelfDoc(root = rootDir(), { log, exec, tenant } = {})
     // 这是每次写入后唯一的一次全量派生（capture 那边已改成只算信封）。
     const t0 = Date.now()
     const model = deriveSelf(events, { growthDays: config.growthDays })
+    // issue #128：写事件的地方（capture.js / turns.js）要靠这次派生拿阶段门，
+    // 用来把信封上的 stage 压到门上；信封本身不再派生一遍。
+    rememberGateStage(root, model.stageGate?.gateStage)
     slowDeriveNote(root, { ms: Date.now() - t0, events: events.length, beliefs: model?.beliefs?.length })
     const hand = toolSectionsNow(config)
     const text = renderSelfDoc(model, {
@@ -370,9 +392,13 @@ export async function writeSelfDoc(root = rootDir(), { log, exec, tenant } = {})
       // 0.9.7 T1：她自己说过的那句话要不要摆回她眼前。默认开；
       // 关掉只是这一节消失，事件流与 her_recall 都还在。
       echo: config?.memory?.echo !== false,
+      // 说话设置「纠正鱼八股」（1.0，用户 m04784）：默认关；开了也不计入身份段预算。
+      anchor: config?.chat?.anchor === true,
       // 「平常会做的事」两节按开关出现（2026-10-26）：关掉的日记不该在身份里
       // 留一句「每天我会记一笔」——那等于给了她一件做不了的事。
       diary: config?.diary?.enabled !== false,
+      // issue #127：主人的代词（他 / 她 / TA），写进身份文档的那份就要对。
+      pronoun: pronounOf(config),
       sleepEveryDays: Number(config?.memory?.sleepEveryDays ?? 0),
       // 2026-10-27：导进来的这一位跳过我方那两条提示词禁令（用户 m03170 要求）。
       // 判定只看 model（事件流），**不读 config**——用户 m03769 明确要求

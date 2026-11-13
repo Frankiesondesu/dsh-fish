@@ -20,6 +20,7 @@ import { similarity } from './derive.js'
 import { noteRegisteredTool } from './toolreg.js'
 import { callerInRoot } from './tenant.js'
 import { setToolUseWrap } from './tool.js'
+import { fillOwner, fillOwnerDeep, primePronoun, pronounFor } from './pronoun.js'
 
 /** 一句话的上限：她在回忆里看到的是一条，不是一段。 */
 export const USE_LINE_MAX = 80
@@ -155,11 +156,28 @@ export async function recordUse(root, { tool, out, sessionId, now = Date.now() }
 export function withUse(def, { root, tool }) {
   const run = def?.execute
   if (typeof run !== 'function') return def
+  // 工具说明是注册期一次性交出去的（之后不会再求值），所以先按 root 把代词读进来：
+  // 模板里写的是 `{T}`，这里填成 他 / 她 / TA（1.0.0，issue #127 的彻底方案）。
+  primePronoun(root)
   // 按属性描述符复制，不用 `{ ...def }`：展开会把 getter 当场求值成死值。
   // bili_speak 的说明是 getter（随「能不能说话」现取），展开之后就定格在启动那一刻，
   // 之后开关怎么翻，她读到的说明都不变（issue #62 后续）。
   const props = Object.getOwnPropertyDescriptors(def)
   delete props.execute
+  // 说明与参数描述里的 `{T}` 也在这一层填：这是「注册期的一次性文本」，
+  // 填完就固定了；getter 说明则包一层，每次读都按当前配置填。
+  for (const key of ['description', 'brief']) {
+    const d = props[key]
+    if (!d) continue
+    if ('value' in d && typeof d.value === 'string') d.value = fillOwner(d.value, pronounFor(root))
+    else if (typeof d.get === 'function') {
+      const orig = d.get
+      d.get = () => fillOwner(orig.call(def), pronounFor(root))
+    }
+  }
+  if (props.parameters && 'value' in props.parameters) {
+    props.parameters.value = fillOwnerDeep(props.parameters.value, pronounFor(root))
+  }
   const wrapped = Object.create(Object.getPrototypeOf(def), props)
   async function execute(args, exec) {
     // 记录之前先问一句「这次调用是不是发生在这个家里」（2026-11-09 外部用户报告）：
@@ -168,7 +186,9 @@ export function withUse(def, { root, tool }) {
     // 出门 / 请神那条会话仍然算她（判据在 callerInRoot 里与 checkCaller 一致）。
     const own = callerInRoot(root, exec)
     try {
-      const out = await run(args, exec)
+      // 返回值里的 `{T}` 在这里填：卡片、便条回执、回忆正文都走这条出口。
+      // 只认这一个记号，所以返回值里她的原话、用户原话都不会被碰。
+      const out = fillOwnerDeep(await run(args, exec), pronounFor(root))
       if (own) await recordUse(root, { tool, out, sessionId: exec?.sessionId })
       return out
     } catch (err) {

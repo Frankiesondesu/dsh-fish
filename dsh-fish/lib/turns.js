@@ -57,15 +57,16 @@ import { parseWatchIntent, handText, extractBvids } from './intent.js'
 import { recordHandFromLink } from './hand.js'
 import { homeStatus, bumpTurns, rotateTalkSession, adoptTalkSession } from './home.js'
 import { shouldRotate, sessionSurfaceBytes } from './rotate.js'
-import { addExchange } from './talkmem.js'
+import { addExchange, amendLastExchange, recentExchanges } from './talkmem.js'
 import { logExchange } from './talklog.js'
 import { newHerEventsSince } from './inbox.js'
 import { HER_TYPES, normalizeScene } from './schema.js'
 import { refreshSelfDoc } from './selfdoc.js'
-import { growthDay, stageOf } from './derive.js'
+import { growthDay, stageOf, gatedStage, gateStageOf } from './derive.js'
 import { hearTurn, rememberGroupWord } from './hear.js'
 import { stripToolMarkup, hasToolMarkup } from './markup.js'
 import { stripTranscriptTail } from './transcript.js'
+import { stripEchoedStep } from './echo.js'
 import { clearWakeSectionFor } from './identity.js'
 import { isChannelSession } from './channels.js'
 
@@ -197,6 +198,19 @@ const MACHINE_KINDS = new Set([
  */
 const MACHINE_FORMS = new Set(['snapshot', 'notice', 'catalog', 'instructions', 'recall'])
 
+/**
+ * 宿主客户端里他亲手点出来、但 kind 不是 'user' 的两种消息（0.2.2-rc.2）：
+ *   - 'retry'：一轮失败后点「继续」。sessionController.prompt() 收到空 content 时
+ *     把来源写成 retry（正文是空的，rpcId 照带，clientTimeZone 可有可无）。
+ *   - 'user-question-reply'：答了一张 ask_user_question 的问题卡。来源只有
+ *     kind / callId / outcome，没有 rpcId，也没有时区。
+ *
+ * 两种在 classifyMessage 里都落到末尾的 'human'——在她自己的房间里这没错，
+ * 是他真的动了手。但它们和桌面打字一样，哪条会话里都会出现；别的会话里的
+ * 不该替她记「他来过」（见 onHuman 的 fromDeskClient）。
+ */
+const HOST_CLIENT_KINDS = new Set(['retry', 'user-question-reply'])
+
 /** 一条 user 消息最多记这么多字（talkmem 会再截到 160，这里只是别让整段注入进内存） */
 export const TURN_TEXT_MAX = 2000
 /** 一轮里连着打好几句时，最多合并这么多条 */
@@ -286,10 +300,15 @@ export function classifyMessage(data) {
   if (MACHINE_KINDS.has(kind) || kind.startsWith('plugin:')) return 'context'
   if (MACHINE_FORMS.has(src.form)) return 'context'
   const rid = String(src.rpcId ?? '')
-  if (rid && PLUGIN_RPC.test(rid)) return 'plugin'
   // 桥登记过这条 requestId 的来历，就按它说的算（2026-11-09，issue #96）。
   // 这一条必须排在「带 rpcId 就当人」前面：prompt() 送来的群聊和定时提醒
   // 也只有 rpcId 能认，不查登记就全被算成他本人。
+  //
+  // 2026-11-13（外部反馈：QQ 上说的话没进记忆）：还得排在**插件前缀**前面。
+  // 桥给群友的话用 `sys-` 开头做记号（下标在主人在场里那几个非主人场景），
+  // 而前缀表里恰好也有 `sys`（0.9.1 加进去挡宿主自己的机器回合）；先扫前缀
+  // 的话，桥前一步刚登记的 rpcId 永远轮不到，那条消息连一行日志都没有地消失。
+  // 登记是更窄的判据（只有桥自己报上来的 id 才在里面），所以先看它。
   const decl = rid ? declaredFor(rid) : null
   if (decl) {
     if (decl.machine) return 'plugin'
@@ -297,6 +316,7 @@ export function classifyMessage(data) {
     if (decl.scene === 'group') return decl.owner ? 'group-owner' : 'group'
     return 'human'
   }
+  if (rid && PLUGIN_RPC.test(rid)) return 'plugin'
   if (kind === 'user') {
     // 客户端（桌面/网页侧栏）打的字一定带时区——宿主从浏览器那边取的。
     // 桥走宿主 prompt 时不带时区，但每条都有 rpcId（宿主把 kind 写死成
@@ -466,11 +486,16 @@ export function registerTurns(ctx, deps = {}) {
    * 日志里那三条同一毫秒的 `seen:` 就是两个写者各写一遍。
    *
    * 这里和工具侧用同一道闸（tenant.js 的 guardWrite）：房主身份 ok===false 时
-   * 一句都不写。tenant 是**活引用**（占用权丢了会原地改写成 ok:false），
-   * 所以必须在每次写之前现查，不能在注册时查一次就完。
+   * 一句都不写。必须在每次写之前现查，不能在注册时查一次就完。
+   * deps.tenant 可以是对象（原地改写成 ok:false 的那种），也可以是返回当前对象的函数：
+   * index.js 丢占用权时是把 tenancy.tenant 整个换掉，所以它传的是函数。
    */
-  const tenant = deps.tenant ?? null
-  const writable = () => !(tenant && tenant.ok === false)
+  const tenantNow = typeof deps.tenant === 'function' ? deps.tenant : () => deps.tenant ?? null
+  const writable = () => {
+    let tenant = null
+    try { tenant = tenantNow() } catch { tenant = null }
+    return !(tenant && tenant.ok === false)
+  }
 
   /**
    * 同一份宿主上下文只挂一次。
@@ -484,6 +509,19 @@ export function registerTurns(ctx, deps = {}) {
 
   /** 正在等 turn/end 的那一轮：{ sessionId, msgs:[], sinceId, at } */
   let pending = null
+  /**
+   * 她家里刚结完账的那一轮人话：{ sessionId, me }。只给「继续」用（见 onHuman）。
+   *
+   * 宿主 0.2.2-rc.2：一轮因为限流、断流失败（turn/end 的 reason 是 error），
+   * 他可以点「继续」——宿主发来一条 kind 'retry'、正文为空的 user/message，
+   * 她在**新的一轮**里把话答完。失败的那一轮这边已经结过账了（turns +1、
+   * talk-recent 记了一轮、her 是空的），所以「继续」那一轮只补她说的话。
+   *
+   * 只认「这条会话里上一个 turn/end 就是我们结的那一轮人话」：中间隔了别的轮
+   * （叫醒、桥送来的群聊）就清掉，免得把她的话安到不相干的那一轮下面。
+   * 只在内存里：重启之后点「继续」，这边认不出来，照旧不记。
+   */
+  let lastSettled = null
   /** 正在异步认来源的那条人话（见 takeTurnEnd：事件跟得太紧时要等它） */
   let inflight = null
   /** 注销之后不再结账（在途的那一轮可能还没等到 turn/end） */
@@ -557,9 +595,29 @@ export function registerTurns(ctx, deps = {}) {
       // （home.js 的 rotateTalkSession 第 4 步），但**换会话那一刻已经在说话的人**
       // 不会因为新会话出现了就自动搬过去，所以这里必须认回来。
       //
-      // 判据宁窄勿宽：只认「home.json 记着的、刚被换下来的那条」（rotatedFrom）。
-      // 不认任意会话——认宽了等于谁在别处跟她说一句都能把她的家搬走。
-      if (!home.rotatedFrom || home.rotatedFrom !== sessionId) {
+      // 判据宁窄勿宽：只认「home.json 记着的那一对」——刚被换下来的那条
+      // （rotatedFrom）与这次轮换**建出来**的那条（rotatedTo）。不认任意会话：
+      // 认宽了等于谁在别处跟她说一句都能把她的家搬走。
+      //
+      // 2026-11-13（外部反馈：轮换后「家」停在旧会话，自动醒落回旧对话）：
+      // 换房那一刻他还在旧窗口里说话，下面那支会把家认回旧会话；之后他搬进
+      // 新会话聊了一整夜，却没有依据把家跟过去——新会话在插件眼里只是
+      // 「认识的会话之外的动静」，自动醒照着 home.json 叫回旧对话（383K tok 那条）。
+      // 现在轮换对称记下 rotatedTo：他在那条里说话，家就跟过去。
+      // 这条判据比 rotatedFrom 更窄——这个 id 只可能是轮换自己建的。
+      const isRotatedTo = Boolean(home.rotatedTo) && home.rotatedTo === sessionId
+      const isRotatedFrom = Boolean(home.rotatedFrom) && home.rotatedFrom === sessionId
+      if (isRotatedTo) {
+        // 不限时：这条会话是轮换替他开的新房间，他在里头说话，家在哪儿都是错的。
+        // 代价上限是「家搬进了一间本来就该住人的房」；这一对只在下次轮换时被换掉。
+        const ok = await adoptTalkSession(root, sessionId)
+        log(
+          ok
+            ? `turns · 他搬进轮换新开的那条会话里说话，屋子跟过去（${sessionId}）`
+            : `turns · 他搬进轮换新开的那条会话里说话，但屋子没跟过去（${sessionId}）`,
+        )
+        if (!ok) return
+      } else if (!isRotatedFrom) {
         // 2026-11-03（issue #18）：这不再是「什么都不做」。
         //
         // 外渠道（QQ 桥 / 别的桥）按我们的桥接约定**自己建 DSH 会话**（AGENTS.md §7），
@@ -583,8 +641,15 @@ export function registerTurns(ctx, deps = {}) {
         //   · 桥注入的消息（kind 不是 user，或没有 clientTimeZone）照旧算——
         //     QQ 私聊那条路不能断（issue #18），群聊与群友私聊在 classifyMessage
         //     那一步就已经挡掉了，走不到这里。
+        //
+        // 「客户端亲手发的」还有两种 kind 不是 'user'（HOST_CLIENT_KINDS）：失败后
+        // 点「继续」的 retry、问题卡的回答。原来它们被当成桥注入的，他在别的会话里
+        // 点一下「继续」或答一张卡，就在这里写了 seen（这一段在取正文之前，
+        // retry 的正文是空的也照写）。现在和桌面打字同一个口径。
         const src = data?.source ?? {}
-        const fromDeskClient = src.kind === 'user' && Boolean(src.clientTimeZone)
+        const srcKind = String(src.kind ?? '')
+        const fromDeskClient = (srcKind === 'user' && Boolean(src.clientTimeZone))
+          || HOST_CLIENT_KINDS.has(srcKind)
         if (fromDeskClient) {
           const herRoom = await isChannelSession(root, sessionId).catch(() => false)
           if (!herRoom) return
@@ -594,37 +659,50 @@ export function registerTurns(ctx, deps = {}) {
           log(`turns · 认识的会话之外的动静，只记他来过（${sessionId}）`)
         }
         return
-      }
-      // 认回也要看时候（2026-11-10，用户反馈「换会话又落回旧的老会话」）：
-      // `rotatedFrom` 会一直留到下一次轮换，不设窗口的话，他几天后翻回那条
-      // 「…之前」随口说一句，屋子就搬回去，`turns` 还是新会话的 0——
-      // 那条已经满 40 轮的会话等于又重新拿到一整段预算。
-      const rotatedAt = Date.parse(String(home.rotatedAt ?? ''))
-      const stillThere = Number(home.turns ?? 0) === 0
-        || (Number.isFinite(rotatedAt) && Date.now() - rotatedAt < ADOPT_WINDOW_MS)
-      if (!stillThere) {
-        if (Date.now() - lastSeenAt > 60_000) {
-          await markSeen()
-          log(`turns · 他回到换下来那条会话里说话，但屋子已经搬走了（${sessionId}）`)
+      } else {
+        // 认回也要看时候（2026-11-10，用户反馈「换会话又落回旧的老会话」）：
+        // `rotatedFrom` 会一直留到下一次轮换，不设窗口的话，他几天后翻回那条
+        // 「…之前」随口说一句，屋子就搬回去，`turns` 还是新会话的 0——
+        // 那条已经满 40 轮的会话等于又重新拿到一整段预算。
+        const rotatedAt = Date.parse(String(home.rotatedAt ?? ''))
+        const stillThere = Number(home.turns ?? 0) === 0
+          || (Number.isFinite(rotatedAt) && Date.now() - rotatedAt < ADOPT_WINDOW_MS)
+        if (!stillThere) {
+          if (Date.now() - lastSeenAt > 60_000) {
+            await markSeen()
+            log(`turns · 他回到换下来那条会话里说话，但屋子已经搬走了（${sessionId}）`)
+          }
+          return
         }
-        return
+        const ok = await adoptTalkSession(root, sessionId)
+        log(
+          ok
+            ? `turns · 他还在换下来那条会话里说话，屋子认回它（${sessionId}）`
+            : `turns · 他还在换下来那条会话里说话，但认不回来（${sessionId}）`,
+        )
+        if (!ok) return
       }
-      const ok = await adoptTalkSession(root, sessionId)
-      log(
-        ok
-          ? `turns · 他还在换下来那条会话里说话，屋子认回它（${sessionId}）`
-          : `turns · 他还在换下来那条会话里说话，但认不回来（${sessionId}）`,
-      )
-      if (!ok) return
     }
     const text = cut(stripChannelNote(messageText(data)))
-    if (!text) return
-    // fork.6（2026-11-01）曾在这里写 `seen:`（冷落检测 absence.js 的唯一依据）。
-    // v0.8.6 合并（2026-11-03）：上游 m01280 在**结账时**写了同一个标记，而且
-    // day/stage 用的是真实成长日、写失败会记日志——比这里的 day:0/stage:1 准。
-    // 两处都留会让「一轮只写一条」变成两条（test/turns.test.mjs 抓到了），
-    // 所以这里删掉，统一走上游那条（见本文件 onTurnEnd 里的 m01280 注释）。
-    // 唯一丢掉的场景：他发了消息但这一轮始终没结账——那种情况本来也没有"他来过"的结论。
+    if (!text) {
+      // 「继续」（kind 'retry'，正文是空的）：接着刚结账的那一轮，只收她这次说的话。
+      // 不写 seen——他那一句开头时已经写过，一轮一条；也不建新的一轮。
+      if (String(data?.source?.kind ?? '') !== 'retry') return
+      if (!lastSettled || lastSettled.sessionId !== sessionId) return
+      if (pending && pending.sessionId === sessionId) return
+      const { events } = await readEvents(root).catch(() => ({ events: [] }))
+      pending = {
+        sessionId,
+        msgs: [],
+        continuation: true,
+        me: lastSettled.me,
+        sinceId: events.length ? (events[events.length - 1].id ?? null) : null,
+        says: [],
+        sayIds: new Set(),
+        at: Date.now(),
+      }
+      return
+    }
     // 他递来一条视频（2026-10-28）：记一条事实 `hand:<日期> <bvid>`。
     // **不等于她看过**——评论闸门不认这一行，认的是 look:/watched:。
     // 只记 BV 号；短链在这一层不解析（要发网络请求，不该卡在她说话的路径上）。
@@ -641,6 +719,12 @@ export function registerTurns(ctx, deps = {}) {
       }
       // 短链要先解析成 BV 才知道是哪条。异步补记，不等它（见 hand.js）。
       recordHandFromLink(root, text)
+    }
+    if (pending && pending.sessionId === sessionId && pending.continuation) {
+      // 「继续」那一轮里他又开口了：这就是新的一轮人话，照常开头、照常结账。
+      // 她已经说出口的留在 says 里，一起算这一轮的。
+      await markSeen()
+      pending.continuation = false
     }
     if (!pending || pending.sessionId !== sessionId) {
       const { events } = await readEvents(root).catch(() => ({ events: [] }))
@@ -686,7 +770,19 @@ export function registerTurns(ctx, deps = {}) {
       //   ① events.jsonl 里 HER_TYPES —— 只有她主动调 growth_commit 才有，是「她认下来的话」；
       //   ② 这一轮 assistant/message 的 text 块 —— 她在侧栏里**实际说出口的**那些。
       // 少了 ②，talk-recent.json 的 her 永远是空串，换会话时她听不到自己上一段说过什么。
-      const spoken = (Array.isArray(p.says) ? p.says : []).join('\n\n').trim()
+      // 2026-11-11（issue #110 同源）：工具调用那一轮被宿主拆成两步，step 1 的正文
+      // 可能是空的（len=0，只有工具调用）；step 2 的模型不知道「这一步已经说过话」，
+      // 会把上下文里最近一段她自己的话当草稿重抄一遍（真机：上一轮整段 + 新内容）。
+      // 她不觉得自己在重复，所以只能在落盘前裁：与上一轮 her 或本 turn 已保留段
+      // 开头连续重合 ≥24 字就只留新增部分。见 lib/echo.js。
+      const recent = await recentExchanges(root, 1, 'desk').catch(() => [])
+      const previous = recent.map((r) => r.her).filter(Boolean)
+      const kept = []
+      for (const s of Array.isArray(p.says) ? p.says : []) {
+        const t = stripEchoedStep(s, [...previous, ...kept])
+        if (t) kept.push(t)
+      }
+      const spoken = kept.join('\n\n').trim()
       const committed = picked.map((e) => String(e.text ?? '').trim()).filter(Boolean).join('\n\n')
       const her = [spoken, committed].filter(Boolean).join('\n\n')
       const { config } = await loadConfig(root).catch(() => ({ config: null }))
@@ -694,6 +790,17 @@ export function registerTurns(ctx, deps = {}) {
       // 放在换会话判断之前：这一轮已经结完账，换不换会话都该记。
       // 用 after.events 算成长日——这时还没写 heard，差一天也不会差在这一条上。
       const day = growthDay(after.events)
+      // issue #128：信封上的阶段要压到阶段门上（否则卡在门上时写下的 stage 比
+      // model.stage 高，`stagePeak` 会把它当成「到过」）。门从最近一次派生拿；
+      // 这条进程还没派生过时退回 state.json 里的阶段——那同样是压过门的，
+      // 最多落后一次写入，方向是「宁可记低」，不会再抬高 stagePeak。
+      const growthDays = Number(config?.growthDays ?? 30)
+      let gate = gateStageOf(root)
+      if (gate === null) {
+        const st = await readState(root).catch(() => null)
+        gate = Number.isFinite(Number(st?.stage)) && Number(st?.stage) >= 1 ? Number(st.stage) : null
+      }
+      const stage = gatedStage(stageOf(day, growthDays), gate)
       // 「他来过」不在这儿写（2026-11-03 移走，见 markSeen）。
       //
       // 原来写在这里的理由是「这一轮确实聊完了才算他来过」。issue #18 证明这个口径
@@ -724,30 +831,36 @@ export function registerTurns(ctx, deps = {}) {
       for (const text of fresh) {
         await appendEvent(
           { type: 'utterance', text: cut(text), flags: ['uncommitted'] },
-          { day, stage: stageOf(day, Number(config?.growthDays ?? 30)), source: 'system' },
+          { day, stage, source: 'system' },
           root,
         ).catch((err) => log('turns · 她的话没记上', err?.message ?? err))
       }
-      await addExchange(root, { me: p.msgs.join('\n'), her }).catch(() => {})
+      if (p.continuation) {
+        // 「继续」那一轮：他没有再说话，不涨轮数、不旁听、不换会话。
+        // 只把她这次说的补进失败那一轮（上面的 utterance 已经照常写了）。
+        if (her) await amendLastExchange(root, { me: p.me, her }).catch(() => {})
+        return
+      }
+      const me = p.msgs.join('\n')
+      await addExchange(root, { me, her }).catch(() => {})
       // fork.11：侧栏里说的这些也进账本——不然她从 QQ 那条路能翻到对话，
       // 从侧栏说的就翻不到，两边的"过去"会不一样厚。
-      // （v0.8.6 合并：上游把 addExchange/bumpTurns 挪到了她原话补写之后，
-      //   logExchange 跟着挪；day/stage 用上面算好的，不再各算各的。）
       await logExchange(root, {
-        me: p.msgs.join('\n'),
+        me,
         her: spoken,
         day,
         stage: stageOf(day, Number(config?.growthDays ?? 30)),
       }).catch(() => {})
       const turns = await bumpTurns(root, 1)
+      lastSettled = { sessionId: p.sessionId, me }
       await hearTurn(root, {
-        text: p.msgs.join('\n'),
+        text: me,
         turns,
         // 记下的那句要带这条会话的 id（2026-11-08，用户 m01199）：出门/请神算「这一趟多了什么」
         // 时按会话过滤，没有 id 的条目会被当成这趟的东西。
         sessionId: p.sessionId,
         day,
-        stage: stageOf(day, Number(config?.growthDays ?? 30)),
+        stage,
         config,
         log,
       })
@@ -807,9 +920,13 @@ export function registerTurns(ctx, deps = {}) {
    */
   async function takeTurnEnd(sessionId) {
     if (!pending || pending.sessionId !== sessionId) {
-      if (!inflight) return
-      await inflight.catch(() => {})
-      if (!pending || pending.sessionId !== sessionId) return
+      if (inflight) await inflight.catch(() => {})
+      if (!pending || pending.sessionId !== sessionId) {
+        // 这条会话里结束的是别的一轮（叫醒、桥送来的群聊…）：之后的「继续」
+        // 续的是那一轮，不是我们结过账的那一轮人话。
+        if (lastSettled?.sessionId === sessionId) lastSettled = null
+        return
+      }
     }
     const p = pending
     pending = null

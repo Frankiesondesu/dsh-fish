@@ -244,6 +244,15 @@ test('来源判据：桥先登记过的那一轮，按登记走（issue #96）',
       classifyMessage({ source: { kind: 'user', rpcId: 'b-pg', scene: 'private', guest: true } }),
       'group',
     )
+    // 2026-11-13（外部反馈，QQ 真机）：桥给消息加的 rpcId 是 `sys-` 开头，而
+    // PLUGIN_RPC 里也有 sys（0.9.1 加进去挡宿主机器回合）。先扫前缀的话，桥前一步
+    // 刚登记的 rpcId 永远轮不到，那条消息连一行日志都没有地消失——既不算他来过，
+    // 也不进 heard。登记比前缀窄（只有桥自己报上来的 id 才在里面），所以先看登记。
+    assert.equal(classifyMessage({ source: { kind: 'user', rpcId: 'sys-qq-1' } }), 'plugin')
+    declareSource({ rpcId: 'sys-qq-1', scene: 'private' })
+    assert.equal(classifyMessage({ source: { kind: 'user', rpcId: 'sys-qq-1' } }), 'human')
+    declareSource({ rpcId: 'sys-qq-2', scene: 'group' })
+    assert.equal(classifyMessage({ source: { kind: 'user', rpcId: 'sys-qq-2' } }), 'group')
   } finally {
     clearDeclaredSources()
   }
@@ -827,6 +836,139 @@ test('桥登记过的房间（channels.json）里他说话，仍然算他来过'
   }
 })
 
+// 宿主 0.2.2-rc.2：客户端里他亲手点出来、但 kind 不是 'user' 的两种消息。
+// 形状照宿主源码手写（dsh-api-session-controller 的 prompt()：content 为空时
+// kind 写成 'retry'；dsh-user-questions 的 answer()：kind 'user-question-reply'）。
+/** 一轮失败后点「继续」：正文是空的 */
+function retryMsg(extra = {}) {
+  return {
+    type: 'user/message',
+    data: {
+      id: `m-${Math.random().toString(36).slice(2)}`,
+      role: 'user',
+      content: [],
+      source: { kind: 'retry', rpcId: 'rpc-retry-1', clientTimeZone: 'Asia/Shanghai', ...extra },
+    },
+  }
+}
+
+/** 答了一张问题卡：没有 rpcId，也没有时区 */
+function questionReplyMsg() {
+  return {
+    type: 'user/message',
+    data: {
+      id: `m-${Math.random().toString(36).slice(2)}`,
+      role: 'user',
+      content: [{
+        type: 'text',
+        text: JSON.stringify({ kind: 'answer_to_pending_question', tool: 'ask_user_question', callId: 'call-1' }),
+      }],
+      source: { kind: 'user-question-reply', callId: 'call-1', outcome: 'answered' },
+    },
+  }
+}
+
+const seenCount = async (root) => {
+  const { events } = await readEvents(root)
+  return events.filter((e) => e.type === 'meta' && String(e.text).startsWith('seen:')).length
+}
+
+// 别的会话里桌面打字从 2026-11-11 起不算「他来找过她」，但那个判断只认 kind 'user'。
+// 「继续」和问题卡的回答被当成桥注入的消息，在取正文之前就写了 seen：
+// 他在任何别的会话里点一下「继续」，她的冷落钟就清零。
+test('本机别的 DSH 会话里点「继续」（kind retry，空正文），不算他来找过她', async () => {
+  for (const [name, msg] of [
+    ['带时区', retryMsg()],
+    ['不带时区', retryMsg({ clientTimeZone: undefined })],
+  ]) {
+    const root = await tmpRoot()
+    try {
+      const { ctx } = fakeCtx()
+      const logs = []
+      const off = registerTurns(ctx, { root, log: (...a) => logs.push(a.join(' ')) })
+      try {
+        assert.equal(classifyMessage(msg.data), 'human', '判法没变：在她自己的房间里它仍是他动的手')
+        ctx.emit('session/event', session('s-other'), msg)
+        ctx.emit('session/event', session('s-other'), TURN_END)
+        await settled()
+        assert.equal(await seenCount(root), 0, `${name}：别的会话里点「继续」，不替她记「他来过」`)
+        assert.equal((await homeStatus(root)).turns, 0)
+        assert.deepEqual(logs, [], `${name}：也不打「只记他来过」那行日志`)
+      } finally {
+        off()
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 })
+    }
+  }
+})
+
+test('本机别的 DSH 会话里答一张问题卡（kind user-question-reply），不算他来找过她', async () => {
+  const root = await tmpRoot()
+  try {
+    const { ctx } = fakeCtx()
+    const off = registerTurns(ctx, { root, log: () => {} })
+    try {
+      ctx.emit('session/event', session('s-other'), questionReplyMsg())
+      ctx.emit('session/event', session('s-other'), TURN_END)
+      await settled()
+      assert.equal(await seenCount(root), 0, '别的会话里答卡，不替她记「他来过」')
+      assert.equal((await homeStatus(root)).turns, 0)
+    } finally {
+      off()
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 })
+  }
+})
+
+test('桥登记过的房间里点「继续」、答问题卡，仍然算他来过', async () => {
+  for (const make of [retryMsg, questionReplyMsg]) {
+    const root = await tmpRoot()
+    try {
+      await saveChannel(root, { channel: 'qq:dm:10001', scene: 'private', sessionId: 's-qq-room' })
+      const { ctx } = fakeCtx()
+      const off = registerTurns(ctx, { root, log: () => {} })
+      try {
+        ctx.emit('session/event', session('s-qq-room'), make())
+        ctx.emit('session/event', session('s-qq-room'), TURN_END)
+        await settled()
+        assert.equal(await seenCount(root), 1, '登记过的私聊房是她的房间，照旧')
+        assert.equal((await homeStatus(root)).turns, 0, '房间不是她的家，轮数照旧不涨')
+      } finally {
+        off()
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 })
+    }
+  }
+})
+
+test('她的家里：答问题卡照旧算一轮；点「继续」正文是空的，照旧不记', async () => {
+  const root = await tmpRoot()
+  try {
+    const { ctx } = fakeCtx()
+    const off = registerTurns(ctx, { root, log: () => {} })
+    try {
+      ctx.emit('session/event', session(), retryMsg())
+      ctx.emit('session/event', session(), TURN_END)
+      await settled()
+      assert.equal(await seenCount(root), 0, '空正文的「继续」在她家里本来就不写 seen')
+      assert.equal((await homeStatus(root)).turns, 0)
+
+      ctx.emit('session/event', session(), questionReplyMsg())
+      ctx.emit('session/event', session(), TURN_END)
+      await waitFor(async () => (await homeStatus(root)).turns === 1)
+      assert.equal(await seenCount(root), 1, '她家里答卡：他来过')
+      assert.equal((await homeStatus(root)).turns, 1, '也照旧涨一轮')
+    } finally {
+      off()
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 })
+  }
+})
+
 // 2026-11-03（github:ssamurias/dsh-fish#18）：QQ 桥之类外渠道注进来的消息，
 // source.kind 不是 'user'，原来第一道判据就当 context 吞掉——turns 恒为 1、
 // heard 只有一条、冷落检测到点就误记。判据改成机器黑名单后，这条路要真的通。
@@ -1139,6 +1281,7 @@ test('认回只认换下来那条，别的会话照样不记', async () => {
           createdAt: '2026-10-31T00:50:27.000Z',
           turns: 0,
           rotatedFrom: HER_SESSION,
+          rotatedTo: 's-new-1',
         },
         null,
         2,
@@ -1288,6 +1431,110 @@ test('换房 10 分钟以内，新会话用过轮也照样认回', async () => {
   }
 })
 
+// 2026-11-13（外部反馈：轮换后「家」停在旧会话，自动醒落回旧对话）。
+// 真机时间线：22:49:23 满 40 轮换房 → 22:49:35 他还在旧窗口说了一句，
+// 屋子按「换下来那条」认回旧会话 → 之后他在新房间里聊了一整夜，却没有任何
+// 逻辑把家跟过去；08:03 的自动醒照着 home.json 叫回那条 383K tok 的旧对话。
+// 修法：轮换时对称记下 rotatedTo，他在那条里说话家就跟过去。
+test('轮换后他先回旧窗口、随后搬进新会话 → 屋子跟到新会话（外部反馈 2026-11-13）', async () => {
+  const root = await tmpRoot()
+  try {
+    await writeCfg(root, { chat: { rotateAfter: 40 } })
+    await writeAtomic(
+      join(paths(root).root, 'home.json'),
+      JSON.stringify(
+        {
+          wsId: 'ws-1',
+          sessionId: 's-new-1',
+          createdAt: new Date(Date.now() - 60_000).toISOString(),
+          turns: 0,
+          rotatedFrom: HER_SESSION,
+          rotatedTo: 's-new-1',
+          rotatedAt: new Date(Date.now() - 60_000).toISOString(),
+          carry: '## 上次我们说到这\n- 旧话',
+        },
+        null,
+        2,
+      ),
+    )
+    const { ctx } = fakeCtx()
+    const off = registerTurns(ctx, { root, log: () => {} })
+    try {
+      // 第一步：换房 12 秒后他还在旧窗口里说了一句（这一步是设计如此：认回旧会话）
+      ctx.emit('session/event', session(HER_SESSION), humanMsg('下一个试试'))
+      ctx.emit('session/event', session(HER_SESSION), TURN_END)
+      const back = await waitFor(async () => {
+        const st = await homeStatus(root)
+        return st.sessionId === HER_SESSION && st.turns > 0 ? st : null
+      })
+      assert.equal(back.turns, 1)
+      let raw = JSON.parse(await readFile(join(paths(root).root, 'home.json'), 'utf8'))
+      assert.equal(raw.rotatedFrom, undefined, '认回旧窗口后不再记着它')
+      assert.equal(raw.rotatedTo, 's-new-1', 'rotatedTo 要留着——他可能还会搬过去')
+      assert.equal(raw.carry, undefined)
+
+      // 第二步：他换到轮换建出来的新房间里说话（真机上这段聊了一整夜）
+      ctx.emit('session/event', session('s-new-1'), humanMsg('我换到新房间了'))
+      ctx.emit('session/event', session('s-new-1'), TURN_END)
+      const moved = await waitFor(async () => {
+        const st = await homeStatus(root)
+        return st.sessionId === 's-new-1' && st.turns > 1 ? st : null
+      })
+      assert.equal(moved.turns, 2, '轮数接着数，不清零、也不白送')
+      raw = JSON.parse(await readFile(join(paths(root).root, 'home.json'), 'utf8'))
+      assert.equal(raw.sessionId, 's-new-1')
+      assert.ok(raw.adoptedAt, '搬过屋子要留 adoptedAt，观测台能看出是认回的')
+    } finally {
+      off()
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 })
+  }
+})
+
+// rotatedTo 和 rotatedFrom 不一样：这条会话本来就是轮换替他开的房，
+// 他在里头说话，家就该在哪儿——不存在「太晚了不认」的窗口。
+test('rotatedTo 那条隔多久说话都认，carry 也留着', async () => {
+  const root = await tmpRoot()
+  try {
+    await writeCfg(root, { chat: { rotateAfter: 40 } })
+    await writeAtomic(
+      join(paths(root).root, 'home.json'),
+      JSON.stringify(
+        {
+          wsId: 'ws-1',
+          sessionId: HER_SESSION,
+          createdAt: new Date(Date.now() - 3 * 60 * 60_000).toISOString(),
+          turns: 5,
+          rotatedTo: 's-new-1',
+          rotatedAt: new Date(Date.now() - 3 * 60 * 60_000).toISOString(),
+          carry: '## 上次我们说到这\n- 还没说完的话',
+        },
+        null,
+        2,
+      ),
+    )
+    const { ctx } = fakeCtx()
+    const off = registerTurns(ctx, { root, log: () => {} })
+    try {
+      ctx.emit('session/event', session('s-new-1'), humanMsg('三个钟头后我才搬过来'))
+      ctx.emit('session/event', session('s-new-1'), TURN_END)
+      const h = await waitFor(async () => {
+        const st = await homeStatus(root)
+        return st.turns > 5 ? st : null
+      })
+      assert.equal(h.sessionId, 's-new-1')
+      assert.equal(h.turns, 6)
+      const raw = JSON.parse(await readFile(join(paths(root).root, 'home.json'), 'utf8'))
+      assert.match(String(raw.carry ?? ''), /还没说完的话/, 'carry 是给这间新房间准备的，不能丢')
+    } finally {
+      off()
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 })
+  }
+})
+
 test('注销之后就不再记了', async () => {
   const root = await tmpRoot()
   try {
@@ -1352,6 +1599,33 @@ test('占用权是中途丢的：拿到的是活引用，丢了之后立刻停�
         events.filter((e) => e.type === 'meta' && String(e.text).startsWith('seen:')).length,
         0,
         '注册时是房主不算数，写的那一刻才算',
+      )
+    } finally {
+      off()
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 })
+  }
+})
+
+test('占用权丢的时候整个对象被换掉：tenant 传的是函数，换掉之后立刻停写', async () => {
+  const root = await tmpRoot()
+  try {
+    const { ctx } = fakeCtx()
+    // index.js 的写法：tenancy.tenant 丢的时候是换成一个新对象，不是原地改
+    const tenancy = { tenant: { ok: true, instanceId: 'inst-a', why: '' } }
+    const off = registerTurns(ctx, { root, tenant: () => tenancy.tenant, log: () => {} })
+    try {
+      tenancy.tenant = { ok: false, instanceId: 'inst-a', why: '这个家已经被另一个实例接管了，之后不再写入。' }
+
+      ctx.emit('session/event', session('s-qq'), humanMsg('丢了之后还说话'))
+      await settled()
+
+      const { events } = await readEvents(root)
+      assert.equal(
+        events.filter((e) => e.type === 'meta' && String(e.text).startsWith('seen:')).length,
+        0,
+        '注册时拿到的那个对象还是 ok:true，不能认它',
       )
     } finally {
       off()
@@ -1511,6 +1785,244 @@ test('真的超过一条事件的上限时才切开，每段都不超（issue #9
       assert.ok(rows.length > 1, '一条事件装不下，才切成几条')
       for (const r of rows) assert.ok(String(r.text).length <= TURN_TEXT_MAX, '每条都不超过上限')
       assert.equal(rows.map((r) => r.text).join('\n\n'), said, '切开之后拼回去还是原来那段')
+    } finally {
+      off()
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 })
+  }
+})
+
+// 宿主 0.2.2-rc.2 的「继续」，在她家里：一轮因为限流、断流失败（turn/end 的
+// reason 是 error）时这边照常结账——turns +1、talk-recent 记一轮、her 是空的。
+// 他点「继续」，宿主发来 kind 'retry'、正文为空的 user/message，她在新的一轮里
+// 才把话答上。原来空正文不建 pending，她这一轮说的话没人收：utterance 不写，
+// talk-recent 那一轮的 her 一直是空的，换会话时带过去的只有他那半句。
+const TURN_END_FAILED = {
+  type: 'turn/end',
+  data: { reason: { kind: 'error', error: { code: 'RATE_LIMIT' } } },
+}
+
+/**
+ * 等 onHuman 把一条消息收完。「继续」的正文是空的，收下它不写盘，没有东西可以
+ * waitFor；固定睡 80ms 在机器忙的时候不够（onHuman 里要读 home.json、读事件流）。
+ * 这里把同样的读盘多走几遍再睡一下：机器越忙，等得越久。
+ */
+async function landed(root) {
+  for (let i = 0; i < 25; i++) {
+    await homeStatus(root)
+    await readEvents(root)
+  }
+  await settled()
+}
+
+/**
+ * 等盘上的样子对上（结账是异步的）。两次读之间隔开一点：Windows 上读得太密，
+ * 那边改名落盘会被顶掉，而 bumpTurns / talkmem 写不上是不出声的。
+ */
+const waitSlow = (fn) =>
+  waitFor(async () => {
+    if (await fn()) return true
+    await new Promise((r) => setTimeout(r, 60))
+    return false
+  })
+const waitTurns = (root, n) => waitSlow(async () => (await homeStatus(root)).turns === n)
+const waitExchanges = (root, want) =>
+  waitSlow(async () => {
+    const got = (await recentExchanges(root)).map((r) => [r.me, r.her])
+    return JSON.stringify(got) === JSON.stringify(want)
+  })
+
+const utterances = async (root) => {
+  const { events } = await readEvents(root)
+  return events.filter((e) => e.type === 'utterance')
+}
+
+test('她家里一轮失败后点「继续」：她答的那句补进那一轮，轮数不再涨', async () => {
+  const root = await tmpRoot()
+  try {
+    await writeCfg(root, { chat: { rotateAfter: 40 } })
+    const { ctx } = fakeCtx()
+    const off = registerTurns(ctx, { root, log: () => {} })
+    try {
+      ctx.emit('session/event', session(), humanMsg('今天过得怎么样'))
+      await settled()
+      ctx.emit('session/event', session(), TURN_END_FAILED)
+      await waitTurns(root, 1)
+      assert.deepEqual(
+        (await recentExchanges(root)).map((r) => [r.me, r.her]),
+        [['今天过得怎么样', '']],
+        '失败的那一轮照旧结账，她那半边是空的',
+      )
+      const eventsBefore = (await readEvents(root)).events.length
+
+      ctx.emit('session/event', session(), retryMsg())
+      await landed(root)
+      ctx.emit('session/event', session(), herMsg([{ type: 'text', text: '挺好的，下午晒了会儿太阳。' }]))
+      ctx.emit('session/event', session(), TURN_END)
+      await waitFor(async () => (await utterances(root)).length === 1)
+      await waitExchanges(root, [['今天过得怎么样', '挺好的，下午晒了会儿太阳。']])
+      await settled()
+
+      const rows = await utterances(root)
+      assert.equal(rows[0].text, '挺好的，下午晒了会儿太阳。')
+      assert.deepEqual(rows[0].flags, ['uncommitted'], '和平常一轮一样，只留证')
+      assert.deepEqual(
+        (await recentExchanges(root)).map((r) => [r.me, r.her]),
+        [['今天过得怎么样', '挺好的，下午晒了会儿太阳。']],
+        '补进失败的那一轮，不新开一轮',
+      )
+      assert.equal((await homeStatus(root)).turns, 1, '他没有再说话，轮数不涨')
+      assert.equal(await seenCount(root), 1, '一轮一条 seen，「继续」不再写一条')
+      assert.equal(
+        (await readEvents(root)).events.length,
+        eventsBefore + 1,
+        '「继续」那一轮只多她那一条 utterance（不旁听、不写别的）',
+      )
+    } finally {
+      off()
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 })
+  }
+})
+
+test('失败前她已经说出口半句：「继续」之后的话接在后面', async () => {
+  const root = await tmpRoot()
+  try {
+    await writeCfg(root, { chat: { rotateAfter: 40 } })
+    const { ctx } = fakeCtx()
+    const off = registerTurns(ctx, { root, log: () => {} })
+    try {
+      ctx.emit('session/event', session(), humanMsg('讲讲那本书'))
+      await waitFor(async () => (await seenCount(root)) === 1)
+      await settled()
+      ctx.emit('session/event', session(), herMsg([{ type: 'text', text: '它前半本写得慢，' }]))
+      ctx.emit('session/event', session(), TURN_END_FAILED)
+      await waitTurns(root, 1)
+
+      ctx.emit('session/event', session(), retryMsg())
+      await landed(root)
+      ctx.emit('session/event', session(), herMsg([{ type: 'text', text: '后半本才好看。' }]))
+      ctx.emit('session/event', session(), TURN_END)
+      await waitFor(async () => (await utterances(root)).length === 2)
+      await waitExchanges(root, [['讲讲那本书', '它前半本写得慢， 后半本才好看。']])
+
+      assert.deepEqual(
+        (await recentExchanges(root)).map((r) => [r.me, r.her]),
+        [['讲讲那本书', '它前半本写得慢， 后半本才好看。']],
+      )
+      assert.deepEqual((await utterances(root)).map((e) => e.text), ['它前半本写得慢，', '后半本才好看。'])
+      assert.equal((await homeStatus(root)).turns, 1)
+    } finally {
+      off()
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 })
+  }
+})
+
+test('「继续」又失败、再点一次才答上：仍然补进同一轮', async () => {
+  const root = await tmpRoot()
+  try {
+    await writeCfg(root, { chat: { rotateAfter: 40 } })
+    const { ctx } = fakeCtx()
+    const off = registerTurns(ctx, { root, log: () => {} })
+    try {
+      ctx.emit('session/event', session(), humanMsg('在吗'))
+      await settled()
+      ctx.emit('session/event', session(), TURN_END_FAILED)
+      await waitTurns(root, 1)
+
+      ctx.emit('session/event', session(), retryMsg())
+      await landed(root)
+      ctx.emit('session/event', session(), TURN_END_FAILED)
+      await landed(root)
+      assert.deepEqual((await recentExchanges(root)).map((r) => [r.me, r.her]), [['在吗', '']])
+
+      ctx.emit('session/event', session(), retryMsg())
+      await landed(root)
+      ctx.emit('session/event', session(), herMsg([{ type: 'text', text: '在。' }]))
+      ctx.emit('session/event', session(), TURN_END)
+      await waitFor(async () => (await utterances(root)).length === 1)
+      await waitExchanges(root, [['在吗', '在。']])
+
+      assert.deepEqual((await recentExchanges(root)).map((r) => [r.me, r.her]), [['在吗', '在。']])
+      assert.equal((await homeStatus(root)).turns, 1)
+      assert.equal(await seenCount(root), 1)
+    } finally {
+      off()
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 })
+  }
+})
+
+test('中间隔了别的一轮（叫醒）再来的「继续」：不认，不把她的话安到上一轮人话下面', async () => {
+  const root = await tmpRoot()
+  try {
+    await writeCfg(root, { chat: { rotateAfter: 40 } })
+    const { ctx } = fakeCtx()
+    const off = registerTurns(ctx, { root, log: () => {} })
+    try {
+      ctx.emit('session/event', session(), humanMsg('今天过得怎么样'))
+      await settled()
+      ctx.emit('session/event', session(), TURN_END_FAILED)
+      await waitTurns(root, 1)
+
+      // 她自己醒的一轮，也失败了
+      ctx.emit('session/event', session(), pluginMsg(' '))
+      ctx.emit('session/event', session(), TURN_END_FAILED)
+      await landed(root)
+
+      ctx.emit('session/event', session(), retryMsg())
+      await landed(root)
+      ctx.emit('session/event', session(), herMsg([{ type: 'text', text: '醒了，看了看窗外。' }]))
+      ctx.emit('session/event', session(), TURN_END)
+      await landed(root)
+
+      assert.deepEqual(
+        (await recentExchanges(root)).map((r) => [r.me, r.her]),
+        [['今天过得怎么样', '']],
+        '续的是叫醒那一轮，和他那句没关系',
+      )
+      assert.equal((await utterances(root)).length, 0, '和叫醒轮一样不记')
+      assert.equal((await homeStatus(root)).turns, 1)
+    } finally {
+      off()
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 })
+  }
+})
+
+test('「继续」那一轮里他又开口：算新的一轮，照常结账', async () => {
+  const root = await tmpRoot()
+  try {
+    await writeCfg(root, { chat: { rotateAfter: 40 } })
+    const { ctx } = fakeCtx()
+    const off = registerTurns(ctx, { root, log: () => {} })
+    try {
+      ctx.emit('session/event', session(), humanMsg('今天过得怎么样'))
+      await settled()
+      ctx.emit('session/event', session(), TURN_END_FAILED)
+      await waitTurns(root, 1)
+
+      ctx.emit('session/event', session(), retryMsg())
+      await landed(root)
+      ctx.emit('session/event', session(), humanMsg('算了，先说说晚饭'))
+      await waitFor(async () => (await seenCount(root)) === 2)
+      await settled()
+      ctx.emit('session/event', session(), herMsg([{ type: 'text', text: '晚饭想吃面。' }]))
+      ctx.emit('session/event', session(), TURN_END)
+      await waitTurns(root, 2)
+
+      assert.deepEqual(
+        (await recentExchanges(root)).map((r) => [r.me, r.her]),
+        [['今天过得怎么样', ''], ['算了，先说说晚饭', '晚饭想吃面。']],
+      )
+      assert.equal(await seenCount(root), 2, '他又开了一次口')
+      assert.equal((await utterances(root)).length, 1)
     } finally {
       off()
     }

@@ -105,8 +105,10 @@ export async function writeDream(root, { text = '', refs = [], sessionId = '', l
   // fork.27：走分钟桶缓存（语义与现算一致，同一本账本同一分钟只算一次）。
   const model = deriveSelfCached(events, { growthDays: config.growthDays })
 
+  // 一天一条按成长日算（从 seed 的钟点起每 24 小时一格），和本地日期对不齐：
+  // 本地已经换了日期、成长日还没翻时也会走到这里，所以这句不说「今天」，说是第几天。
   if (dreamOn(events, model.day).length) {
-    return { ok: false, id: '', note: '今天已经记过一条梦了。' }
+    return { ok: false, id: '', note: `第 ${model.day} 天已经记过一条梦了。` }
   }
 
   const byId = new Map(events.map((e) => [e.id, e]))

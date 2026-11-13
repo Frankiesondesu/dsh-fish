@@ -32,6 +32,7 @@ import {
   SLEEP_BRIEF,
 } from '../lib/persona.js'
 import { LOOK_BRIEF } from '../lib/browse.js'
+import { PRONOUN_ASK_BRIEF } from '../lib/pronounask.js'
 import { SCENE_TOOLS } from '../lib/toolreg.js'
 import { renderSelfDoc } from '../lib/selfdoc.js'
 import { deriveSelf } from '../lib/derive.js'
@@ -78,7 +79,9 @@ test('说明书的字数：长不等于有用', () => {
   // fork：上限 2400→2450。TOOL_BRIEF 里 bili_zoom 的处境句（fork.35，她的原话需求）
   // 比上游口径多 7 字；不为凑上游的数删真话。其余各段未动。
   // 0.9.8 的 her_diary 按词找加了一段（+29 字），压掉重复措辞后回到 2450 以内。
-  assert.ok(total <= 2450, `全部说明书合计 ${total} 字，超过 2450 就该想想是不是又在写产品手册`)
+  // 合入上游 1.0.0 之后，工具简报多了 bili_sub / 折叠找回等几段真话，合计 2558 字；
+  // 上限挪到 2600，不为凑上游的数删真话（fork 一贯口径）。
+  assert.ok(total <= 2600, `全部说明书合计 ${total} 字，超过 2600 就该想想是不是又在写产品手册`)
   assert.ok(NOTE_BRIEF.length <= 240, `her_note 的说明书 ${NOTE_BRIEF.length} 字，太长了`)
 })
 
@@ -121,11 +124,13 @@ const MAP = [
   ['growth_commit', TOOL_BRIEF, /有一句话想留下/],
   ['bili_watch', TOOL_BRIEF, /画面里到底是什么/],
   ['bili_zoom', TOOL_BRIEF, /画面太小、字看不清/],
+  ['bili_sub', TOOL_BRIEF, /到底说了哪几句/],
   ['her_recall', RECALL_BRIEF, /我记得有一次/],
   ['her_leave', LETTER_BRIEF, /什么时候想起它/],
   ['her_note', NOTE_BRIEF, /老在同一个地方绕/],
   ['her_appoint', APPOINT_BRIEF, /什么时候想起它/],
   ['ask_owner', ASK_BRIEF, /什么时候想起它/],
+  ['ask_pronoun', PRONOUN_ASK_BRIEF, /什么时候想起它/],
   ['her_dream', DREAM_BRIEF, /什么时候想起它/],
   // fork 的 her_say 说明书重写过了（按行拆条、refs 可选）：处境句是
   // 「没人找你，你自己想说」，不是上游的字面「什么时候想起它」。

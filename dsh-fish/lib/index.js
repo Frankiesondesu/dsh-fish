@@ -24,6 +24,7 @@ import { registerWatch } from './watch.js'
 import { registerZoom } from './zoom.js'
 import { registerHerOpen } from './herfile.js'
 import { registerLocalWatch } from './localwatch.js'
+import { registerSub } from './sub.js'
 import { registerLetter } from './letter.js'
 import { registerNote } from './note.js'
 import { registerAppoint } from './appoint.js'
@@ -37,6 +38,7 @@ import { registerWorld } from './world.js'
 import { registerDraw } from './draw.js'
 import { registerFormula } from './formula.js'
 import { registerSpace } from './space.js'
+import { registerPronounAsk } from './pronounask.js'
 import { answerCard } from './cardanswer.js'
 import { registerDream } from './dream.js'
 import { registerProactive } from './proactive.js'
@@ -47,7 +49,8 @@ import { bootstrapHome, homeStatus, wakeIfBlank } from './home.js'
 import { ensurePocketOrder, findPocketWorkspace } from './pocket.js'
 import { noteRoot } from './homes.js'
 import { writeSelfDoc } from './selfdoc.js'
-import { claimRoot, beatRoot, releaseRoot, HEARTBEAT_MS } from './tenant.js'
+import { claimRoot, beatRootState, releaseRoot, HEARTBEAT_MS } from './tenant.js'
+import { rootMovedAway } from './move.js'
 import { registerToolRestrict } from './restrict.js'
 import { registerSkillCatalogGuard } from './skillcatalog.js'
 // `clearWakeSection` 在 dispose 里用：它挂在 system prompt 段上，是个模块级变量，
@@ -67,7 +70,7 @@ export const name = 'dsh-fish'
  * 版本号，必须和 package.json 的 version 一样（test/boot.test.mjs 盯着）。
  * 不只是日志：升级自检和设置页的「检查更新」拿它当「正在跑的版本」。
  */
-export const VERSION = '0.9.8'
+export const VERSION = '1.0.0'
 
 // ⚠️ 一个数组写全，不要拆成对象
 // 2026-10-30（m02961）：`userQuestions` **不再写进 inject**。写进 inject 的东西缺一个，
@@ -162,20 +165,60 @@ export function apply(ctx, baseConfig = {}) {
         logger.error(`[dsh-fish] ${claim.why}`)
       } else if (claim.instanceId) {
         const id = claim.instanceId
-        heartbeat = setInterval(() => {
-          beating = beatRoot(root, id)
-            .then((still) => {
-              if (still === false && tenancy.tenant.ok !== false) {
-                // 续不上 = 家被别人接管了。从此不再写，也不再抢回来（否则两边来回覆盖）。
-                tenancy.tenant = {
-                  ok: false,
-                  instanceId: id,
-                  why: '这个家已经被另一个实例接管了，之后不再写入。',
-                }
-                logger.warn('[dsh-fish] 占用权丢了，停止写入')
-              }
-            })
+        const bootAt = Date.now()
+        const lose = (why) => {
+          // 从此不再写，也不再抢回来（否则两边来回覆盖）。
+          tenancy.tenant = { ok: false, instanceId: id, why: '这个家已经被另一个实例接管了，之后不再写入。' }
+          logger.warn(`[dsh-fish] 占用权丢了，停止写入（${why}）`)
+        }
+        // 一拍心跳。只有文件里明写着别的实例才算丢；这一次没读成、没写成（别的进程正开着
+        // 那个文件、读到写了一半的）什么都不改，下一拍再看——以前这里一次 false 就永久只读，
+        // 要重启 DSH 才回得来。声明文件没了或是空的（重开一局、从备份恢复都会把它带走）
+        // 就用同一个 instanceId 重新占；真有别人活着占着，claimRoot 会照实拒绝。
+        const beatOnce = async () => {
+          if (stopped || tenancy.tenant.ok === false) return
+          const beat = await beatRootState(root, id)
+          if (stopped || tenancy.tenant.ok === false) return
+          if (beat.state === 'lost') return lose(`声明里是 ${beat.owner}`)
+          if (beat.state !== 'vacant') return
+          // 声明不在了，也可能是数据目录刚被迁走（老目录改名封存，声明跟着走了）。那就不能重新占：
+          // 占上以后她的写工具照样回成功，写下的东西留在老位置，重启后走指针去新位置就看不到了。
+          // 和以前一样从这一拍起停写，等重启。指针这一次没读成就下一拍再看，不猜。
+          const gone = await rootMovedAway(root, { since: bootAt })
+          if (stopped || tenancy.tenant.ok === false) return
+          if (gone.state === 'unknown') return
+          if (gone.state === 'moved') {
+            tenancy.tenant = { ok: false, instanceId: id, why: '数据文件夹已经搬到了新位置，重启 DSH 之前这边不再写入。' }
+            logger.warn('[dsh-fish] 数据目录已经迁走，停止写入，等重启')
+            return
+          }
+          const again = await claimRoot(root, { version: VERSION, instanceId: id, bootAt })
+          if (stopped || tenancy.tenant.ok === false) return
+          if (!again.ok) return lose(`声明没了，重新占时发现 ${again.owner?.instanceId ?? '别的实例'} 占着`)
+          logger.info('[dsh-fish] 占用声明不在了，已经重新写上')
+        }
+        let inFlight = 0
+        const pulse = () => {
+          inFlight++
+          beating = Promise.resolve(beating)
+            .then(beatOnce)
             .catch(() => {})
+            .finally(() => { inFlight-- })
+          return beating
+        }
+        // 重开一局、从备份恢复之后由设置页那两条路当场调一次，不等下一拍
+        tenancy.reclaim = pulse
+        // 那两条路要把整个数据目录改名搬走。Windows 上目录里只要有一个文件开着就搬不动（EPERM），
+        // 而一拍心跳会在里面建锁、写临时文件、改名：把搬的那一下排进同一条链，和心跳错开。
+        tenancy.quiet = (fn) => {
+          inFlight++
+          const run = Promise.resolve(beating).catch(() => {}).then(fn)
+          beating = run.catch(() => {}).finally(() => { inFlight-- })
+          return run
+        }
+        heartbeat = setInterval(() => {
+          // 上一拍还没回来（盘卡住了）就不再排，免得越积越多
+          if (inFlight === 0) pulse()
         }, HEARTBEAT_MS)
         heartbeat.unref?.()
       }
@@ -381,7 +424,9 @@ export function apply(ctx, baseConfig = {}) {
     try {
       // 2026-11-06（外部日志）：被占用的实例也在写 `seen:`。轮数观察者现在是写盘方，
       // 必须拿到活着的房主身份——占用权丢了（心跳续不上）会当场改成 ok:false。
-      const off = registerTurns(ctx, { root, tenant: tenancy.tenant, log: (...a) => logger.info(...a) })
+      // 传函数不传对象：丢的时候 tenancy.tenant 是整个换成新对象，按当时的对象传下去的话
+      // 观察者手里那份永远是 ok:true。
+      const off = registerTurns(ctx, { root, tenant: () => tenancy.tenant, log: (...a) => logger.info(...a) })
       if (typeof off === 'function') disposers.push(off)
     } catch (err) {
       logger.warn('[dsh-fish] 轮数观察没挂上', err?.message ?? err)
@@ -424,6 +469,9 @@ export function apply(ctx, baseConfig = {}) {
           () => registerHerOpen(ctx, { root }),
           // 2026-11-06：他直接递过来的本地视频，走同一条 vs 管线（input 换成本地路径）。
           () => registerLocalWatch(ctx, { root, tenant: tenancy }),
+          // 1.0（用户 m04014）：字幕按句给，不按篇给。她想知道"里面说了哪几句"
+          // 的时候自己去查；不自动喂，一次最多三句。
+          () => registerSub(ctx, { root, tenant: tenancy }),
           // R4：留话（不审批）。和 growth_commit 一样是纯追加，但收件人明确。
           () => registerLetter(ctx, { root, tenant: tenancy }),
           // issue #22 乙档（2026-11-04）：醒来看的那张便条。**常驻注册**，不像梦与主动说话那样要 .dev。
@@ -455,6 +503,10 @@ export function apply(ctx, baseConfig = {}) {
           // 他在卡片上点了可以）。永久文件夹：只存文字，跨重启跨会话都在，不进账本。
           () => registerSpace(ctx, { root, tenant: tenancy }),
           // 0.8.1 起（2026-10-30 m02837）：梦 A 案——醒来记一句。0.9.0 起公开（不再挂 .dev）。
+          // issue #127 C 案（2026-11-12）：不知道怎么称呼主人时，她自己问一次
+          // （他 / 她 / TA）。点谁由人决定，写配置由插件做——她写不了 config。
+          () => registerPronounAsk(ctx, { root, tenant: tenancy }),
+          // 0.8.1 起（2026-10-30 m02837）：梦 A 案——醒来记一句。0.9.0 起公开。
           () => registerDream(ctx, { root, tenant: tenancy }),
           // 0.8.1 起（2026-10-30 m04610）：主动说话。guardWrite 要的是 tenancy。
           () => registerProactive(ctx, { root, tenant: tenancy, log: (...a) => logger.info(...a) }),

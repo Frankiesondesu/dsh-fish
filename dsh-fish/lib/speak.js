@@ -20,6 +20,7 @@ import { rootDir, readEvents, readOwner } from './store.js'
 import { loadConfig, biliOn } from './settings.js'
 import { postComment, postReply } from './comment.js'
 import { screenOutgoing } from './guard.js'
+import { recordGuard } from './guardlog.js'
 import { mentionPrefix } from './owner.js'
 
 import { defineTool } from './tool.js'
@@ -41,7 +42,11 @@ export async function speakOnce(o = {}) {
     // 一律不发。宁可少说一句，也不把家里钥匙贴到评论区。
     const screened = screenOutgoing(text)
     // 拦下的理由不细说：告诉她"你泄露了路径"等于教会她下次换个写法。
-    if (!screened.ok) return { ok: false, said: '', note: screened.why === 'leak' ? '这句里有不该说出去的东西。' : '这句先不说了。' }
+    if (!screened.ok) {
+      // 拦下了一次外出（0.9.9 S-A）：只记「有一次」，被拦的那句不落盘。
+      await recordGuard(root, 'secret')
+      return { ok: false, said: '', note: screened.why === 'leak' ? '这句里有不该说出去的东西。' : '这句先不说了。' }
+    }
 
     // 给她的话加个称呼：只有评论加，回复别人时不加——那会把别人的楼变成你们的客厅。
     // @ 前缀单独交给 postComment，在脱敏之后拼；否则昵称和主人称呼同名时，
@@ -80,7 +85,7 @@ function softReason(why) {
   // 仍然不泄露配额与开关——这里说的全是「现在是什么状态、下一步怎么走」。
   if (w.includes('没看')) {
     const how = '要打开这一条：bili_look（what 填 video，bvid 填它），或者 bili_watch 直接看画面。翻了别的、搜了别的，都不算这一条。'
-    return w.includes('递过来') ? `这条是他递过来的，你还没打开过。${how}` : `这一条你今天还没打开过。${how}`
+    return w.includes('递过来') ? `这条是{T}递过来的，你还没打开过。${how}` : `这一条你今天还没打开过。${how}`
   }
   if (w.includes('登录') || w.includes('cookie')) return '说不出去，缺了点什么。'
   if (w.includes('拦')) return '说了但没送到，等一下再说。'

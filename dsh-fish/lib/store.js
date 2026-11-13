@@ -16,10 +16,10 @@
 
 import { randomBytes } from 'node:crypto'
 import { promises as fs } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { cleanText } from './clip.js'
 import { validateEvent, EVENT_SCHEMA_VERSION } from './schema.js'
-import { defaultRoot, readLocationSync } from './locate.js'
+import { defaultRoot, readLocationSync, movedTo, MOVED_NOTE } from './locate.js'
 import { logLine } from './log.js'
 
 /**
@@ -108,6 +108,38 @@ export async function writeAtomic(file, text, mode) {
       }
     }
   }
+}
+
+/**
+ * 按文件排队的「读整份 → 改一项 → 写回去」。
+ *
+ * writeAtomic 只保证盘上那份不是半截；两次读-改-写并发时，两边读到的是同一份
+ * 旧快照，后落盘的那份照样把先落盘的整个盖掉，而两边都回 ok、没有任何痕迹。
+ * home.json（home.js 的 mutateHome）和 channels.json（channels.js）早就各有一条
+ * 进程内的 promise 链；便条、约定、最近几轮对话、排队的交接句、config.json、
+ * 当天的日记以前没有，这里给它们一条共用的：同一个文件的 fn 一个接一个跑，
+ * 不同文件互不等待。
+ *
+ * 用法：把「读 + 改 + 写」整段放进 fn。fn 抛错只让这一次调用失败，不堵后面的。
+ * **fn 里不要再对同一个文件调 mutateJson**（会等自己，永远不返回）。
+ * 只管进程内；跨进程仍然只有 withFileLock 那几处。
+ */
+const jsonQueues = new Map()
+
+function queueKey(file) {
+  const p = resolve(String(file))
+  return process.platform === 'win32' ? p.toLowerCase() : p
+}
+
+export function mutateJson(file, fn) {
+  const key = queueKey(file)
+  const prev = jsonQueues.get(key) ?? Promise.resolve()
+  const run = prev.then(fn, fn)
+  const tail = run.then(() => {}, () => {})
+  jsonQueues.set(key, tail)
+  // 排空了就把这一项拿掉：日记一天一个文件名，不清的话 Map 只增不减。
+  tail.then(() => { if (jsonQueues.get(key) === tail) jsonQueues.delete(key) })
+  return run
 }
 
 // issue #38：手改过的 JSON 常带 UTF-8 BOM（PowerShell 5.1 的
@@ -238,11 +270,52 @@ export async function readEvents(root = rootDir()) {
 }
 
 /**
+ * 往事件流末尾写一行。文件不以换行结尾时（上次写到一半进程没了、盘满、被截断、
+ * 手改时删掉了末尾换行）先补一个换行，和这一行一起一次写进去：只追加，不改已有的字。
+ *
+ * 不补的话新行会粘在上一行后面：appendEvent 照常返回带 id 的事件，readEvents 却读不回来
+ * （和那半行一起算进 skipped）；上一行本身完整、只是缺换行时，连它也一起读不出来。
+ * 以前只有出门 / 请神的结算标记（observe.js）在写之前补，这里是唯一写入口，放在这里才全。
+ *
+ * 每次都看，不在进程里记「上次是我写的」：还原备份、导入、别的进程都可能在两次写之间
+ * 换掉这个文件。用同一个句柄看最后一个字节，比直接 appendFile 多一次 fstat 加一次 1 字节的读。
+ */
+async function appendLine(file, line, root) {
+  const fh = await fs.open(file, 'a+')
+  let glued = false
+  try {
+    const { size } = await fh.stat()
+    if (size > 0) {
+      const last = Buffer.alloc(1)
+      const { bytesRead } = await fh.read(last, 0, 1, size - 1)
+      glued = bytesRead === 1 && last[0] !== 0x0a
+    }
+    await fh.appendFile((glued ? '\n' : '') + line + '\n', 'utf8')
+  } finally {
+    await fh.close()
+  }
+  if (glued) logLine('warn', ['事件流末尾不是换行（上一行可能没写完），先补了一个换行再写'], root)
+}
+
+/**
  * 追加一条事件。唯一写入口。
  * @param {object} raw 未校验的事件
  * @param {object} ctx { day, stage, source }
  */
 export async function appendEvent(raw, ctx = {}, root = rootDir()) {
+  // 迁移写完指针之后、重启之前：这个 root 已经搬走了（老目录改名封存）。
+  // 以前这里照写——ensureDir 把老位置重新建出来，写出一份只有新事件的 events.jsonl，
+  // 重启后走指针去新位置，这几条就丢了。现在直接拒：没写成要让调用方知道。
+  if (movedTo(root)) {
+    logLine('warn', [
+      '事件没写（数据目录已经迁走，等重启）：',
+      `type=${String(raw?.type ?? '') || '?'}`,
+      `source=${String(ctx?.source ?? '?')}`,
+    ], root)
+    const err = new Error(MOVED_NOTE)
+    err.code = 'EFISHMOVED'
+    throw err
+  }
   // 2026-10-27（0.5.8）：把「已有事件的 id 集合」交给校验器，让 refs 能真的查到。
   //
   // 只在写 revise / narration 时才去读一遍全量事件流——这两类才带 refs 义务，
@@ -277,7 +350,7 @@ export async function appendEvent(raw, ctx = {}, root = rootDir()) {
   const p = paths(root)
   await ensureDir(p.root)
   try {
-    await fs.appendFile(p.events, JSON.stringify(ev) + '\n', 'utf8')
+    await appendLine(p.events, JSON.stringify(ev), root)
     // fork.26：账本变了，缓存立刻作废——下次读重新解析，绝不返回旧账本。
     eventsCache.delete(root)
   } catch (err) {
@@ -377,14 +450,20 @@ export async function writeDaily(dirName, dateKey, text, root = rootDir()) {
   const dir = paths(root)[dirName]
   const file = join(dir, `${dateKey}.md`)
   if (dirName === 'diaryDir') {
-    const prev = await readDaily(dirName, dateKey, root).catch(() => null)
-    if (prev !== null) {
-      const old = String(prev).replace(/\r\n/g, '\n').trimEnd()
-      const body = String(text).replace(/\r\n/g, '\n').trim()
-      if (old === body) return file
-      await writeAtomic(file, `${old}${DAILY_JOIN}${body}\n`)
+    // 「读旧稿 → 接一段 → 写回」排队：同一天的两次写并发时，以前后写的那段
+    // 接在它读到的旧稿后面，把先写的那段盖掉。
+    return mutateJson(file, async () => {
+      const prev = await readDaily(dirName, dateKey, root).catch(() => null)
+      if (prev !== null) {
+        const old = String(prev).replace(/\r\n/g, '\n').trimEnd()
+        const body = String(text).replace(/\r\n/g, '\n').trim()
+        if (old === body) return file
+        await writeAtomic(file, `${old}${DAILY_JOIN}${body}\n`)
+        return file
+      }
+      await writeAtomic(file, text)
       return file
-    }
+    })
   }
   await writeAtomic(file, text)
   return file

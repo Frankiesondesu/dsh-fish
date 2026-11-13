@@ -263,6 +263,13 @@ test('搬运段在身份文档末尾，且不挤掉黑名单', () => {
   for (const ban of HARD_BANS) assert.ok(doc.includes(ban))
 })
 
+test('身份文档说清：工具调用后的续写不是新的叫醒（issue #110）', () => {
+  const doc = renderSelfDoc(model(), { carry: '' })
+  assert.match(doc, /调用过工具/)
+  assert.match(doc, /不是新的叫醒/)
+  assert.match(doc, /回执不是谁在跟我说话/)
+})
+
 // ---------------------------------------------------------------- 回忆工具
 
 test('中文查询会切二字片段（否则整句匹配全落空）', () => {
@@ -336,6 +343,85 @@ test('回忆 brief 档：只报开头，但条数与 id 一个不少（2026-11-0
   assert.ok(!txt.includes('你翻到的：'))
   // 老口径不受影响
   assert.ok(renderRecall(full.rows).startsWith('你翻到的：'))
+})
+
+// ------------------------------------------------- issue #133（2026-11-12）
+
+test('issue #133：watched: 翻得到，而且读得出来是「看过画面」', () => {
+  const now = Date.now()
+  const events = [
+    { id: 'e1', type: 'utterance', ts: new Date(now - DAY).toISOString(), text: '示例标题这条卡了两下，没拿到画面。' },
+    { id: 'e2', type: 'meta', ts: new Date(now - DAY).toISOString(), text: 'watched:2026-11-06 BV1xx411c7mD {"title":"示例标题","duration":784}' },
+    { id: 'e3', type: 'utterance', ts: new Date(now).toISOString(), text: '能看了。取到的四帧都清楚。' },
+  ]
+  const { rows } = searchEvents(events, '示例标题', { now })
+  const txt = renderRecall(rows)
+  assert.ok(txt.includes('你那天看过画面：《示例标题》'), '唯一凭证不能翻不到')
+  assert.ok(rows.some((r) => r.id === 'e2'))
+})
+
+test('issue #133：look: 与没带标题的老 looked: 也翻得到，读得出来是「点开过」', () => {
+  const now = Date.now()
+  const events = [
+    { id: 'l1', type: 'meta', ts: new Date(now - DAY).toISOString(), text: 'look:2026-11-06 BV1xx411c7mD {"title":"点开过的","up":"某UP"}' },
+    { id: 'l2', type: 'meta', ts: new Date(now - 2 * DAY).toISOString(), text: 'looked:BV1yy411c7mD' },
+  ]
+  const txt = renderRecall(searchEvents(events, '点开过的', { now }).rows)
+  assert.ok(txt.includes('你那天点开过：《点开过的》'))
+  // 老事件只有编号：照实说没记下标题，不要编一个，也不要把编号藏成「看过」
+  const bare = renderRecall(searchEvents(events, 'BV1yy411c7mD', { now }).rows)
+  assert.ok(bare.includes('你那天看过（BV1yy411c7mD，当时没记下标题）'))
+})
+
+test('issue #133：brief 档先翻成人话再截断，标题不会被 JSON 截坏', () => {
+  const now = Date.now()
+  const events = [
+    { id: 'b1', type: 'meta', ts: new Date(now - DAY).toISOString(), text: 'look:2026-11-06 BV1xx411c7mD {"title":"点开过的","up":"某UP","duration":784,"view":12000,"desc":"很长很长的一段说明"}' },
+  ]
+  const { rows } = searchEvents(events, '点开过的', { now, snippet: RECALL_BRIEF_SNIPPET })
+  // 40 字里塞不下整段 JSON：先截再翻会只剩一个 BV 号，翻到等于没翻
+  assert.ok(rows[0].text.includes('点开过：《点开过的》'), `brief 档也要认得出是哪一条：${rows[0].text}`)
+})
+
+test('issue #133：同一天同一条视频只摆一行，留「看过画面」那份', () => {
+  const now = Date.now()
+  const at = new Date(now - DAY).toISOString()
+  const events = [
+    { id: 'a', type: 'meta', ts: at, text: 'looked:BV1xx411c7mD 看见过的' },
+    { id: 'b', type: 'meta', ts: at, text: 'look:2026-11-06 BV1xx411c7mD {"title":"点开过的"}' },
+    { id: 'c', type: 'meta', ts: at, text: 'watched:2026-11-06 BV1xx411c7mD {"title":"看见过的"}' },
+  ]
+  const { rows } = searchEvents(events, '看见过的 点开过的 BV1xx411c7mD', { now })
+  assert.equal(rows.length, 1, '三行是同一条视频，不是三件事')
+  assert.equal(rows[0].id, 'c')
+  assert.ok(renderRecall(rows).includes('你那天看过画面'))
+})
+
+test('issue #133：截断了就说这不是全部，别让「没翻到」被读成「没有」', () => {
+  const now = Date.now()
+  const events = Array.from({ length: 12 }, (_, i) => ({
+    id: `n${i}`, type: 'utterance', ts: new Date(now - i * DAY).toISOString(), text: `评论 ${i}`,
+  }))
+  const r = searchEvents(events, '评论', { now })
+  assert.equal(r.rows.length, RECALL_LIMIT)
+  assert.equal(r.truncated, true)
+  assert.ok(r.total > RECALL_LIMIT)
+  const txt = renderRecall(r.rows, { truncated: r.truncated })
+  assert.ok(txt.includes('这不是全部'))
+  assert.ok(txt.includes('别把这份当成全集'))
+  // 没截断时不多嘴
+  const few = searchEvents(events.slice(0, 3), '评论', { now })
+  assert.equal(few.truncated, false)
+  assert.ok(!renderRecall(few.rows, { truncated: few.truncated }).includes('这不是全部'))
+})
+
+test('issue #133：划掉的便条在回忆里读成「你那天做完」，不是一句空回执', () => {
+  const now = Date.now()
+  const events = [
+    { id: 'u', type: 'meta', ts: new Date(now - DAY).toISOString(), text: 'use:her_note ok 已划掉：交水费' },
+  ]
+  const txt = renderRecall(searchEvents(events, '水费', { now }).rows)
+  assert.ok(txt.includes('你那天做完：交水费'))
 })
 
 // ------------------------------------------------- 0.8.9 人格连续（m00998）
@@ -568,11 +654,19 @@ test('rotateAfter=0 表示永不换会话', () => {
   assert.equal(normalizeConfig({ chat: { rotateAfter: 0 } }).chat.rotateAfter, 0)
 })
 
-test('「想一想」的提示词不要求她总结人生', () => {
+test('睡前卡：没素材不问，有素材只问一句，不要求她总结人生', () => {
+  // 1.0（用户 m01648）：不再固定问三个尺度——问哪一句跟着这段时间的素材走。
+  assert.equal(sleepPrompt(model({ beliefs: [] }), { question: { kind: 'none', ask: '' } }), '')
   const p = sleepPrompt(model({ beliefs: [{ id: 'b', text: '判断' }] }))
-  assert.match(p, /这一周/)
+  assert.match(p, /停下来，想一想/)
+  assert.match(p, /这阵子/)
   assert.match(p, /不要总结/)
-  assert.match(p, /narration/)
+  assert.match(p, /我没想清楚/)
+  // 一张卡只问一句：三问并排的老写法不能再回来。
+  assert.doesNotMatch(p, /哪一句话，是你现在还会想起来的/)
+  assert.doesNotMatch(p, /哪一点变了/)
+  // 0.9.9（S-B）：做法常驻在身份文档的 SLEEP_BRIEF，卡上不再派活。
+  assert.doesNotMatch(p, /narration/)
 })
 
 // ---- personaBudget：用量口径必须是「字」不是「字节」（第 11 个静默 bug） ----
@@ -840,4 +934,62 @@ test('回忆：字面命中相同时，昨天的先于三个月前的（只在�
   ]
   assert.equal(searchEvents(events, '评论', { now, weigh: false }).rows[0].id, 'new', '不加权：只按新旧')
   assert.equal(searchEvents(events, '评论', { now }).rows[0].id, 'new')
+})
+
+// ---------------------------------------------------------------- issue #133 之后：按时间翻（2026-11-12）
+
+test('回忆：不给关键词就按时间摆最近的（用户 m00497）', () => {
+  const now = Date.now()
+  const at = (d) => new Date(now - d * DAY).toISOString()
+  const events = [
+    { id: 'a', type: 'utterance', ts: at(3), text: '三天前说的' },
+    { id: 'b', type: 'utterance', ts: at(1), text: '昨天说的' },
+    { id: 'c', type: 'utterance', ts: at(2), text: '前天说的' },
+  ]
+  const out = searchEvents(events, '', { now })
+  assert.equal(out.timeline, true, '空 query 走时间线')
+  assert.deepEqual(out.rows.map((r) => r.id), ['b', 'c', 'a'], '从近到远，不打分')
+  // 给了词还是原来的路：相关度优先，不许被时间线串了味。
+  assert.equal(searchEvents(events, '前天', { now }).timeline, false)
+})
+
+test('回忆：时间线也认 days 与 kind', () => {
+  const now = Date.now()
+  const at = (d) => new Date(now - d * DAY).toISOString()
+  const events = [
+    { id: 'a', type: 'utterance', ts: at(9), text: '很久以前说的' },
+    { id: 'b', type: 'utterance', ts: at(1), text: '昨天说的' },
+    { id: 'c', type: 'revise', ts: at(2), text: '前天改的口' },
+  ]
+  assert.deepEqual(searchEvents(events, '', { now, days: 3 }).rows.map((r) => r.id), ['b', 'c'])
+  assert.deepEqual(searchEvents(events, '', { now, kind: 'revise' }).rows.map((r) => r.id), ['c'])
+})
+
+test('回忆：时间线的头和截断说「最近」，不冒充「最相关」', () => {
+  const now = Date.now()
+  const events = Array.from({ length: 12 }, (_, i) => ({
+    id: `u${i}`, type: 'utterance', ts: new Date(now - i * DAY).toISOString(), text: `第${i}句`,
+  }))
+  const out = searchEvents(events, '', { now })
+  const text = renderRecall(out.rows, { timeline: out.timeline, total: out.total, truncated: out.truncated })
+  assert.match(text, /最近这些（从近到远摆的）/)
+  assert.match(text, /只摆了最近的几条/)
+
+  const kw = searchEvents(events, '第', { now })
+  const kwText = renderRecall(kw.rows, { total: kw.total, truncated: kw.truncated })
+  assert.match(kwText, /你翻到的/)
+  assert.match(kwText, /只摆了最相关的几条/)
+})
+
+test('「更早以前」折的时候带上日期，能按日期翻回去（用户 m00497）', () => {
+  const beliefs = [0, 1, 2, 3].map((i) => ({
+    id: `b${i}`, text: `判断编号${i}`, since: new Date(2026, 10, 1 + i, 12).toISOString(),
+  }))
+  const line = foldOlderBeliefs(beliefs, 1)
+  assert.match(line, /判断编号1」（11-02）/, '折行里要带那条判断的日期')
+  // 身份文档里要说明怎么走回去：原文在事件流里，id 由 her_recall 给。
+  const text = personaLine(model({ beliefs }), { budget: 4000 })
+  const seg = text.slice(text.indexOf('## 更早以前'))
+  assert.match(seg, /her_recall/)
+  assert.match(seg, /按日期或原话/)
 })

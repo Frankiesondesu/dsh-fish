@@ -27,6 +27,7 @@ import { logLine } from './log.js'
 import { tsMs, HER_TYPES } from './schema.js'
 import { deriveSelf } from './derive.js'
 import { toolArrived } from './wish.js'
+import { fillOwner } from './pronoun.js'
 
 /** 一天的默认上限。 */
 export const PROACTIVE_DEFAULTS = Object.freeze({
@@ -438,7 +439,7 @@ export function looseEnds(events = [], { now = Date.now(), has = null } = {}) {
     if (!Number.isFinite(ts) || now - ts > days * 86_400_000) continue
     const text = String(e.text ?? '').trim()
     if (!text) continue
-    const tail = verdict === 'later' ? '（他说以后再说）' : verdict === 'approve' ? '（他答应了，还没见到）' : '，还没有得到答复。'
+    const tail = verdict === 'later' ? '（{T}说以后再说）' : verdict === 'approve' ? '（{T}答应了，还没见到）' : '，还没有得到答复。'
     out.push({ id: e.id, kind: 'ask', text: `你问过「${text}」${tail}` })
   }
   return out.slice(0, 3)
@@ -455,7 +456,7 @@ export function proactiveSection({ now = Date.now(), state = {}, material = [], 
   const idle = Number.isFinite(state.idleHours) ? `${state.idleHours.toFixed(1)} 小时` : '很久'
   const lines = [
     '（现在没有人跟你说话。这一轮不是谁找你，也不是日程安排的醒；是你自己醒着，想不想开口由你。）',
-    `现在是 ${at.getFullYear()}-${String(at.getMonth() + 1).padStart(2, '0')}-${String(at.getDate()).padStart(2, '0')} ${hh}:${mm}；距离上一次${countSeen ? '他来或你留下记录' : '留下记录'}已经 ${idle}。`,
+    `现在是 ${at.getFullYear()}-${String(at.getMonth() + 1).padStart(2, '0')}-${String(at.getDate()).padStart(2, '0')} ${hh}:${mm}；距离上一次${countSeen ? '{T}来或你留下记录' : '留下记录'}已经 ${idle}。`,
   ]
   if (material.length) {
     lines.push('最近这几天你写下/听见的（要引用就指回 id，别改写事实）：')
@@ -497,7 +498,7 @@ export function proactiveSection({ now = Date.now(), state = {}, material = [], 
     )
   }
 
-  return lines.join('\n')
+  return fillOwner(lines.join('\n'))
 }
 
 /** 事件流里有没有这个 id，且能不能当材料。 */

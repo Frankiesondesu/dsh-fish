@@ -3,6 +3,9 @@
  *
  * 真的抽帧要联网 + 开 ffmpeg，这里不测；测的是她会踩到的那几条边界：
  * 开关关着、给的不是视频号、额度用完。
+ *
+ * 走到 grabFrames 的用例一律注入假客户端和假的 ffmpeg 探测结果（registerWatch 的
+ * deps.client / deps.ffmpeg），一条请求都不发、一个子进程都不开。
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'

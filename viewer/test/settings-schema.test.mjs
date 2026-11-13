@@ -88,6 +88,9 @@ test('DEFAULTS 里用户可调的叶子键都在 SETTINGS 里（防上游加了�
   const INTERNAL = new Set([
     'notify.lastShown', 'comment.lastScanAt', 'ui.ownerHintDismissed',
     'observe.enabled', 'observe.port',
+    // 上游 1.0：代词不是「人格旋钮」，只从 config.json / /config 接口写；
+    // 这两项是 @ 扫描的内部时间戳，运行时状态，不做成开关。
+    'owner.pronoun', 'at.lastScanAt', 'at.backoffUntil',
   ])
   const keys = new Set(SETTINGS.map((s) => s.key))
   const missing = []

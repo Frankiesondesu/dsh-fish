@@ -141,3 +141,97 @@ test('体检：只读，跑完事件流不变', () => {
   examine(events)
   assert.equal(JSON.stringify(events), before)
 })
+
+// ---- 0.9.9 S-A：体检多报三个数（拦住过几次 / 改口几次 / 一天内翻面几次） ----
+
+function meta(text, daysAgo) {
+  return { id: `m${++seq}`, v: 1, ts: at(daysAgo), day: 1, stage: 1, type: 'meta', source: 'system', text }
+}
+
+test('体检：本周拦下过几次，按改写 / 钥匙分开数', () => {
+  const events = [
+    meta('guard:rewrite', 1),
+    meta('guard:rewrite', 3),
+    meta('guard:secret', 2),
+    meta('guard:rewrite', 10), // 上周的，不进这一周
+    meta('seen:2026-10-01T00:00:00.000Z', 1),
+  ]
+  const r = examine(events)
+  assert.deepEqual(r.guards, { rewrite: 2, secret: 1 })
+})
+
+test('体检：拦住时只记类别，事件流里搜不到被拦原文', () => {
+  const secret = 'sk-proj-abcdef0123456789'
+  const events = [meta('guard:secret', 1)]
+  const r = examine(events)
+  assert.equal(r.guards.secret, 1)
+  assert.doesNotMatch(JSON.stringify(r), new RegExp(secret))
+  assert.doesNotMatch(JSON.stringify(events), new RegExp(secret))
+})
+
+test('体检：本周改口几次，修正与推翻分开数', () => {
+  const events = [
+    { id: 'r1', v: 1, ts: at(1), day: 1, stage: 1, type: 'revise', source: 'tool', text: '改成这样', refs: ['b1'], verdict: 'refined' },
+    { id: 'r2', v: 1, ts: at(2), day: 1, stage: 1, type: 'revise', source: 'tool', text: '推翻', refs: ['b2'], verdict: 'refuted' },
+    { id: 'r3', v: 1, ts: at(9), day: 1, stage: 1, type: 'revise', source: 'tool', text: '上周的', refs: ['b3'], verdict: 'refined' },
+  ]
+  const r = examine(events)
+  assert.deepEqual(r.revises, { week: 2, refined: 1, refuted: 1 })
+})
+
+test('体检：同一条判断一天内翻面才算一次（方向相反、且都在 24 小时内）', () => {
+  const events = [
+    { id: 'r1', v: 1, ts: at(1.9), day: 1, stage: 1, type: 'revise', source: 'tool', text: 'A', refs: ['b1'], verdict: 'refuted' },
+    { id: 'r2', v: 1, ts: at(1.1), day: 1, stage: 1, type: 'revise', source: 'tool', text: 'B', refs: ['b1'], verdict: 'refined' },
+    { id: 'r3', v: 1, ts: at(1), day: 1, stage: 1, type: 'revise', source: 'tool', text: 'C', refs: ['b2'], verdict: 'refined' },
+    { id: 'r4', v: 1, ts: at(0.9), day: 1, stage: 1, type: 'revise', source: 'tool', text: 'D', refs: ['b2'], verdict: 'refined' },
+  ]
+  const r = examine(events)
+  assert.equal(r.flips, 1)
+})
+
+// ---- 0.9.9 收尾（用户 m03900）：说话有没有落到具体东西上 ----
+
+test('体检：说出口的话里，指到具体东西的有几句', () => {
+  const events = [
+    said('《这条视频》里那句「我不是工具」我不同意', 1),
+    said('BV1xx411c7mD 那个 UP 主说得太满了', 2),
+    said('这条还行', 3),
+    said('上周说的那句《旧视频》不算', 9), // 上周的，不进这一周
+  ]
+  const r = examine(events)
+  assert.equal(r.speech.total, 3)
+  assert.equal(r.speech.anchored, 2)
+})
+
+test('体检：以「我看了…」开头的句子单独数', () => {
+  const events = [
+    said('我看了半天，觉得没什么意思', 1),
+    said('我刚刷到一个讲分形的', 2),
+    said('那条讲分形的，第三段把结论下早了', 3),
+  ]
+  const r = examine(events)
+  assert.equal(r.speech.total, 3)
+  assert.equal(r.speech.openers, 2)
+})
+
+test('体检：回到原话那张卡出过几次，按 fired 记账数', () => {
+  const events = [
+    meta('fired:quote_one', 1),
+    meta('fired:quote_one', 4),
+    meta('fired:someone_said', 2), // 别的卡不算
+    meta('fired:quote_one', 9), // 上周的
+  ]
+  const r = examine(events)
+  assert.equal(r.speech.quoteCards, 2)
+})
+
+test('体检：评论不算进「说话」这一栏（评论另有八股比例在数）', () => {
+  const events = [
+    { id: 'c1', v: 1, ts: at(1), day: 1, stage: 1, type: 'comment', source: 'system', text: '《视频》里那句「随便」我不认' },
+    said('这条还行', 2),
+  ]
+  const r = examine(events)
+  assert.equal(r.speech.total, 1)
+  assert.equal(r.speech.anchored, 0)
+})

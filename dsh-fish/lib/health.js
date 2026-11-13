@@ -13,6 +13,8 @@
  */
 
 import { deriveSelfCached } from './derive.js'
+import { deriveSelf } from './derive.js'
+import { parseGuardLine } from './guardlog.js'
 
 const DAY_MS = 86_400_000
 
@@ -45,6 +47,129 @@ export const SELF_CLAIM_TYPES = Object.freeze(['narration', 'diary'])
 function tsOf(ev) {
   const t = Date.parse(String(ev?.ts ?? ''))
   return Number.isFinite(t) ? t : 0
+}
+
+/** 一周的窗口（S-A 的三个数都按这个窗口算，和睡前卡的「这一周」同尺度）。 */
+const WEEK_MS = 7 * DAY_MS
+/** 「一天内翻面」里那个「一天」。 */
+const FLIP_WINDOW_MS = DAY_MS
+
+/**
+ * 拦住过几次（0.9.9 S-A）。只数 `meta` 里 `guard:rewrite` / `guard:secret` 的条数，
+ * 被拦的原文**不在事件流里**，所以这里也不可能把它读出来。
+ */
+function guardCounts(list, from) {
+  const out = { rewrite: 0, secret: 0 }
+  for (const ev of list) {
+    if (String(ev?.type ?? '') !== 'meta') continue
+    const kind = parseGuardLine(ev?.text) // 与写入口同一处口径（lib/guardlog.js）
+    if (!kind) continue
+    const at = tsOf(ev)
+    if (at && at < from) continue
+    out[kind] += 1
+  }
+  return out
+}
+
+/** 改口几次，以及是「修正」还是「推翻」（S-A）。 */
+function reviseStats(list, from) {
+  const out = { week: 0, refined: 0, refuted: 0 }
+  for (const ev of list) {
+    if (String(ev?.type ?? '') !== 'revise') continue
+    const at = tsOf(ev)
+    if (at && at < from) continue
+    out.week += 1
+    if (ev?.verdict === 'refuted') out.refuted += 1
+    else if (ev?.verdict === 'refined') out.refined += 1
+  }
+  return out
+}
+
+/**
+ * 一天内翻面（S-A）：同一条旧判断在 24 小时内被改了两次、且两次方向相反。
+ * 这是「认知突变」里唯一能用纯计数抓到的一类——不判断对错，只数次数。
+ */
+function flipCount(list, from) {
+  const byTarget = new Map()
+  for (const ev of list) {
+    if (String(ev?.type ?? '') !== 'revise') continue
+    const at = tsOf(ev)
+    if (!at || at < from) continue
+    const target = Array.isArray(ev?.refs) ? String(ev.refs[0] ?? '') : ''
+    if (!target) continue
+    const verdict = ev?.verdict === 'refuted' ? 'refuted' : ev?.verdict === 'refined' ? 'refined' : ''
+    if (!verdict) continue
+    if (!byTarget.has(target)) byTarget.set(target, [])
+    byTarget.get(target).push({ at, verdict })
+  }
+  let flips = 0
+  for (const rows of byTarget.values()) {
+    rows.sort((a, b) => a.at - b.at)
+    for (let i = 1; i < rows.length; i++) {
+      if (rows[i].at - rows[i - 1].at <= FLIP_WINDOW_MS && rows[i].verdict !== rows[i - 1].verdict) flips += 1
+    }
+  }
+  return flips
+}
+
+/**
+ * 八股比例（0.9.9 g7）：最近一周，她说的**短句**里有多少是那几句固定措辞。
+ *
+ * 为什么限定短句（≤40 字）：长句里的「确实」「有道理」是正常用词，
+ * 混进来会把分析性的话也算成八股，数字就没有意义了。八股的特征是
+ * 「一整句只说了一句放哪都对的话」，所以只数短句。
+ * 两个通道分开数：聊天里的 utterance、评论区真正发出去的 comment。
+ */
+export const STOCK_MAX_CHARS = 40
+export const STOCK_RE = /这条我认|我记下了|我记住了|本鱼最喜欢|最喜欢这句|这句话我记住|行，?这人我认|我认了|收到，?我认|确实|有道理|说得对/
+
+function stockStats(list, from) {
+  const out = { chat: { hit: 0, total: 0 }, comment: { hit: 0, total: 0 } }
+  for (const ev of list) {
+    const type = String(ev?.type ?? '')
+    const bucket = type === 'utterance' ? out.chat : type === 'comment' ? out.comment : null
+    if (!bucket) continue
+    const at = tsOf(ev)
+    if (at && at < from) continue
+    const text = String(ev?.text ?? '').trim()
+    if (!text) continue
+    bucket.total += 1
+    if (text.length <= STOCK_MAX_CHARS && STOCK_RE.test(text)) bucket.hit += 1
+  }
+  return out
+}
+
+/**
+ * 说话有没有落到具体东西上（0.9.9 收尾，用户 m03900）。
+ *
+ * 这三个数不是为了打分，是为了回答一个很具体的问题：她说的那句话，
+ * 换一条视频还成立吗？句子里出现书名号、引号里的原话、或 BV 号，
+ * 就当我们能找到「她指的是哪一条、哪一句」；只出现「我看了」「有道理」
+ * 这类，就找不到。
+ *
+ * 只数聊天里的 utterance，不数评论（评论另有八股比例在数）。
+ */
+export const ANCHOR_RE = /《[^》]{2,}|「[^」]{4,}|BV[0-9A-Za-z]{10}/
+/** 以「我看了…」开头：先说自己干了什么，而不是先说看到了什么、怎么想。 */
+export const OPENER_RE = /^(我看了|我刚看|刚看了|我刷到|我刚刷|我划到|今天看了|今天刷到)/
+
+function speechStats(list, from) {
+  const out = { total: 0, anchored: 0, openers: 0, quoteCards: 0 }
+  for (const ev of list) {
+    const at = tsOf(ev)
+    if (at && at < from) continue
+    const type = String(ev?.type ?? '')
+    if (type === 'utterance') {
+      const text = String(ev?.text ?? '').trim()
+      if (!text) continue
+      out.total += 1
+      if (ANCHOR_RE.test(text)) out.anchored += 1
+      if (OPENER_RE.test(text)) out.openers += 1
+    } else if (type === 'meta' && String(ev?.text ?? '').trim() === 'fired:quote_one') {
+      out.quoteCards += 1
+    }
+  }
+  return out
 }
 
 /** 同一句话被说过几次时，事件流里会有几条判断——报告里只列一条，免得读起来像复读。 */
@@ -83,11 +208,17 @@ export function examine(events = [], { now = Date.now(), growthDays = 30, staleD
   const first = stamps.length ? Math.min(...stamps) : now
   const days = Math.max(0, Math.ceil((now - first) / DAY_MS))
 
+  const weekFrom = now - WEEK_MS
+
   if (!list.length) {
     return {
       ok: true, empty: true, events: 0, days: 0, beliefs: 0, solid: 0,
       byType, tensions: [], stale: [], nearSolid: [], selfClaims: [], staleDays,
       tensionsTotal: 0,
+      // S-A（0.9.9）：还没记录那些数的字段照给 0，别让界面按 undefined 渲染。
+      guards: { rewrite: 0, secret: 0 }, revises: { week: 0, refined: 0, refuted: 0 }, flips: 0,
+      stock: { chat: { hit: 0, total: 0 }, comment: { hit: 0, total: 0 } },
+      speech: { total: 0, anchored: 0, openers: 0, quoteCards: 0 },
     }
   }
 
@@ -174,5 +305,13 @@ export function examine(events = [], { now = Date.now(), growthDays = 30, staleD
     selfClaims,
     staleDays,
     solidStaleDays: Number(model?.facts?.solidStaleDays ?? 0),
+    // S-A（0.9.9）：三个「本周」的数。只报数、不下结论，也不进她的 context。
+    guards: guardCounts(list, weekFrom),
+    revises: reviseStats(list, weekFrom),
+    flips: flipCount(list, weekFrom),
+    // g7（0.9.9）：两个通道的八股比例。只报数，不给建议、不打分。
+    stock: stockStats(list, weekFrom),
+    // 0.9.9 收尾（用户 m03900）：说话有没有落到具体东西上。同样只报数。
+    speech: speechStats(list, weekFrom),
   }
 }
